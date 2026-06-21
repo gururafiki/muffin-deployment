@@ -25,7 +25,7 @@ resource "terraform_data" "ansible" {
 
   provisioner "local-exec" {
     working_dir = "${path.module}/../ansible"
-    command     = "ansible-galaxy collection install cloud.terraform --upgrade >/dev/null && ansible-playbook -i inventory.yml muffin_stack.yml"
+    command     = "ansible-galaxy collection install cloud.terraform:4.0.0 >/dev/null && ansible-playbook -i inventory.yml muffin_stack.yml"
     environment = {
       ANSIBLE_HOST_KEY_CHECKING = "False"
     }
