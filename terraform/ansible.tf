@@ -1,33 +1,27 @@
-# Terraform → Ansible chaining: one `terraform apply` provisions the VM + Cloudflare AND configures
-# the Swarm + deploys the stack. Inventory is read dynamically from this Terraform state by Ansible's
-# cloud.terraform collection (no static inventory file / generate_inventory.sh).
+# Terraform → Ansible chaining, the native way: the ansible/ansible provider's `ansible_playbook`
+# resource runs the playbook during `terraform apply` (no terraform_data + local-exec, no static
+# inventory / generate_inventory.sh). `replayable = true` re-runs the idempotent playbook on every
+# apply, so a deploy — including rolling a new `:latest` image via `docker stack deploy
+# --resolve-image always` — is just `terraform apply` (no `-replace` needed).
+#
+# Single-node: the one instance is the Swarm manager. For a multi-node future, switch to
+# `ansible_host`/`ansible_group` + the cloud.terraform dynamic inventory and run the play per group.
 
 provider "ansible" {}
 
-# One inventory host per instance, with groups + connection vars (consumed by the
-# cloud.terraform.terraform_provider inventory plugin in ../ansible/inventory.yml).
-resource "ansible_host" "node" {
-  count  = var.node_count
-  name   = oci_core_instance.node[count.index].public_ip
-  groups = [count.index == 0 ? "manager" : "workers"]
-  variables = {
+resource "ansible_playbook" "muffin" {
+  name       = oci_core_instance.node[0].public_ip
+  playbook   = abspath("${path.module}/../ansible/muffin_stack.yml")
+  groups     = ["manager"]
+  replayable = true
+
+  extra_vars = {
     ansible_user                 = "ubuntu"
     ansible_ssh_private_key_file = pathexpand(var.ssh_private_key_path)
-    private_ip                   = oci_core_instance.node[count.index].private_ip
+    # disable host-key checking per-connection (no reliance on ansible.cfg discovery / env)
+    ansible_ssh_common_args = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    private_ip              = oci_core_instance.node[0].private_ip
   }
-}
 
-# Run the playbook inside `apply`, after the hosts (and DNS) exist. Re-runs (idempotent) when an
-# instance is replaced. A mid-run Ansible failure taints this resource; re-`apply` re-runs it.
-resource "terraform_data" "ansible" {
-  triggers_replace = [for n in oci_core_instance.node : n.id]
-  depends_on       = [ansible_host.node, cloudflare_dns_record.muffin]
-
-  provisioner "local-exec" {
-    working_dir = "${path.module}/../ansible"
-    command     = "ansible-galaxy collection install -r requirements.yml >/dev/null && ansible-playbook -i inventory.yml muffin_stack.yml"
-    environment = {
-      ANSIBLE_HOST_KEY_CHECKING = "False"
-    }
-  }
+  depends_on = [oci_core_instance.node, cloudflare_dns_record.muffin]
 }

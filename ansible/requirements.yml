@@ -1,9 +1,6 @@
 ---
-# Ansible collections required by muffin_stack.yml + roles. Pinned to the versions verified locally
-# (cloud.terraform 4.0.0's inventory plugin needs ansible-core < 2.19 — see deploy.yml).
+# Ansible collections required by muffin_stack.yml + roles (pinned to versions verified locally).
 collections:
-  - name: cloud.terraform
-    version: "4.0.0"
   - name: ansible.posix
     version: "1.6.2"
   - name: community.general
