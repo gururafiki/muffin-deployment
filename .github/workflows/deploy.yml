@@ -105,6 +105,9 @@ jobs:
           AWS_SECRET_ACCESS_KEY:             ${{ secrets.TFSTATE_S3_SECRET_ACCESS_KEY }}
           AWS_REQUEST_CHECKSUM_CALCULATION:  when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION:  when_required
+          # ansible.cfg sets stdout_callback=yaml (nice locally); force the built-in in CI so we
+          # don't depend on the community.general yaml callback being present. Inherited by local-exec.
+          ANSIBLE_STDOUT_CALLBACK:           default
           TF_VAR_tenancy_ocid:               ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_user_ocid:                  ${{ secrets.OCI_USER_OCID }}
           TF_VAR_fingerprint:                ${{ secrets.OCI_FINGERPRINT }}
