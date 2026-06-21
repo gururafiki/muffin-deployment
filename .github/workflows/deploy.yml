@@ -9,15 +9,19 @@ name: Deploy to Oracle Cloud
 #   OCI_TENANCY_OCID, OCI_USER_OCID, OCI_FINGERPRINT, OCI_COMPARTMENT_OCID,
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_ACCOUNT_ID,
 #   OPENROUTER_API_KEY, LANGSMITH_API_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, FMP_API_KEY,
-#   POSTGRES_PASSWORD, FIRECRAWL_POSTGRES_PASSWORD, SEARXNG_SECRET_KEY, REGISTRY_PASSWORD
+#   POSTGRES_PASSWORD, FIRECRAWL_POSTGRES_PASSWORD, SEARXNG_SECRET_KEY, REGISTRY_PASSWORD,
+#   TFSTATE_S3_ACCESS_KEY_ID, TFSTATE_S3_SECRET_ACCESS_KEY (OCI Object Storage S3 backend creds)
 # Required GitHub VARIABLES:
 #   OCI_REGION, DOMAIN, CHAT_SUBDOMAIN, API_SUBDOMAIN, ACME_EMAIL, ACCESS_EMAILS (JSON list),
 #   LLM_PROVIDER, ORCHESTRATOR_MODELS, COLLECTOR_MODELS, REASONER_MODELS, SUMMARISER_MODEL,
 #   LANGSMITH_PROJECT, REGISTRY_USERNAME
 #
-# PREREQUISITE: a REMOTE terraform state backend (terraform/backend.tf) so CI runs share state.
+# State is remote (terraform/backend.tf -> OCI Object Storage). Triggers: manual dispatch, and a
+# repository_dispatch(type: deploy) sent by the image repos when a new image is published (auto-CD).
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [deploy]
 
 jobs:
   deploy:
@@ -85,6 +89,11 @@ jobs:
           terraform init -input=false
           terraform apply -auto-approve -input=false
         env:
+          # OCI Object Storage S3 backend auth (+ disable AWS chunked-encoding, unsupported by OCI)
+          AWS_ACCESS_KEY_ID:                 ${{ secrets.TFSTATE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:             ${{ secrets.TFSTATE_S3_SECRET_ACCESS_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION:  when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION:  when_required
           TF_VAR_tenancy_ocid:               ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_user_ocid:                  ${{ secrets.OCI_USER_OCID }}
           TF_VAR_fingerprint:                ${{ secrets.OCI_FINGERPRINT }}

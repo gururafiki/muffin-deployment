@@ -41,3 +41,20 @@ the Access service-token id/secret.
 - ARM64: all referenced images have arm64 builds (the `*-docker` repos publish arm64).
 - Single node = no HA; back up the `langgraph-data` volume (`pg_dump`).
 - See `stack/docker-compose.yaml` for the full 14-service stack + memory budget.
+
+## Remote state (OCI Object Storage)
+
+Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend
+(`terraform/backend.tf`), so CI and local runs share one state. Auth is an **OCI Customer Secret Key**
+(separate from the OCI API key), supplied as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. OCI rejects
+AWS's chunked-upload encoding, so also export the checksum opt-outs. For **local** terraform:
+
+```bash
+export AWS_ACCESS_KEY_ID=<customer-secret-key-id>
+export AWS_SECRET_ACCESS_KEY=<customer-secret-key-secret>
+export AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+export AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+cd terraform && terraform init && terraform apply
+```
+
+In CI these come from the `TFSTATE_S3_ACCESS_KEY_ID` / `TFSTATE_S3_SECRET_ACCESS_KEY` GitHub secrets.
