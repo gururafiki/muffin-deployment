@@ -87,7 +87,10 @@ jobs:
         working-directory: terraform
         run: |
           terraform init -input=false
-          terraform apply -auto-approve -input=false
+          # -replace forces the Ansible run (terraform_data) every deploy so a new :latest image is
+          # rolled out (docker stack deploy --resolve-image always re-resolves the tag's digest);
+          # infra resources still show 0 changes when nothing else moved.
+          terraform apply -auto-approve -input=false -replace=terraform_data.ansible
         env:
           # OCI Object Storage S3 backend auth (+ disable AWS chunked-encoding, unsupported by OCI)
           AWS_ACCESS_KEY_ID:                 ${{ secrets.TFSTATE_S3_ACCESS_KEY_ID }}
