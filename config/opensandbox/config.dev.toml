@@ -1,0 +1,26 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+log_level = "INFO"
+
+[runtime]
+type = "docker"
+# execd_image = "opensandbox/execd:v1.0.6"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.6"
+
+[egress]
+image = "opensandbox/egress:v1.0.1"
+# image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.1"
+
+[docker]
+network_mode = "bridge"
+# Dev workflow: host-side `langgraph dev` reaches sandboxes via the loopback
+# ports opensandbox-server publishes. host.docker.internal does not resolve
+# on the macOS host, so containers use config.toml and host callers use this.
+host_ip = "127.0.0.1"
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+pids_limit = 512
+
+[ingress]
+mode = "direct"

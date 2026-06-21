@@ -1,0 +1,32 @@
+---
+- name: Replace /etc/ssh/sshd_config with secure pubkey-only configuration
+  copy:
+    dest: /etc/ssh/sshd_config
+    content: |
+      # SSHD Configuration - Secure for Pubkey Only
+      PermitRootLogin {{ permit_root_login }}
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      ChallengeResponseAuthentication no
+      UsePAM yes
+      X11Forwarding no
+      AllowTcpForwarding no
+      PermitEmptyPasswords no
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+    owner: root
+    group: root
+    mode: "0600"
+    backup: yes
+
+- name: Set authorized key for root user
+  ansible.posix.authorized_key:
+    user: root
+    state: present
+    key: "{{ authorized_key }}"
+  when: permit_root_login == "yes"
+
+- name: Restart SSH
+  service:
+    name: ssh
+    state: restarted

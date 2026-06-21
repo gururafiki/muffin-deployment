@@ -1,0 +1,44 @@
+name: Deploy to Oracle Cloud
+
+# One `terraform apply` provisions/updates the OCI VM + Cloudflare AND deploys the Swarm stack
+# (Terraform runs Ansible via the cloud.terraform integration — see terraform/ansible.tf).
+#
+# PREREQUISITE: a REMOTE Terraform state backend so CI runs share state (with local state, each run
+# starts empty and would create duplicate infra). Configure terraform/backend.tf (e.g. OCI Object
+# Storage S3-compatible, or Terraform Cloud) and migrate the existing state into it first.
+#
+# Required GitHub secrets:
+#   OCI_API_KEY         - OCI API signing private key (.pem contents)
+#   SSH_PRIVATE_KEY     - SSH private key (pair of ssh_public_key_path)
+#   MUFFIN_TFVARS       - terraform.tfvars (OCIDs/region/Cloudflare token+ids; point
+#                         private_key_path -> terraform/oci_api_key.pem, ssh_private_key_path -> ~/.ssh/oci_key)
+#   MUFFIN_CONFIG_YML   - stack/config.yml
+#   MUFFIN_SECRETS_YAML - stack/secrets.yaml
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Install Ansible + cloud.terraform
+        run: |
+          python3 -m pip install --upgrade ansible-core
+          ansible-galaxy collection install cloud.terraform
+      - name: Materialise secrets + keys
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.OCI_API_KEY }}"        > terraform/oci_api_key.pem && chmod 600 terraform/oci_api_key.pem
+          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}"    > ~/.ssh/oci_key && chmod 600 ~/.ssh/oci_key
+          printf '%s' "${{ secrets.MUFFIN_TFVARS }}"      > terraform/terraform.tfvars
+          printf '%s' "${{ secrets.MUFFIN_CONFIG_YML }}"  > stack/config.yml
+          printf '%s' "${{ secrets.MUFFIN_SECRETS_YAML }}" > stack/secrets.yaml
+      - name: Terraform apply (provisions + runs Ansible)
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false

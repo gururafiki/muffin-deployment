@@ -1,0 +1,43 @@
+# Development overlay for the host-side `langgraph dev` workflow.
+#
+# Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait
+#
+# The VSCode `Start Docker Infra` task does this automatically.
+#
+# Overrides (all reversed by omitting -f docker-compose.dev.yml):
+#
+#   opensandbox-server
+#     - Swap config.toml → config.dev.toml so sandboxes are advertised at
+#       127.0.0.1:PORT (reachable from the macOS host) instead of
+#       host.docker.internal:PORT (reachable only from inside containers).
+#
+#   openbb-mcp / firecrawl-mcp
+#     - Publish host ports so the host-side `langgraph dev` can reach the MCP
+#       servers. Production langgraph-api (in docker) reaches them over the
+#       muffin-net network and doesn't need host bindings.
+#     - firecrawl-mcp is remapped to host port 3100 to avoid colliding with
+#       agent-chat-ui on 3000; the container still listens on 3000 internally.
+#
+#   langgraph-api
+#     - Gated behind the `production` profile so plain `docker compose up`
+#       with this overlay does NOT start it (port 8123 must be free for the
+#       host-side `langgraph dev` process).
+#
+# See docs/debugging-locally.md for the full workflow.
+
+configs:
+  opensandbox-config:
+    file: extras/opensandbox/config.dev.toml
+
+services:
+  openbb-mcp:
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  firecrawl-mcp:
+    ports:
+      - "127.0.0.1:3100:3000"
+
+  langgraph-api:
+    profiles: ["production"]

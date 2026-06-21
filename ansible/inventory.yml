@@ -1,0 +1,5 @@
+---
+# Dynamic inventory: reads ansible_host resources from the Terraform state in ../terraform
+# (the cloud.terraform collection). No static inventory file / generate_inventory.sh.
+plugin: cloud.terraform.terraform_provider
+project_path: ../terraform

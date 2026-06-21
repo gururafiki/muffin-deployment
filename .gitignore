@@ -1,0 +1,12 @@
+terraform/*.tfvars
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/swarm.plan
+terraform/terraform.tfstate*
+terraform/terraform.tfstate.backup
+terraform/update_envs.sh
+terraform/hosts
+*secrets.yaml
+ansible/*inventory.ini
+ansible/apply_playbooks.sh
+*.env

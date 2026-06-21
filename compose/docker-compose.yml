@@ -1,0 +1,257 @@
+configs:
+  opensandbox-config:
+    file: extras/opensandbox/config.toml
+
+volumes:
+  langgraph-data:
+    driver: local
+
+services:
+  opensandbox-server:
+    image: opensandbox/server:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount Docker socket so opensandbox can spin up sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    configs:
+      - source: opensandbox-config
+        target: /etc/opensandbox/config.toml
+    environment:
+      # Set OPENSANDBOX_API_KEY in .env to enable authentication
+      SANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
+      SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - muffin-net
+
+  openbb-mcp:
+    build:
+      context: extras/openbb
+    restart: unless-stopped
+    env_file:
+      - extras/openbb/.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8001),2); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - muffin-net
+
+  langgraph-redis:
+    image: redis:6
+    restart: unless-stopped
+    healthcheck:
+      test: redis-cli ping
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    networks:
+      - muffin-net
+
+  langgraph-postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - langgraph-data:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -U postgres
+      start_period: 10s
+      timeout: 1s
+      retries: 5
+      interval: 5s
+    networks:
+      - muffin-net
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./extras/searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_SECRET_KEY: ${SEARXNG_SECRET_KEY:-changeme-set-in-env}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - muffin-net
+
+  firecrawl-redis:
+    image: redis:alpine
+    restart: unless-stopped
+    healthcheck:
+      test: redis-cli ping
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    networks:
+      - muffin-net
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - muffin-net
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      BLOCK_MEDIA: "true"
+    networks:
+      - muffin-net
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: pg_isready -U postgres
+      start_period: 10s
+      timeout: 1s
+      retries: 5
+      interval: 5s
+    networks:
+      - muffin-net
+
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl
+    restart: unless-stopped
+    command: node dist/src/harness.js --start-docker
+    ports:
+      - "3002:3002"
+    depends_on:
+      firecrawl-redis:
+        condition: service_healthy
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+      firecrawl-postgres:
+        condition: service_healthy
+    env_file:
+      - extras/firecrawl/.env
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3002"
+      ENV: local
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      USE_DB_AUTHENTICATION: "false"
+      SEARXNG_ENDPOINT: http://searxng:8080
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      NUM_WORKERS_PER_QUEUE: "8"
+      NUQ_DATABASE_URL: postgresql://postgres:postgres@firecrawl-postgres:5432/postgres
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/',r=>{process.exit(r.statusCode===200?0:1)})"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - muffin-net
+
+  firecrawl-mcp:
+    image: node:22-slim
+    restart: unless-stopped
+    command: sh -c "npx --yes firecrawl-mcp"
+    environment:
+      HTTP_STREAMABLE_SERVER: "true"
+      HOST: 0.0.0.0
+      PORT: "3000"
+      FIRECRAWL_API_URL: http://firecrawl-api:3002
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-local}
+    depends_on:
+      firecrawl-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').request({host:'localhost',port:3000,path:'/mcp',method:'POST'},r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1)).end()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - muffin-net
+
+  langgraph-api:
+    image: ${IMAGE_NAME:-muffin-agent:latest}
+    restart: unless-stopped
+    ports:
+      - "8123:8000"
+    depends_on:
+      openbb-mcp:
+        condition: service_healthy
+      langgraph-redis:
+        condition: service_healthy
+      langgraph-postgres:
+        condition: service_healthy
+      opensandbox-server:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+      firecrawl-api:
+        condition: service_healthy
+      firecrawl-mcp:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      REDIS_URI: redis://langgraph-redis:6379
+      DATABASE_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
+      OPENBB_MCP_URL: http://openbb-mcp:8001/mcp
+      OPENSANDBOX_URL: opensandbox-server:8080
+      FIRECRAWL_MCP_URL: http://firecrawl-mcp:3000/mcp
+      # Debug-only: collapses all anonymous traffic onto a single
+      # /memories/ namespace so agent-chat-ui (which does not yet
+      # populate configurable.user_id) can exercise persistent memory.
+      # Leave unset in multi-user deployments.
+      MEMORY_DEBUG_USER_ID: ${MEMORY_DEBUG_USER_ID:-}
+    networks:
+      - muffin-net
+
+  agent-chat-ui:
+    build:
+      context: extras/agent-chat-ui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    # No depends_on — the UI's NEXT_PUBLIC_API_URL is baked at build time, so the
+    # browser talks to whatever is listening on localhost:8123. It tolerates the
+    # backend coming up later (prod langgraph-api in docker, or host-side
+    # `langgraph dev` via docker-compose.dev.yml). Stripping depends_on from an
+    # overlay isn't supported in Compose v2.13, so we keep it omitted here.
+    networks:
+      - muffin-net
+
+
+networks:
+  muffin-net:
+    driver: bridge

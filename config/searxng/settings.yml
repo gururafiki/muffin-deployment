@@ -1,0 +1,17 @@
+use_default_settings: true
+
+search:
+  # Enable JSON format so the web_search tool can consume machine-readable results.
+  # HTML is kept for the optional SearxNG web UI (accessible at :8888 when deployed).
+  formats:
+    - html
+    - json
+
+server:
+  # Disable the rate-limiter — this is a private, internal instance.
+  limiter: false
+  # Secret key is injected at runtime via the SEARXNG_SECRET_KEY environment variable.
+  # The variable is read by the container entrypoint and written into the running config.
+  # Override in .env or docker-compose.yml environment section.
+  secret_key: "${SEARXNG_SECRET_KEY}"
+  image_proxy: false
