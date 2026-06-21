@@ -38,8 +38,9 @@ jobs:
       - name: Materialise keys
         run: |
           mkdir -p ~/.ssh
-          printf '%s' "${{ secrets.OCI_API_KEY }}"     > terraform/oci_api_key.pem && chmod 600 terraform/oci_api_key.pem
-          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/oci_key && chmod 600 ~/.ssh/oci_key
+          # trailing newline is required or ssh-keygen/openssl reject the key ("error in libcrypto")
+          printf '%s\n' "${{ secrets.OCI_API_KEY }}"     > terraform/oci_api_key.pem && chmod 600 terraform/oci_api_key.pem
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/oci_key && chmod 600 ~/.ssh/oci_key
           ssh-keygen -y -f ~/.ssh/oci_key > ~/.ssh/oci_key.pub
       - name: Generate stack/config.yml (non-secret)
         run: |
