@@ -31,12 +31,17 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Install Ansible + cloud.terraform
         run: |
           # pin to the known-good combo: cloud.terraform 4.0.0's inventory plugin calls
-          # get_bin_path(required=...), removed in ansible-core 2.19 -> keep ansible-core < 2.19
+          # get_bin_path(required=...), removed in ansible-core 2.19 -> keep ansible-core < 2.19.
+          # setup-python puts THIS ansible on PATH (the runner's pre-installed one is newer).
           python3 -m pip install 'ansible-core>=2.18,<2.19'
           ansible-galaxy collection install cloud.terraform:4.0.0
+          echo "using $(command -v ansible-playbook)"; ansible --version | head -1
       - name: Materialise keys
         run: |
           mkdir -p ~/.ssh
