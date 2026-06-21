@@ -262,9 +262,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ubuntu/config.toml:/etc/opensandbox/config.toml:ro
-    extra_hosts:
-      # Linux host: make host.docker.internal (used in config.toml) resolvable
-      - "host.docker.internal:host-gateway"
+    # config.toml sets [docker].host_ip = docker_gwbridge gateway so the server reaches sandbox
+    # published ports; host.docker.internal/host-gateway is NOT resolved under `docker stack deploy`.
     environment:
       SANDBOX_API_KEY: "{{ opensandbox_api_key | default('') }}"
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
