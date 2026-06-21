@@ -1,19 +1,21 @@
 name: Deploy to Oracle Cloud
 
 # One `terraform apply` provisions/updates the OCI VM + Cloudflare AND deploys the Swarm stack
-# (Terraform runs Ansible via the cloud.terraform integration — see terraform/ansible.tf).
+# (Terraform runs Ansible via cloud.terraform — see terraform/ansible.tf). Generates config.yml /
+# secrets.yaml / the secret tfvars from INDIVIDUAL GitHub secrets + variables (no blob secrets).
 #
-# PREREQUISITE: a REMOTE Terraform state backend so CI runs share state (with local state, each run
-# starts empty and would create duplicate infra). Configure terraform/backend.tf (e.g. OCI Object
-# Storage S3-compatible, or Terraform Cloud) and migrate the existing state into it first.
+# Required GitHub SECRETS:
+#   OCI_API_KEY, SSH_PRIVATE_KEY,
+#   OCI_TENANCY_OCID, OCI_USER_OCID, OCI_FINGERPRINT, OCI_COMPARTMENT_OCID,
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_ACCOUNT_ID,
+#   OPENROUTER_API_KEY, LANGSMITH_API_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, FMP_API_KEY,
+#   POSTGRES_PASSWORD, FIRECRAWL_POSTGRES_PASSWORD, SEARXNG_SECRET_KEY, REGISTRY_PASSWORD
+# Required GitHub VARIABLES:
+#   OCI_REGION, DOMAIN, CHAT_SUBDOMAIN, API_SUBDOMAIN, ACME_EMAIL, ACCESS_EMAILS (JSON list),
+#   LLM_PROVIDER, ORCHESTRATOR_MODELS, COLLECTOR_MODELS, REASONER_MODELS, SUMMARISER_MODEL,
+#   LANGSMITH_PROJECT, REGISTRY_USERNAME
 #
-# Required GitHub secrets:
-#   OCI_API_KEY         - OCI API signing private key (.pem contents)
-#   SSH_PRIVATE_KEY     - SSH private key (pair of ssh_public_key_path)
-#   MUFFIN_TFVARS       - terraform.tfvars (OCIDs/region/Cloudflare token+ids; point
-#                         private_key_path -> terraform/oci_api_key.pem, ssh_private_key_path -> ~/.ssh/oci_key)
-#   MUFFIN_CONFIG_YML   - stack/config.yml
-#   MUFFIN_SECRETS_YAML - stack/secrets.yaml
+# PREREQUISITE: a REMOTE terraform state backend (terraform/backend.tf) so CI runs share state.
 on:
   workflow_dispatch:
 
@@ -29,16 +31,72 @@ jobs:
         run: |
           python3 -m pip install --upgrade ansible-core
           ansible-galaxy collection install cloud.terraform
-      - name: Materialise secrets + keys
+      - name: Materialise keys
         run: |
           mkdir -p ~/.ssh
-          printf '%s' "${{ secrets.OCI_API_KEY }}"        > terraform/oci_api_key.pem && chmod 600 terraform/oci_api_key.pem
-          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}"    > ~/.ssh/oci_key && chmod 600 ~/.ssh/oci_key
-          printf '%s' "${{ secrets.MUFFIN_TFVARS }}"      > terraform/terraform.tfvars
-          printf '%s' "${{ secrets.MUFFIN_CONFIG_YML }}"  > stack/config.yml
-          printf '%s' "${{ secrets.MUFFIN_SECRETS_YAML }}" > stack/secrets.yaml
+          printf '%s' "${{ secrets.OCI_API_KEY }}"     > terraform/oci_api_key.pem && chmod 600 terraform/oci_api_key.pem
+          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/oci_key && chmod 600 ~/.ssh/oci_key
+          ssh-keygen -y -f ~/.ssh/oci_key > ~/.ssh/oci_key.pub
+      - name: Generate stack/config.yml (non-secret)
+        run: |
+          cat > stack/config.yml <<EOF
+          domain: "${{ vars.DOMAIN }}"
+          chat_subdomain: "${{ vars.CHAT_SUBDOMAIN }}"
+          api_subdomain: "${{ vars.API_SUBDOMAIN }}"
+          acme_email: "${{ vars.ACME_EMAIL }}"
+          image_agent: "ghcr.io/${{ github.repository_owner }}/muffin-agent:latest"
+          image_openbb: "ghcr.io/${{ github.repository_owner }}/openbb-mcp-docker:latest"
+          image_ui: "ghcr.io/${{ github.repository_owner }}/agent-chat-ui-docker:latest"
+          image_nuq_postgres: "ghcr.io/${{ github.repository_owner }}/nuq-postgres-docker:latest"
+          registry_server: "ghcr.io"
+          registry_username: "${{ vars.REGISTRY_USERNAME }}"
+          llm_provider: "${{ vars.LLM_PROVIDER }}"
+          openai_site_url: "https://openrouter.ai/api/v1"
+          orchestrator_models: "${{ vars.ORCHESTRATOR_MODELS }}"
+          collector_models: "${{ vars.COLLECTOR_MODELS }}"
+          reasoner_models: "${{ vars.REASONER_MODELS }}"
+          summariser_model: "${{ vars.SUMMARISER_MODEL }}"
+          llm_sdk_retries: 6
+          temperature: 0.1
+          langsmith_tracing: "true"
+          langsmith_endpoint: "https://api.smith.langchain.com"
+          langsmith_project: "${{ vars.LANGSMITH_PROJECT }}"
+          langfuse_base_url: "https://cloud.langfuse.com"
+          firecrawl_api_key: "local"
+          memory_debug_user_id: "shared"
+          EOF
+      - name: Generate stack/secrets.yaml (secrets)
+        run: |
+          cat > stack/secrets.yaml <<EOF
+          openrouter_api_key: "${{ secrets.OPENROUTER_API_KEY }}"
+          langsmith_api_key: "${{ secrets.LANGSMITH_API_KEY }}"
+          langfuse_secret_key: "${{ secrets.LANGFUSE_SECRET_KEY }}"
+          langfuse_public_key: "${{ secrets.LANGFUSE_PUBLIC_KEY }}"
+          fmp_api_key: "${{ secrets.FMP_API_KEY }}"
+          postgres_password: "${{ secrets.POSTGRES_PASSWORD }}"
+          firecrawl_postgres_password: "${{ secrets.FIRECRAWL_POSTGRES_PASSWORD }}"
+          searxng_secret_key: "${{ secrets.SEARXNG_SECRET_KEY }}"
+          cf_dns_api_token: "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+          registry_password: "${{ secrets.REGISTRY_PASSWORD }}"
+          EOF
       - name: Terraform apply (provisions + runs Ansible)
         working-directory: terraform
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false
+        env:
+          TF_VAR_tenancy_ocid:               ${{ secrets.OCI_TENANCY_OCID }}
+          TF_VAR_user_ocid:                  ${{ secrets.OCI_USER_OCID }}
+          TF_VAR_fingerprint:                ${{ secrets.OCI_FINGERPRINT }}
+          TF_VAR_compartment_ocid:           ${{ secrets.OCI_COMPARTMENT_OCID }}
+          TF_VAR_region:                     ${{ vars.OCI_REGION }}
+          TF_VAR_private_key_path:           ${{ github.workspace }}/terraform/oci_api_key.pem
+          TF_VAR_ssh_public_key_path:        /home/runner/.ssh/oci_key.pub
+          TF_VAR_ssh_private_key_path:       /home/runner/.ssh/oci_key
+          TF_VAR_cloudflare_api_token:       ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_zone_id:         ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_cloudflare_account_id:      ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_cloudflare_domain:          ${{ vars.DOMAIN }}
+          TF_VAR_cloudflare_chat_subdomain:  ${{ vars.CHAT_SUBDOMAIN }}
+          TF_VAR_cloudflare_api_subdomain:   ${{ vars.API_SUBDOMAIN }}
+          TF_VAR_cloudflare_access_emails:   ${{ vars.ACCESS_EMAILS }}
