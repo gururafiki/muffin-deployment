@@ -104,10 +104,16 @@ variable "cloudflare_account_id" {
   default     = ""
 }
 
-variable "cloudflare_chat_subdomain" {
-  description = "Subdomain for the chat UI."
+variable "cloudflare_app_subdomain" {
+  description = "Subdomain for the Muffin app (Expo/React Native web client)."
   type        = string
-  default     = "chat"
+  default     = "muffin"
+}
+
+variable "cloudflare_chat_subdomain" {
+  description = "Subdomain for the legacy agent-chat-ui."
+  type        = string
+  default     = "muffin-chat"
 }
 
 variable "cloudflare_api_subdomain" {

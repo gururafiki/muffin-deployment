@@ -135,9 +135,11 @@ services:
         - "traefik.http.routers.api.entrypoints=websecure"
         - "traefik.http.routers.api.tls.certresolver=cloudflare"
         - "traefik.http.services.api.loadbalancer.server.port=8000"
-        # CORS so the browser chat UI (different subdomain) can call the API
+        # CORS so the browser UIs (different subdomains) can call the API.
+        # Web traffic is normally same-origin (each UI proxies /api), but native
+        # app builds call the API directly, so allow both UI origins.
         - "traefik.http.routers.api.middlewares=api-cors"
-        - "traefik.http.middlewares.api-cors.headers.accessControlAllowOriginList=https://{{ chat_subdomain | default('chat') }}.{{ domain }}"
+        - "traefik.http.middlewares.api-cors.headers.accessControlAllowOriginList=https://{{ chat_subdomain | default('muffin-chat') }}.{{ domain }},https://{{ app_subdomain | default('muffin') }}.{{ domain }}"
         - "traefik.http.middlewares.api-cors.headers.accessControlAllowMethods=GET,POST,PUT,PATCH,DELETE,OPTIONS"
         - "traefik.http.middlewares.api-cors.headers.accessControlAllowHeaders=*"
         - "traefik.http.middlewares.api-cors.headers.accessControlAllowCredentials=true"
@@ -162,10 +164,32 @@ services:
       labels:
         - "traefik.enable=true"
         - "traefik.swarm.network=muffin-net"
-        - "traefik.http.routers.chat.rule=Host(`{{ chat_subdomain | default('chat') }}.{{ domain }}`)"
+        - "traefik.http.routers.chat.rule=Host(`{{ chat_subdomain | default('muffin-chat') }}.{{ domain }}`)"
         - "traefik.http.routers.chat.entrypoints=websecure"
         - "traefik.http.routers.chat.tls.certresolver=cloudflare"
         - "traefik.http.services.chat.loadbalancer.server.port=3000"
+
+  # --- Muffin app (EXPOSED via Traefik: muffin.<domain>) ------------------
+  # New Expo/React Native web client. Static SPA served by nginx, which also
+  # reverse-proxies /api → langgraph-api (same-origin, like the chat UI).
+  muffin-ui:
+    image: {{ image_app }}
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 256M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=muffin-net"
+        - "traefik.http.routers.app.rule=Host(`{{ app_subdomain | default('muffin') }}.{{ domain }}`)"
+        - "traefik.http.routers.app.entrypoints=websecure"
+        - "traefik.http.routers.app.tls.certresolver=cloudflare"
+        - "traefik.http.services.app.loadbalancer.server.port=80"
 
   # --- LangGraph state + streaming (internal) -----------------------------
   langgraph-postgres:

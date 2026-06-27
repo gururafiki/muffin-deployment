@@ -36,10 +36,11 @@ public_udp_ports = []
 
 # === Cloudflare (terraform/cloudflare.tf) ===
 # Leave cloudflare_domain = "" to skip all Cloudflare resources (OCI-only deploy).
-# When set, Terraform creates proxied DNS A records <chat>/<api>.<domain> → the VM,
+# When set, Terraform creates proxied DNS A records <app>/<chat>/<api>.<domain> → the VM,
 # plus Zero-Trust Access apps/policies + a service token.
 cloudflare_domain         = "example.com"
-cloudflare_chat_subdomain = "chat"
+cloudflare_app_subdomain  = "muffin"
+cloudflare_chat_subdomain = "muffin-chat"
 cloudflare_api_subdomain  = "api"
 cloudflare_access_emails  = ["you@example.com"] # allowed to pass Cloudflare Access
 # Zone ID + Account ID are on the Cloudflare zone Overview page (right sidebar → API).

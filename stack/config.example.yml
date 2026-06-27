@@ -6,8 +6,9 @@
 # API keys / passwords / tokens live in secrets.yaml.
 
 # === Public DNS / TLS ===
-domain: "example.com"           # served at https://<chat_subdomain>.<domain> and https://<api_subdomain>.<domain>
-chat_subdomain: "chat"
+domain: "example.com"           # served at https://<app_subdomain>.<domain>, https://<chat_subdomain>.<domain> and https://<api_subdomain>.<domain>
+app_subdomain: "muffin"         # new Expo/React Native web client
+chat_subdomain: "muffin-chat"   # legacy agent-chat-ui (kept alongside the new app)
 api_subdomain: "api"
 acme_email: "you@example.com"   # Let's Encrypt account email (cert-expiry notices)
 
@@ -15,6 +16,7 @@ acme_email: "you@example.com"   # Let's Encrypt account email (cert-expiry notic
 image_agent: "ghcr.io/gururafiki/muffin-agent:latest"
 image_openbb: "ghcr.io/gururafiki/openbb-mcp-docker:latest"
 image_ui: "ghcr.io/gururafiki/agent-chat-ui-docker:latest"
+image_app: "ghcr.io/gururafiki/muffin-ui:latest"
 image_nuq_postgres: "ghcr.io/gururafiki/nuq-postgres-docker:latest"
 
 # === Container registry login (so the node can pull the private GHCR packages) ===

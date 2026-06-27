@@ -1,8 +1,9 @@
 # Cloudflare resources for the Muffin deployment (provider v5).
 #
 # Gated on var.cloudflare_domain — leave it "" and nothing here is created (OCI-only deploy).
-# When set, this creates: proxied DNS A records for <chat>/<api>.<domain> → the VM, a Zero-Trust
-# Access application per hostname, an allow-by-email policy, and a service token for API clients.
+# When set, this creates: proxied DNS A records for <app>/<chat>/<api>.<domain> → the VM, a
+# Zero-Trust Access application per hostname, an allow-by-email policy, and a service token for
+# API clients.
 #
 # NOTE: Cloudflare's SSL/TLS mode must be "Full (strict)" for the proxied origin (Traefik serves a
 # real Let's Encrypt cert via DNS-01). Set it once in the dashboard (SSL/TLS → Overview) — it is
@@ -11,6 +12,7 @@
 locals {
   cf_enabled = var.cloudflare_domain != ""
   cf_hostnames = local.cf_enabled ? {
+    app  = "${var.cloudflare_app_subdomain}.${var.cloudflare_domain}"
     chat = "${var.cloudflare_chat_subdomain}.${var.cloudflare_domain}"
     api  = "${var.cloudflare_api_subdomain}.${var.cloudflare_domain}"
   } : {}
