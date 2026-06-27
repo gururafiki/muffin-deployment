@@ -101,6 +101,9 @@ services:
       SUMMARISER_MODEL: "{{ summariser_model | default('') }}"
       LLM_SDK_RETRIES: "{{ llm_sdk_retries | default(6) }}"
       TEMPERATURE: "{{ temperature | default(0.1) }}"
+      # Global cap on LLM req/s shared by all chat models — keeps the 13-persona council
+      # under OpenRouter's free 20/min cap. Blank = no limit. See config.yml.
+      LLM_REQUESTS_PER_SECOND: "{{ llm_requests_per_second | default('') }}"
       LANGSMITH_TRACING: "{{ langsmith_tracing | default('false') }}"
       LANGSMITH_ENDPOINT: "{{ langsmith_endpoint | default('https://api.smith.langchain.com') }}"
       LANGSMITH_PROJECT: "{{ langsmith_project | default('muffin') }}"

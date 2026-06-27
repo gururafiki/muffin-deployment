@@ -70,6 +70,7 @@ jobs:
           summariser_model: "${{ vars.SUMMARISER_MODEL }}"
           llm_sdk_retries: 6
           temperature: 0.1
+          llm_requests_per_second: "${{ vars.LLM_REQUESTS_PER_SECOND }}"
           langsmith_tracing: "true"
           langsmith_endpoint: "https://api.smith.langchain.com"
           langsmith_project: "${{ vars.LANGSMITH_PROJECT }}"

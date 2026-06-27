@@ -30,6 +30,11 @@ reasoner_models: "anthropic/claude-sonnet-4-6"
 summariser_model: "anthropic/claude-haiku-4-5"
 llm_sdk_retries: 6
 temperature: 0.1
+# Global cap on LLM requests/second shared across all chat models. Set for OpenRouter FREE
+# models so the 13-persona council stays under the 20 req/min free cap (0.3 = 18/min). Leave
+# blank/remove for paid models (no limit). Note: free models also have a daily cap (50/day, or
+# 1000/day with $10 OpenRouter credits) — one council run is ~50 calls.
+llm_requests_per_second: 0.3
 
 # === Observability (non-secret bits; keys are in secrets.yaml) ===
 langsmith_tracing: "true"
