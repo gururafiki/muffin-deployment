@@ -24,6 +24,13 @@ on:
   repository_dispatch:
     types: [deploy]
 
+# Serialise deploys: several image repos can fire `deploy` at once, and parallel `terraform apply`
+# runs collide on the shared OCI Object Storage remote state (S3-compat locking is unreliable).
+# Queue them instead of cancelling — every image change should land.
+concurrency:
+  group: deploy-oracle
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
