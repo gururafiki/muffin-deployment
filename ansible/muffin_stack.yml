@@ -17,6 +17,29 @@
 - hosts: all
   become: true
   gather_facts: true
+  # Free disk before anything touches apt: old :latest image layers and logs
+  # can fill the Always-Free boot volume and brick the whole run
+  # ("No space left on device" from apt).
+  pre_tasks:
+    - name: Clear the apt package cache
+      command: apt-get clean
+      changed_when: true
+
+    - name: Vacuum systemd journal down to 200M
+      command: journalctl --vacuum-size=200M
+      changed_when: true
+      failed_when: false
+
+    - name: Check whether Docker is installed yet
+      command: which docker
+      register: docker_bin
+      changed_when: false
+      failed_when: false
+
+    - name: Prune unused Docker data (images, stopped containers, build cache — never volumes)
+      command: docker system prune -af
+      when: docker_bin.rc == 0
+      changed_when: true
   roles:
     - oci-swarm-node
   vars:

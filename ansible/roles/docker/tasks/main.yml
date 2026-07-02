@@ -26,6 +26,20 @@
     name: docker-ce
     state: present
 
+- name: Rotate container logs so they cannot fill the boot volume
+  copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+    mode: "0644"
+  notify: Restart Docker
+
 - name: Add user to docker group
   user:
     name: ubuntu
