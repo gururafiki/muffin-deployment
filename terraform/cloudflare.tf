@@ -11,10 +11,18 @@
 
 locals {
   cf_enabled = var.cloudflare_domain != ""
+  # Hostnames gated by a Zero-Trust Access application (interactive login).
   cf_hostnames = local.cf_enabled ? {
-    app  = "${var.cloudflare_app_subdomain}.${var.cloudflare_domain}"
-    chat = "${var.cloudflare_chat_subdomain}.${var.cloudflare_domain}"
-    api  = "${var.cloudflare_api_subdomain}.${var.cloudflare_domain}"
+    app    = "${var.cloudflare_app_subdomain}.${var.cloudflare_domain}"
+    chat   = "${var.cloudflare_chat_subdomain}.${var.cloudflare_domain}"
+    api    = "${var.cloudflare_api_subdomain}.${var.cloudflare_domain}"
+    studio = "${var.cloudflare_studio_subdomain}.${var.cloudflare_domain}"
+  } : {}
+  # Hostnames that stay PUBLIC (no Access app): the Supabase API gateway must be
+  # reachable by browsers/native apps directly — it is protected by its own
+  # anon-key + JWT + RLS layers (standard Supabase exposure).
+  cf_public_hostnames = local.cf_enabled ? {
+    supabase = "${var.cloudflare_supabase_subdomain}.${var.cloudflare_domain}"
   } : {}
   # Service token needs the "Access: Service Tokens: Edit" permission on the API token. Off by
   # default so a DNS+Access-only token works; enable for programmatic API access.
@@ -23,7 +31,7 @@ locals {
 
 # Proxied A records → the Swarm manager VM (node 0).
 resource "cloudflare_dns_record" "muffin" {
-  for_each = local.cf_hostnames
+  for_each = merge(local.cf_hostnames, local.cf_public_hostnames)
   zone_id  = var.cloudflare_zone_id
   name     = each.value
   type     = "A"
@@ -79,7 +87,7 @@ resource "cloudflare_zero_trust_access_service_token" "muffin_api" {
 }
 
 output "cloudflare_hostnames" {
-  value = values(local.cf_hostnames)
+  value = concat(values(local.cf_hostnames), values(local.cf_public_hostnames))
 }
 
 output "cloudflare_access_service_token_client_id" {

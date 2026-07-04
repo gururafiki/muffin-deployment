@@ -10,7 +10,15 @@ domain: "example.com"           # served at https://<app_subdomain>.<domain>, ht
 app_subdomain: "muffin"         # new Expo/React Native web client
 chat_subdomain: "muffin-chat"   # legacy agent-chat-ui (kept alongside the new app)
 api_subdomain: "api"
+supabase_subdomain: "supabase"        # Supabase API gateway (Kong; public — anon key + RLS)
+studio_subdomain: "supabase-studio"   # Supabase Studio (admin; behind Cloudflare Access)
 acme_email: "you@example.com"   # Let's Encrypt account email (cert-expiry notices)
+
+# === Supabase / LangGraph DB cutover ===
+# false: langgraph-api keeps using langgraph-postgres (pre-M8 layout).
+# true:  langgraph-api uses the dedicated `langgraph` database inside supabase-db.
+# Flip to true ONLY after migrating the data — see README "Supabase cutover" runbook.
+use_supabase_db: false
 
 # === Container images (GHCR; pulled by the node) ===
 image_agent: "ghcr.io/gururafiki/muffin-agent:latest"

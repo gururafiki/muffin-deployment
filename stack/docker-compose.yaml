@@ -28,6 +28,9 @@ volumes:
   langgraph-data:
   firecrawl-postgres-data:
   traefik-acme:
+  supabase-db-data:
+  supabase-db-config:
+  supabase-storage-data:
 
 networks:
   muffin-net:
@@ -81,7 +84,13 @@ services:
     environment:
       # --- wiring (internal service URLs) ---
       REDIS_URI: redis://langgraph-redis:6379
-      DATABASE_URI: postgres://postgres:{{ postgres_password }}@langgraph-postgres:5432/postgres?sslmode=disable
+      # LangGraph checkpointer/store DB. Flip use_supabase_db in config.yml to cut over to
+      # the dedicated `langgraph` database inside the Supabase Postgres (see README runbook);
+      # langgraph-postgres stays deployed until the cutover is verified.
+      DATABASE_URI: "{{ 'postgres://postgres:' ~ supabase_db_password ~ '@supabase-db:5432/langgraph?sslmode=disable' if use_supabase_db | default(false) else 'postgres://postgres:' ~ postgres_password ~ '@langgraph-postgres:5432/postgres?sslmode=disable' }}"
+      # Supabase JWT verification (auth.py mode 4): user Bearer tokens minted by GoTrue.
+      SUPABASE_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
+      SUPABASE_JWT_SECRET: "{{ supabase_jwt_secret | default('') }}"
       OPENBB_MCP_URL: http://openbb-mcp:8001/mcp
       OPENSANDBOX_URL: opensandbox-server:8080
       FIRECRAWL_MCP_URL: http://firecrawl-mcp:3000/mcp
@@ -236,6 +245,348 @@ services:
       resources:
         limits:
           memory: 256M
+
+  # --- Supabase (slim self-host: auth + REST + admin) ----------------------
+  # User accounts (GoTrue), RLS'd app tables via PostgREST, and the LangGraph
+  # checkpointer DB (dedicated `langgraph` database — see use_supabase_db).
+  # Deliberately NOT deployed: realtime, storage, edge-functions, analytics
+  # (heavy, unused in M8). Kong is the public API gateway (supabase.<domain>);
+  # Studio is admin-only behind Cloudflare Access (supabase-studio.<domain>).
+  supabase-db:
+    image: supabase/postgres:17.6.1.136
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: "5432"
+      POSTGRES_PORT: "5432"
+      PGPASSWORD: "{{ supabase_db_password }}"
+      POSTGRES_PASSWORD: "{{ supabase_db_password }}"
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      JWT_SECRET: "{{ supabase_jwt_secret }}"
+      JWT_EXP: "3600"
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_min_messages=fatal
+    volumes:
+      # Init scripts run on FIRST boot only (empty volume); staged by Ansible from
+      # stack/supabase/db/ (upstream supabase/docker/volumes/db, verbatim).
+      - /home/ubuntu/supabase/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql
+      - /home/ubuntu/supabase/db/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql
+      - /home/ubuntu/supabase/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql
+      - /home/ubuntu/supabase/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql
+      - supabase-db-data:/var/lib/postgresql/data
+      - supabase-db-config:/etc/postgresql-custom
+    networks:
+      - muffin-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 1536M
+
+  supabase-auth:
+    image: supabase/gotrue:v2.189.0
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:{{ supabase_db_password }}@supabase-db:5432/postgres
+      GOTRUE_SITE_URL: "https://{{ app_subdomain | default('muffin') }}.{{ domain }}"
+      GOTRUE_URI_ALLOW_LIST: "https://{{ app_subdomain | default('muffin') }}.{{ domain }}/*"
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      GOTRUE_JWT_ISSUER: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}/auth/v1"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      # SMTP is optional (secrets.yaml). Unset -> signups auto-confirm and password
+      # recovery is unavailable. Set -> real confirmation/recovery e-mails.
+      # Works with Cloudflare Email Service SMTP (smtp.mx.cloudflare.net:465,
+      # user "api_token", password = CF API token) or any provider — see README.
+      GOTRUE_MAILER_AUTOCONFIRM: "{{ 'false' if supabase_smtp_host | default('') else 'true' }}"
+      GOTRUE_SMTP_HOST: "{{ supabase_smtp_host | default('') }}"
+      GOTRUE_SMTP_PORT: "{{ supabase_smtp_port | default('465') }}"
+      GOTRUE_SMTP_USER: "{{ supabase_smtp_user | default('') }}"
+      GOTRUE_SMTP_PASS: "{{ supabase_smtp_pass | default('') }}"
+      GOTRUE_SMTP_ADMIN_EMAIL: "{{ supabase_smtp_admin_email | default('no-reply@' ~ domain) }}"
+      GOTRUE_SMTP_SENDER_NAME: "{{ supabase_smtp_sender_name | default('Muffin') }}"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_SMS_AUTOCONFIRM: "false"
+    networks:
+      - muffin-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+
+  supabase-rest:
+    image: postgrest/postgrest:v14.12
+    environment:
+      PGRST_DB_URI: postgres://authenticator:{{ supabase_db_password }}@supabase-db:5432/postgres
+      PGRST_DB_SCHEMAS: public,graphql_public
+      PGRST_DB_MAX_ROWS: "1000"
+      PGRST_DB_EXTRA_SEARCH_PATH: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      PGRST_APP_SETTINGS_JWT_EXP: "3600"
+    command: ["postgrest"]
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+
+  # Live DB-change subscriptions (websockets). The dotted network alias is
+  # load-bearing: Realtime derives its tenant id ("realtime-dev") from the
+  # hostname Kong proxies to, matching the SEED_SELF_HOST-seeded tenant.
+  supabase-realtime:
+    image: supabase/realtime:v2.102.3
+    environment:
+      PORT: "4000"
+      DB_HOST: supabase-db
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: "{{ supabase_db_password }}"
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: "{{ supabase_realtime_db_enc_key }}"   # exactly 16 chars (official requirement)
+      API_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      SECRET_KEY_BASE: "{{ supabase_secret_key_base }}"
+      METRICS_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"
+    networks:
+      muffin-net:
+        aliases:
+          - realtime-dev.supabase-realtime
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+
+  # S3-like file storage with RLS policies (avatars, exports); files live on the
+  # node in the supabase-storage-data volume. imgproxy adds image transforms.
+  supabase-storage:
+    image: supabase/storage-api:v1.60.4
+    environment:
+      ANON_KEY: "{{ supabase_anon_key }}"
+      SERVICE_KEY: "{{ supabase_service_role_key }}"
+      POSTGREST_URL: http://supabase-rest:3000
+      AUTH_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      DATABASE_URL: postgres://supabase_storage_admin:{{ supabase_db_password }}@supabase-db:5432/postgres
+      STORAGE_PUBLIC_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
+      REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+      FILE_SIZE_LIMIT: "52428800"
+      STORAGE_BACKEND: file
+      GLOBAL_S3_BUCKET: stub
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://supabase-imgproxy:5001
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+
+  supabase-imgproxy:
+    image: darthsim/imgproxy:v3.30.1
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_AUTO_WEBP: "true"
+      IMGPROXY_MAX_SRC_RESOLUTION: "16.8"
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+
+  # Deno serverless functions at /functions/v1/<name>; function sources are
+  # staged by Ansible to /home/ubuntu/supabase/functions (main/ is the router).
+  supabase-functions:
+    image: supabase/edge-runtime:v1.74.0
+    environment:
+      JWT_SECRET: "{{ supabase_jwt_secret }}"
+      SUPABASE_URL: http://supabase-kong:8000
+      SUPABASE_PUBLIC_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
+      SUPABASE_ANON_KEY: "{{ supabase_anon_key }}"
+      SUPABASE_SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
+      SUPABASE_DB_URL: postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres
+      VERIFY_JWT: "true"
+    volumes:
+      - /home/ubuntu/supabase/functions:/home/deno/functions
+    command: ["start", "--main-service", "/home/deno/functions/main"]
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+
+  # Public gateway (EXPOSED via Traefik: supabase.<domain>) — key-auth (anon /
+  # service_role) + CORS in front of GoTrue and PostgREST. Config rendered by
+  # Ansible from stack/supabase/kong.yml (no runtime env substitution needed).
+  supabase-kong:
+    image: kong/kong:3.9.1
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_DNS_NOT_FOUND_TTL: "1"
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,request-termination,post-function
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      KONG_PROXY_ACCESS_LOG: /dev/stdout combined
+    volumes:
+      - /home/ubuntu/supabase/kong.yml:/home/kong/kong.yml:ro
+    networks:
+      - muffin-net
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=muffin-net"
+        - "traefik.http.routers.supabase.rule=Host(`{{ supabase_subdomain | default('supabase') }}.{{ domain }}`)"
+        - "traefik.http.routers.supabase.entrypoints=websecure"
+        - "traefik.http.routers.supabase.tls.certresolver=cloudflare"
+        - "traefik.http.services.supabase.loadbalancer.server.port=8000"
+
+  supabase-meta:
+    image: supabase/postgres-meta:v0.96.6
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_HOST: supabase-db
+      PG_META_DB_PORT: "5432"
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: "{{ supabase_db_password }}"
+      CRYPTO_KEY: "{{ supabase_pg_meta_crypto_key }}"
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+
+  # Admin dashboard (EXPOSED via Traefik: supabase-studio.<domain>, behind
+  # Cloudflare Access — see terraform/cloudflare.tf).
+  supabase-studio:
+    image: supabase/studio:2026.06.03-sha-0bca601
+    environment:
+      HOSTNAME: "0.0.0.0"
+      STUDIO_PG_META_URL: http://supabase-meta:8080
+      POSTGRES_HOST: supabase-db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: "{{ supabase_db_password }}"
+      POSTGRES_USER_READ_WRITE: postgres
+      PG_META_CRYPTO_KEY: "{{ supabase_pg_meta_crypto_key }}"
+      PGRST_DB_SCHEMAS: public,graphql_public
+      DEFAULT_ORGANIZATION_NAME: Muffin
+      DEFAULT_PROJECT_NAME: Muffin
+      SUPABASE_URL: http://supabase-kong:8000
+      SUPABASE_PUBLIC_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
+      SUPABASE_ANON_KEY: "{{ supabase_anon_key }}"
+      SUPABASE_SERVICE_KEY: "{{ supabase_service_role_key }}"
+      AUTH_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      ENABLED_FEATURES_LOGS_ALL: "false"
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=muffin-net"
+        - "traefik.http.routers.studio.rule=Host(`{{ studio_subdomain | default('supabase-studio') }}.{{ domain }}`)"
+        - "traefik.http.routers.studio.entrypoints=websecure"
+        - "traefik.http.routers.studio.tls.certresolver=cloudflare"
+        - "traefik.http.services.studio.loadbalancer.server.port=3000"
 
   # --- Market data: OpenBB MCP (internal) ---------------------------------
   openbb-mcp:

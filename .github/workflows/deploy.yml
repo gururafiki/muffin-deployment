@@ -10,10 +10,16 @@ name: Deploy to Oracle Cloud
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_ACCOUNT_ID,
 #   OPENROUTER_API_KEY, LANGSMITH_API_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, FMP_API_KEY,
 #   POSTGRES_PASSWORD, FIRECRAWL_POSTGRES_PASSWORD, SEARXNG_SECRET_KEY, REGISTRY_PASSWORD,
+#   SUPABASE_DB_PASSWORD, SUPABASE_JWT_SECRET, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+#   SUPABASE_PG_META_CRYPTO_KEY, SUPABASE_SECRET_KEY_BASE, SUPABASE_REALTIME_DB_ENC_KEY
+#   (generate all seven: stack/supabase/generate-keys.sh); optional SMTP for auth e-mails:
+#   SUPABASE_SMTP_HOST/PORT/USER/PASS/ADMIN_EMAIL (unset -> signups auto-confirm),
 #   TFSTATE_S3_ACCESS_KEY_ID, TFSTATE_S3_SECRET_ACCESS_KEY (OCI Object Storage S3 backend creds)
 # Required GitHub VARIABLES:
 #   OCI_REGION, DOMAIN, APP_SUBDOMAIN (default muffin), CHAT_SUBDOMAIN (default muffin-chat),
 #   API_SUBDOMAIN, ACME_EMAIL, ACCESS_EMAILS (JSON list),
+#   SUPABASE_SUBDOMAIN (default supabase), STUDIO_SUBDOMAIN (default supabase-studio),
+#   USE_SUPABASE_DB (default false — flip to true only after the DB cutover, see README),
 #   LLM_PROVIDER, ORCHESTRATOR_MODELS, COLLECTOR_MODELS, REASONER_MODELS, SUMMARISER_MODEL,
 #   LANGSMITH_PROJECT, REGISTRY_USERNAME
 #
@@ -64,6 +70,9 @@ jobs:
           app_subdomain: "${{ vars.APP_SUBDOMAIN || 'muffin' }}"
           chat_subdomain: "${{ vars.CHAT_SUBDOMAIN || 'muffin-chat' }}"
           api_subdomain: "${{ vars.API_SUBDOMAIN }}"
+          supabase_subdomain: "${{ vars.SUPABASE_SUBDOMAIN || 'supabase' }}"
+          studio_subdomain: "${{ vars.STUDIO_SUBDOMAIN || 'supabase-studio' }}"
+          use_supabase_db: ${{ vars.USE_SUPABASE_DB || 'false' }}
           acme_email: "${{ vars.ACME_EMAIL }}"
           image_agent: "ghcr.io/${{ github.repository_owner }}/muffin-agent:latest"
           image_openbb: "ghcr.io/${{ github.repository_owner }}/openbb-mcp-docker:latest"
@@ -101,6 +110,18 @@ jobs:
           searxng_secret_key: "${{ secrets.SEARXNG_SECRET_KEY }}"
           cf_dns_api_token: "${{ secrets.CLOUDFLARE_API_TOKEN }}"
           registry_password: "${{ secrets.REGISTRY_PASSWORD }}"
+          supabase_db_password: "${{ secrets.SUPABASE_DB_PASSWORD }}"
+          supabase_jwt_secret: "${{ secrets.SUPABASE_JWT_SECRET }}"
+          supabase_anon_key: "${{ secrets.SUPABASE_ANON_KEY }}"
+          supabase_service_role_key: "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
+          supabase_pg_meta_crypto_key: "${{ secrets.SUPABASE_PG_META_CRYPTO_KEY }}"
+          supabase_secret_key_base: "${{ secrets.SUPABASE_SECRET_KEY_BASE }}"
+          supabase_realtime_db_enc_key: "${{ secrets.SUPABASE_REALTIME_DB_ENC_KEY }}"
+          supabase_smtp_host: "${{ secrets.SUPABASE_SMTP_HOST }}"
+          supabase_smtp_port: "${{ secrets.SUPABASE_SMTP_PORT || '465' }}"
+          supabase_smtp_user: "${{ secrets.SUPABASE_SMTP_USER }}"
+          supabase_smtp_pass: "${{ secrets.SUPABASE_SMTP_PASS }}"
+          supabase_smtp_admin_email: "${{ secrets.SUPABASE_SMTP_ADMIN_EMAIL }}"
           EOF
       - name: Terraform apply (provisions + runs Ansible)
         working-directory: terraform
@@ -133,4 +154,6 @@ jobs:
           TF_VAR_cloudflare_app_subdomain:   ${{ vars.APP_SUBDOMAIN || 'muffin' }}
           TF_VAR_cloudflare_chat_subdomain:  ${{ vars.CHAT_SUBDOMAIN || 'muffin-chat' }}
           TF_VAR_cloudflare_api_subdomain:   ${{ vars.API_SUBDOMAIN }}
+          TF_VAR_cloudflare_supabase_subdomain: ${{ vars.SUPABASE_SUBDOMAIN || 'supabase' }}
+          TF_VAR_cloudflare_studio_subdomain:   ${{ vars.STUDIO_SUBDOMAIN || 'supabase-studio' }}
           TF_VAR_cloudflare_access_emails:   ${{ vars.ACCESS_EMAILS }}

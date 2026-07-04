@@ -39,8 +39,57 @@ the Access service-token id/secret.
 
 ## Notes
 - ARM64: all referenced images have arm64 builds (the `*-docker` repos publish arm64).
-- Single node = no HA; back up the `langgraph-data` volume (`pg_dump`).
-- See `stack/docker-compose.yaml` for the full 14-service stack + memory budget.
+- Single node = no HA; back up the `langgraph-data` / `supabase-db-data` volumes (`pg_dump`).
+- See `stack/docker-compose.yaml` for the full stack + memory budget.
+
+## Supabase (self-hosted, M8)
+
+The stack ships a self-hosted Supabase adapted from the official
+[docker self-hosting guide](https://supabase.com/docs/guides/self-hosting/docker):
+`supabase-db` (Postgres 17), `supabase-auth` (GoTrue), `supabase-rest` (PostgREST),
+`supabase-realtime`, `supabase-storage` (+`supabase-imgproxy`), `supabase-functions`
+(edge runtime), `supabase-kong` (public gateway at `https://<supabase_subdomain>.<domain>`),
+`supabase-meta` + `supabase-studio` (admin, behind Cloudflare Access at
+`https://<studio_subdomain>.<domain>`). Analytics/Logflare and the Supavisor pooler are
+deliberately omitted (heavy; Postgres stays overlay-internal — nothing publishes 5432).
+Deviations from upstream: legacy HS256 JWT keys (no asymmetric keypair — `auth.py` and
+PostgREST verify the shared secret), Studio guarded by Access instead of Kong basic-auth.
+
+**Setup**: run `stack/supabase/generate-keys.sh` once and paste its output into
+`secrets.yaml` (locally) or the matching GitHub secrets (CI). App tables + RLS live in
+`stack/supabase/migrations/` and are re-applied idempotently on every deploy.
+
+### Auth e-mails (optional SMTP)
+
+Without SMTP secrets, signups auto-confirm and password recovery is disabled. To enable
+real e-mails set `supabase_smtp_*` in secrets.yaml — e.g. **Cloudflare Email Service**:
+onboard the domain (`npx wrangler email sending enable <domain>`), create an API token
+with Email Sending permission, then `host: smtp.mx.cloudflare.net`, `port: 465`,
+`user: api_token`, `pass: <cf-api-token>`. Arbitrary recipients need Workers Paid
+($5/mo, 3k mails/mo included); on the free plan you may only send to up to 200
+[verified destination addresses](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/)
+— which matches the Access-allowlist posture. Resend/Brevo free tiers work the same way.
+
+### LangGraph DB cutover (langgraph-postgres → supabase-db)
+
+`use_supabase_db` (config.yml / `USE_SUPABASE_DB` repo variable) selects langgraph-api's
+`DATABASE_URI`. Runbook:
+
+```bash
+# 1. Deploy with use_supabase_db=false — Supabase comes up alongside the old DB.
+# 2. On the node: dump the old DB and restore it into supabase-db's `langgraph` database.
+ssh ubuntu@<node-ip>
+OLD=$(sudo docker ps -qf name=muffin_langgraph-postgres | head -1)
+NEW=$(sudo docker ps -qf name=muffin_supabase-db | head -1)
+sudo docker service scale muffin_langgraph-api=0        # stop writers during the copy
+sudo docker exec $OLD pg_dump -U postgres -Fc postgres > /tmp/langgraph.dump
+sudo docker cp /tmp/langgraph.dump $NEW:/tmp/
+sudo docker exec $NEW pg_restore -U postgres -d langgraph --no-owner /tmp/langgraph.dump
+# 3. Flip use_supabase_db=true and redeploy (terraform apply / deploy workflow).
+# 4. Verify: langgraph-api healthy, old threads visible in the app's Calls tab.
+# 5. Rollback: flip back to false and redeploy (the old volume is untouched).
+# 6. Once verified for a few days: remove the langgraph-postgres service + volume.
+```
 
 ## Remote state (OCI Object Storage)
 
