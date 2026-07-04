@@ -122,6 +122,18 @@ variable "cloudflare_api_subdomain" {
   default     = "api"
 }
 
+variable "cloudflare_supabase_subdomain" {
+  description = "Subdomain for the Supabase API gateway (public — no Access app)."
+  type        = string
+  default     = "supabase"
+}
+
+variable "cloudflare_studio_subdomain" {
+  description = "Subdomain for Supabase Studio (admin; behind an Access app)."
+  type        = string
+  default     = "supabase-studio"
+}
+
 variable "cloudflare_access_emails" {
   description = "Emails allowed through Cloudflare Access (Zero Trust)."
   type        = list(string)
