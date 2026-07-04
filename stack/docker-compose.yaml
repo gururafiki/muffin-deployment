@@ -310,6 +310,10 @@ services:
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:{{ supabase_db_password }}@supabase-db:5432/postgres
       GOTRUE_SITE_URL: "https://{{ app_subdomain | default('muffin') }}.{{ domain }}"
       GOTRUE_URI_ALLOW_LIST: "https://{{ app_subdomain | default('muffin') }}.{{ domain }}/*"
+      # Trusted hosts for confirmation/recovery links (behind Traefik/Cloudflare the
+      # request arrives with X-Forwarded-Host; without this GoTrue logs a warning and
+      # falls back to API_EXTERNAL_URL).
+      GOTRUE_MAILER_EXTERNAL_HOSTS: "{{ supabase_subdomain | default('supabase') }}.{{ domain }},{{ app_subdomain | default('muffin') }}.{{ domain }}"
       GOTRUE_DISABLE_SIGNUP: "false"
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
