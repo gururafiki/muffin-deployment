@@ -59,16 +59,33 @@ PostgREST verify the shared secret), Studio guarded by Access instead of Kong ba
 `secrets.yaml` (locally) or the matching GitHub secrets (CI). App tables + RLS live in
 `stack/supabase/migrations/` and are re-applied idempotently on every deploy.
 
+**On the legacy `anon` / `service_role` keys** (Studio shows a "deprecated" banner):
+those are Supabase's new opaque **publishable** (`sb_publishable_…`) / **secret**
+(`sb_secret_…`) API keys, which are independently revocable without rotating the JWT
+secret. They are Cloud-oriented and, for self-hosting, need the asymmetric-key infra +
+the Kong `SUPABASE_PUBLISHABLE_KEY`/`SUPABASE_SECRET_KEY` translation we deliberately
+simplified out (see `kong-entrypoint.sh` upstream). The legacy HS256 `anon`/`service_role`
+JWTs remain fully supported for self-hosting and are what `auth.py`, PostgREST and the app
+verify against one shared secret — so we stay on them. Revisit only if independent key
+rotation becomes a requirement (it would mean adopting the asymmetric keypair + the Kong
+key-translation entrypoint).
+
 ### Auth e-mails (optional SMTP)
 
-Without SMTP secrets, signups auto-confirm and password recovery is disabled. To enable
-real e-mails set `supabase_smtp_*` in secrets.yaml — e.g. **Cloudflare Email Service**:
-onboard the domain (`npx wrangler email sending enable <domain>`), create an API token
-with Email Sending permission, then `host: smtp.mx.cloudflare.net`, `port: 465`,
-`user: api_token`, `pass: <cf-api-token>`. Arbitrary recipients need Workers Paid
-($5/mo, 3k mails/mo included); on the free plan you may only send to up to 200
-[verified destination addresses](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/)
-— which matches the Access-allowlist posture. Resend/Brevo free tiers work the same way.
+Without SMTP secrets, signups auto-confirm and password recovery is disabled. Set
+`supabase_smtp_*` (secrets.yaml locally, or the `SUPABASE_SMTP_*` GitHub secrets in CI)
+and GoTrue sends real confirmation/recovery e-mails (auto-confirm flips off automatically
+when a host is present). Any SMTP provider works.
+
+**Currently configured: Resend** (sending domain `rafiki.guru`) —
+`host: smtp.resend.com`, `port: 587` (STARTTLS), `user: resend`, `pass: <resend-api-key>`,
+`admin_email: no-reply@rafiki.guru`. Free tier: 3,000 e-mails/month, 100/day. The `from`
+address must be on a Resend-verified domain.
+
+Alternatives: **Cloudflare Email Service** (`smtp.mx.cloudflare.net:465`, `user: api_token`,
+pass = a CF API token with Email Sending permission; free only to ≤200
+[verified destination addresses](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/),
+Workers Paid $5/mo for arbitrary recipients), Brevo, AWS SES, etc.
 
 ### LangGraph DB cutover (langgraph-postgres → supabase-db)
 
