@@ -12,3 +12,5 @@ ansible/apply_playbooks.sh
 *.env
 # committed non-secret terraform constants
 !terraform/prod.auto.tfvars
+
+.DS_Store
