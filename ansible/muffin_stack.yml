@@ -106,8 +106,10 @@
     - name: Render Supabase Kong declarative config
       template:
         src: "{{ muffin_template_dir }}/supabase/kong.yml"
+        # World-readable like the rendered compose file (Kong runs as a non-root
+        # user in-container and must be able to read it).
         dest: /home/ubuntu/supabase/kong.yml
-        mode: "0600"
+        mode: "0644"
 
     - name: Stage Supabase app migrations (idempotent; applied post-deploy below)
       copy:
