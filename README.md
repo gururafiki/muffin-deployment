@@ -91,6 +91,17 @@ sudo docker exec $NEW pg_restore -U postgres -d langgraph --no-owner /tmp/langgr
 # 6. Once verified for a few days: remove the langgraph-postgres service + volume.
 ```
 
+Auth note: sign-in is **optional** (`MUFFIN_AUTH_OPTIONAL=true` on `langgraph-api`) —
+anonymous requests share one `owner=anonymous` thread pool; signed-in users only see
+their own threads. Threads created before M8 carry no `owner` metadata and are hidden
+from everyone except the shared-token client; to hand them to the anonymous pool, run
+once inside the langgraph database:
+
+```sql
+UPDATE thread SET metadata = metadata || '{"owner": "anonymous"}'::jsonb
+WHERE NOT metadata ? 'owner';
+```
+
 ## Remote state (OCI Object Storage)
 
 Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend

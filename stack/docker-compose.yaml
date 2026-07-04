@@ -91,6 +91,9 @@ services:
       # Supabase JWT verification (auth.py mode 4): user Bearer tokens minted by GoTrue.
       SUPABASE_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
       SUPABASE_JWT_SECRET: "{{ supabase_jwt_secret | default('') }}"
+      # Sign-in is optional: no credential -> anonymous (Cloudflare Access remains
+      # the perimeter); a presented-but-invalid credential still 401s.
+      MUFFIN_AUTH_OPTIONAL: "{{ muffin_auth_optional | default('true') }}"
       OPENBB_MCP_URL: http://openbb-mcp:8001/mcp
       OPENSANDBOX_URL: opensandbox-server:8080
       FIRECRAWL_MCP_URL: http://firecrawl-mcp:3000/mcp
