@@ -186,6 +186,12 @@ services:
   # reverse-proxies /api → langgraph-api (same-origin, like the chat UI).
   muffin-ui:
     image: {{ image_app }}
+    environment:
+      # PUBLIC Supabase config injected into the SPA at container start
+      # (/runtime-config.js) so the web app knows accounts are enabled without
+      # users pasting the anon key. The anon key is a public client key by design.
+      SUPABASE_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
+      SUPABASE_ANON_KEY: "{{ supabase_anon_key | default('') }}"
     networks:
       - muffin-net
     deploy:
