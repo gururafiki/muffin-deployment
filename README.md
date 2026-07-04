@@ -87,6 +87,27 @@ pass = a CF API token with Email Sending permission; free only to ≤200
 [verified destination addresses](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/),
 Workers Paid $5/mo for arbitrary recipients), Brevo, AWS SES, etc.
 
+### OAuth providers (optional)
+
+Email/password works out of the box. To add social sign-in, register an OAuth app on the
+provider (callback URL **`https://<supabase_subdomain>.<domain>/auth/v1/callback`**, i.e.
+`https://supabase.rafiki.guru/auth/v1/callback`) and set its client id + secret in
+secrets.yaml / GitHub secrets. GoTrue enables the provider only when its id is present, and
+the app auto-shows a "Continue with …" button (it reads `/auth/v1/settings`). Scaffolded
+today: **GitHub** and **Google** (both free to use).
+
+- **GitHub** (free): Settings → Developer settings → OAuth Apps → New OAuth App. Homepage
+  `https://muffin.rafiki.guru`, callback as above. Set `supabase_github_client_id` /
+  `supabase_github_secret` (GH secrets `SUPABASE_GITHUB_CLIENT_ID` / `SUPABASE_GITHUB_SECRET`).
+- **Google** (free): Google Cloud Console → APIs & Services → Credentials → OAuth client ID
+  (type: Web application). Authorised redirect URI = the callback above. Set
+  `supabase_google_client_id` / `supabase_google_secret` (GH secrets
+  `SUPABASE_GOOGLE_CLIENT_ID` / `SUPABASE_GOOGLE_SECRET`). Configure the OAuth consent screen.
+
+Adding another GoTrue provider = a couple more `GOTRUE_EXTERNAL_<P>_*` lines on the
+`supabase-auth` service + the matching secrets + a metadata entry in the app's
+`src/features/account/oauth.ts`. See the roadmap for the full provider list + costs.
+
 ### LangGraph DB cutover (langgraph-postgres → supabase-db)
 
 `use_supabase_db` (config.yml / `USE_SUPABASE_DB` repo variable) selects langgraph-api's

@@ -342,6 +342,17 @@ services:
       GOTRUE_SMTP_SENDER_NAME: "{{ supabase_smtp_sender_name | default('Muffin') }}"
       GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
       GOTRUE_SMS_AUTOCONFIRM: "false"
+      # OAuth providers — each is enabled only when its client id/secret are set
+      # in secrets.yaml. Register the OAuth app on the provider's side with the
+      # callback https://<supabase_subdomain>.<domain>/auth/v1/callback (see README).
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: "{{ 'true' if supabase_github_client_id | default('') else 'false' }}"
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: "{{ supabase_github_client_id | default('') }}"
+      GOTRUE_EXTERNAL_GITHUB_SECRET: "{{ supabase_github_secret | default('') }}"
+      GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}/auth/v1/callback"
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "{{ 'true' if supabase_google_client_id | default('') else 'false' }}"
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: "{{ supabase_google_client_id | default('') }}"
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: "{{ supabase_google_secret | default('') }}"
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}/auth/v1/callback"
     networks:
       - muffin-net
     healthcheck:
