@@ -101,10 +101,17 @@ services:
       # --- secrets (from secrets.yaml) ---
       OPENAI_API_KEY: "{{ openai_api_key | default(openrouter_api_key) }}"
       OPENROUTER_API_KEY: "{{ openrouter_api_key }}"
+      OLLAMA_API_KEY: "{{ ollama_api_key | default('') }}"
       LANGSMITH_API_KEY: "{{ langsmith_api_key }}"
       LANGFUSE_SECRET_KEY: "{{ langfuse_secret_key | default('') }}"
       LANGFUSE_PUBLIC_KEY: "{{ langfuse_public_key | default('') }}"
       # --- non-secret config (from config.yml) ---
+      # Cross-provider model chain (JSON). Ansible serializes the config.yml
+      # `llm_chain:` YAML list → JSON here. When non-empty it supersedes
+      # LLM_PROVIDER/MODEL + the per-role *_MODELS chains for every role.
+      LLM_CHAIN: '{{ llm_chain | default([]) | to_json }}'
+      # Ollama host for the "ollama" provider — native /api/chat (never /v1).
+      OLLAMA_BASE_URL: "{{ ollama_base_url | default('https://ollama.com') }}"
       LLM_PROVIDER: "{{ llm_provider | default('openrouter') }}"
       OPENAI_SITE_URL: "{{ openai_site_url | default('https://openrouter.ai/api/v1') }}"
       ORCHESTRATOR_MODELS: "{{ orchestrator_models | default('') }}"
