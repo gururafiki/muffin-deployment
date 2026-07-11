@@ -32,18 +32,37 @@ registry_server: "ghcr.io"
 registry_username: "<github-user>"
 
 # === Muffin LLM config (non-secret; API keys are in secrets.yaml) ===
-llm_provider: "openrouter"                 # openai | anthropic | openrouter
+# RECOMMENDED: an ordered CROSS-PROVIDER model chain (primary first, rest are
+# fallbacks). When set, `llm_chain` is authoritative for every role — it
+# supersedes `llm_provider`/`orchestrator_models`/… below. Profiles OMIT the
+# api_key (it resolves the matching *_api_key from secrets.yaml). Each profile
+# carries its own `requests_per_second` — the primary (Ollama Cloud) is left
+# relaxed, only the OpenRouter free fallback is throttled to 0.3 (=18/min, under
+# the 20/min free cap; free routes also have a daily cap). The `ollama` provider
+# uses the native /api/chat API (Ollama Cloud https://ollama.com by default —
+# NEVER append /v1, its tool calling is unreliable).
+llm_chain:
+  - provider: ollama
+    model: "minimax-m3:cloud"
+  - provider: openrouter
+    model: "nvidia/nemotron-3-super-120b-a12b:free"
+    requests_per_second: 0.3
+# Optional Ollama host override (default https://ollama.com). Local: http://localhost:11434
+# ollama_base_url: "https://ollama.com"
+
+# --- Legacy single-provider path (IGNORED while llm_chain is set above) ---
+llm_provider: "openrouter"                 # openai | anthropic | openrouter | ollama
 openai_site_url: "https://openrouter.ai/api/v1"
 orchestrator_models: "anthropic/claude-sonnet-4-6"
 collector_models: "anthropic/claude-haiku-4-5"
 reasoner_models: "anthropic/claude-sonnet-4-6"
-summariser_model: "anthropic/claude-haiku-4-5"
+# The summariser uses the single-model path → the derived primary provider, so
+# with the Ollama chain above set it must be an Ollama tag (not OpenRouter).
+summariser_model: "minimax-m3:cloud"
 llm_sdk_retries: 6
 temperature: 0.1
-# Global cap on LLM requests/second shared across all chat models. Set for OpenRouter FREE
-# models so the 13-persona council stays under the 20 req/min free cap (0.3 = 18/min). Leave
-# blank/remove for paid models (no limit). Note: free models also have a daily cap (50/day, or
-# 1000/day with $10 OpenRouter credits) — one council run is ~50 calls.
+# Legacy global cap for the single-model path only (the chain uses per-profile
+# requests_per_second above). Blank/remove for no limit.
 llm_requests_per_second: 0.3
 
 # === Observability (non-secret bits; keys are in secrets.yaml) ===

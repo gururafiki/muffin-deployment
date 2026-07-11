@@ -8,7 +8,8 @@ name: Deploy to Oracle Cloud
 #   OCI_API_KEY, SSH_PRIVATE_KEY,
 #   OCI_TENANCY_OCID, OCI_USER_OCID, OCI_FINGERPRINT, OCI_COMPARTMENT_OCID,
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_ACCOUNT_ID,
-#   OPENROUTER_API_KEY, LANGSMITH_API_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, FMP_API_KEY,
+#   OPENROUTER_API_KEY, OLLAMA_API_KEY (Ollama Cloud — primary provider in llm_chain),
+#   LANGSMITH_API_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, FMP_API_KEY,
 #   POSTGRES_PASSWORD, FIRECRAWL_POSTGRES_PASSWORD, SEARXNG_SECRET_KEY, REGISTRY_PASSWORD,
 #   SUPABASE_DB_PASSWORD, SUPABASE_JWT_SECRET, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
 #   SUPABASE_PG_META_CRYPTO_KEY, SUPABASE_SECRET_KEY_BASE, SUPABASE_REALTIME_DB_ENC_KEY
@@ -21,8 +22,9 @@ name: Deploy to Oracle Cloud
 #   API_SUBDOMAIN, ACME_EMAIL, ACCESS_EMAILS (JSON list),
 #   SUPABASE_SUBDOMAIN (default supabase), STUDIO_SUBDOMAIN (default supabase-studio),
 #   USE_SUPABASE_DB (default false — flip to true only after the DB cutover, see README),
-#   LLM_PROVIDER, ORCHESTRATOR_MODELS, COLLECTOR_MODELS, REASONER_MODELS, SUMMARISER_MODEL,
 #   LANGSMITH_PROJECT, REGISTRY_USERNAME
+#   (legacy/optional, superseded by the hardcoded llm_chain: LLM_PROVIDER, ORCHESTRATOR_MODELS,
+#    COLLECTOR_MODELS, REASONER_MODELS, SUMMARISER_MODEL — safe to leave unset/delete)
 #
 # State is remote (terraform/backend.tf -> OCI Object Storage). Triggers: manual dispatch, and a
 # repository_dispatch(type: deploy) sent by the image repos when a new image is published (auto-CD).
@@ -84,10 +86,22 @@ jobs:
           registry_username: "${{ vars.REGISTRY_USERNAME }}"
           llm_provider: "${{ vars.LLM_PROVIDER }}"
           openai_site_url: "https://openrouter.ai/api/v1"
+          # Cross-provider model chain (primary first, rest fallbacks). Authoritative
+          # for every role — supersedes llm_provider/model + the per-role *_models
+          # chains. Keys resolve from the *_api_key secrets (profiles omit api_key).
+          llm_chain:
+            - provider: ollama
+              model: "minimax-m3:cloud"
+            - provider: openrouter
+              model: "nvidia/nemotron-3-super-120b-a12b:free"
+              requests_per_second: 0.3
+          # Per-role chains left for reference but IGNORED while llm_chain is set.
           orchestrator_models: "${{ vars.ORCHESTRATOR_MODELS }}"
           collector_models: "${{ vars.COLLECTOR_MODELS }}"
           reasoner_models: "${{ vars.REASONER_MODELS }}"
-          summariser_model: "${{ vars.SUMMARISER_MODEL }}"
+          # Summariser uses the single-model path → the derived primary provider
+          # (Ollama), so its model must be an Ollama tag, not an OpenRouter one.
+          summariser_model: "minimax-m3:cloud"
           llm_sdk_retries: 6
           temperature: 0.1
           llm_requests_per_second: "${{ vars.LLM_REQUESTS_PER_SECOND }}"
@@ -102,6 +116,7 @@ jobs:
         run: |
           cat > stack/secrets.yaml <<EOF
           openrouter_api_key: "${{ secrets.OPENROUTER_API_KEY }}"
+          ollama_api_key: "${{ secrets.OLLAMA_API_KEY }}"
           langsmith_api_key: "${{ secrets.LANGSMITH_API_KEY }}"
           langfuse_secret_key: "${{ secrets.LANGFUSE_SECRET_KEY }}"
           langfuse_public_key: "${{ secrets.LANGFUSE_PUBLIC_KEY }}"
