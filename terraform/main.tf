@@ -132,6 +132,12 @@ resource "oci_core_instance" "node" {
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[var.availability_domain].name
   shape               = var.shape
   display_name        = "${var.name_prefix}-node-${count.index}"
+  # If the instance is ever destroyed/replaced, KEEP its boot volume instead of
+  # deleting it — the single node stores every Docker named volume (Supabase +
+  # LangGraph Postgres, storage, firecrawl) on the boot volume, so a preserved
+  # volume is the last-resort way to recover that data. See lifecycle below for
+  # why a replacement should never happen unintentionally in the first place.
+  preserve_boot_volume = true
   timeouts {
     create = "60m"
   }
@@ -154,5 +160,18 @@ resource "oci_core_instance" "node" {
 
   metadata = {
     ssh_authorized_keys = file(var.ssh_public_key_path)
+  }
+
+  # CRITICAL: `source_details.source_id` resolves to the *newest* matching OCI
+  # platform image via the `oci_core_images` data source. Oracle publishes new
+  # Canonical Ubuntu images periodically, so without this, a routine `terraform
+  # apply` (i.e. any deploy) after an image rotation sees a changed `source_id`,
+  # marks it `# forces replacement`, and DESTROYS + recreates the whole node —
+  # wiping every local Docker volume (all databases). That is exactly what
+  # happened on 2026-07-20. Pinning the image drift here keeps deploys as pure
+  # in-place stack updates. A deliberate OS upgrade must be done consciously
+  # (back up the DBs first, then remove this ignore or taint the instance).
+  lifecycle {
+    ignore_changes = [source_details[0].source_id]
   }
 }
