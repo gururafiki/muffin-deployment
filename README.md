@@ -137,11 +137,14 @@ Adding another GoTrue provider = a couple more `GOTRUE_EXTERNAL_<P>_*` lines on 
 
 `use_supabase_db` (config.yml / `USE_SUPABASE_DB` repo variable) selects langgraph-api's
 `DATABASE_URI`. When `true`, langgraph-api uses a dedicated **`langgraph` schema** inside
-supabase-db's **`postgres`** database (not a separate database) — created by `muffin_stack.yml` and
-routed via `PGOPTIONS=-c search_path=langgraph,public,extensions` on the service — so its tables are
-**browsable in Supabase Studio** (Studio is pinned to a single database; a separate database would
-be invisible). `extensions` is on the search_path so the extensions LangGraph installs resolve
-against Supabase's `extensions` schema. Runbook:
+supabase-db's **`postgres`** database (not a separate database) — created by `muffin_stack.yml` — so
+its tables are **browsable in Supabase Studio** (Studio is pinned to a single database; a separate
+database would be invisible). langgraph-api relies on the session's default search_path (its psycopg
+pool does **not** honour a client-side `PGOPTIONS`), so the search_path is set server-side as the
+**`postgres` role default in the `postgres` DB** (`ALTER ROLE postgres IN DATABASE postgres SET
+search_path = langgraph, public, extensions`) and langgraph-api is bounced to reconnect with it.
+`extensions` is on the path so the extensions LangGraph installs resolve against Supabase's
+`extensions` schema. Runbook:
 
 ```bash
 # 1. Deploy with use_supabase_db=false — Supabase comes up alongside the old DB.

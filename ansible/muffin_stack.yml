@@ -243,6 +243,29 @@
       changed_when: false
       when: use_supabase_db | default(false)
 
+    # langgraph-api connects as `postgres` and relies on the session's DEFAULT
+    # search_path (it sets none itself, and its psycopg pool does not honour the
+    # container's PGOPTIONS), so the only reliable way to route its unqualified
+    # tables into the langgraph schema is the server-side role default. Scoped to
+    # the postgres role IN the postgres DB: Supabase's other services connect as
+    # their own roles and the app migrations are `public.`-qualified, so they are
+    # unaffected. Idempotent.
+    - name: Set the langgraph search_path as the postgres role default (postgres DB)
+      shell: >
+        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
+        psql -U postgres -d postgres -v ON_ERROR_STOP=1
+        -c "ALTER ROLE postgres IN DATABASE postgres SET search_path = langgraph, public, extensions"
+      changed_when: false
+      when: use_supabase_db | default(false)
+
+    # A role default only applies to NEW sessions, so bounce langgraph-api — its
+    # pooled connections predate the ALTER ROLE above. After the restart it
+    # reconnects and resolves its unqualified tables from the langgraph schema.
+    - name: Restart langgraph-api so it reconnects with the langgraph search_path
+      shell: docker service update --force --detach muffin_langgraph-api
+      changed_when: false
+      when: use_supabase_db | default(false)
+
     - name: Apply idempotent app migrations (tables + RLS)
       shell: >
         docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)"
