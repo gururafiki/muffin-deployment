@@ -16,7 +16,8 @@ acme_email: "you@example.com"   # Let's Encrypt account email (cert-expiry notic
 
 # === Supabase / LangGraph DB cutover ===
 # false: langgraph-api keeps using langgraph-postgres (pre-M8 layout).
-# true:  langgraph-api uses the dedicated `langgraph` database inside supabase-db.
+# true:  langgraph-api uses a dedicated `langgraph` SCHEMA inside supabase-db's `postgres`
+#        database (so its data is browsable in Supabase Studio, which shows one database).
 # Flip to true ONLY after migrating the data — see README "Supabase cutover" runbook.
 use_supabase_db: false
 

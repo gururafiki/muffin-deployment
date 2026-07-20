@@ -136,21 +136,30 @@ Adding another GoTrue provider = a couple more `GOTRUE_EXTERNAL_<P>_*` lines on 
 ### LangGraph DB cutover (langgraph-postgres → supabase-db)
 
 `use_supabase_db` (config.yml / `USE_SUPABASE_DB` repo variable) selects langgraph-api's
-`DATABASE_URI`. Runbook:
+`DATABASE_URI`. When `true`, langgraph-api uses a dedicated **`langgraph` schema** inside
+supabase-db's **`postgres`** database (not a separate database) — created by `muffin_stack.yml` and
+routed via `PGOPTIONS=-c search_path=langgraph,public,extensions` on the service — so its tables are
+**browsable in Supabase Studio** (Studio is pinned to a single database; a separate database would
+be invisible). `extensions` is on the search_path so the extensions LangGraph installs resolve
+against Supabase's `extensions` schema. Runbook:
 
 ```bash
 # 1. Deploy with use_supabase_db=false — Supabase comes up alongside the old DB.
-# 2. On the node: dump the old DB and restore it into supabase-db's `langgraph` database.
+# 2. On the node: dump the old DB and restore it into the `langgraph` schema of `postgres`.
 ssh ubuntu@<node-ip>
 OLD=$(sudo docker ps -qf name=muffin_langgraph-postgres | head -1)
 NEW=$(sudo docker ps -qf name=muffin_supabase-db | head -1)
 sudo docker service scale muffin_langgraph-api=0        # stop writers during the copy
-sudo docker exec $OLD pg_dump -U postgres -Fc postgres > /tmp/langgraph.dump
+sudo docker exec $NEW psql -U postgres -d postgres -c "CREATE SCHEMA IF NOT EXISTS langgraph"
+# dump only public objects, then restore them into the langgraph schema (search_path remap):
+sudo docker exec $OLD pg_dump -U postgres --schema=public -Fc postgres > /tmp/langgraph.dump
 sudo docker cp /tmp/langgraph.dump $NEW:/tmp/
-sudo docker exec $NEW pg_restore -U postgres -d langgraph --no-owner /tmp/langgraph.dump
+sudo docker exec $NEW sh -c 'pg_restore -U postgres -d postgres --no-owner \
+  --options="-c search_path=langgraph" /tmp/langgraph.dump'   # verify objects land in langgraph.*
 # 3. Flip use_supabase_db=true and redeploy (terraform apply / deploy workflow).
-# 4. Verify: langgraph-api healthy, old threads visible in the app's Calls tab.
-# 5. Rollback: flip back to false and redeploy (the old volume is untouched).
+# 4. Verify: langgraph-api healthy, old threads visible in the app's Calls tab + the
+#    `langgraph` schema visible in Supabase Studio.
+# 5. Rollback: flip back to false and redeploy (the old langgraph-postgres volume is untouched).
 # 6. Once verified for a few days: remove the langgraph-postgres service + volume.
 ```
 

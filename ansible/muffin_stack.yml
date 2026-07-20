@@ -199,15 +199,21 @@
       delay: 10
       changed_when: false
 
-    - name: Create the dedicated langgraph database (LangGraph migrates its own schema)
+    # LangGraph lives in a dedicated `langgraph` SCHEMA of the Supabase `postgres`
+    # database (not a separate database) so it's visible in Supabase Studio, which
+    # is pinned to one database. langgraph-api connects to `postgres` with
+    # search_path=langgraph,... (PGOPTIONS in the stack file) and migrates its
+    # tables into this schema. The schema must pre-exist for its unqualified
+    # CREATEs to land here. Extensions LangGraph needs resolve via the rest of the
+    # search_path (public + Supabase's `extensions` schema).
+    - name: Create the langgraph schema in the Supabase postgres DB
       shell: >
         docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
-        psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='langgraph'"
-        | grep -q 1
-        || docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
-        createdb -U postgres langgraph
-      register: langgraph_db
+        psql -U postgres -d postgres -v ON_ERROR_STOP=1
+        -c "CREATE SCHEMA IF NOT EXISTS langgraph AUTHORIZATION postgres"
+      register: langgraph_schema
       changed_when: false
+      when: use_supabase_db | default(false)
 
     - name: Apply idempotent app migrations (tables + RLS)
       shell: >
