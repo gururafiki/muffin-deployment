@@ -199,70 +199,22 @@
       delay: 10
       changed_when: false
 
-    # LangGraph lives in a dedicated `langgraph` SCHEMA of the Supabase `postgres`
-    # database (not a separate database) so it's visible in Supabase Studio, which
-    # is pinned to one database. langgraph-api connects to `postgres` with
-    # search_path=langgraph,... (PGOPTIONS in the stack file) and migrates its
-    # tables into this schema. The schema must pre-exist for its unqualified
-    # CREATEs to land here. Extensions LangGraph needs resolve via the rest of the
-    # search_path (public + Supabase's `extensions` schema).
-    - name: Create the langgraph schema in the Supabase postgres DB
+    # LangGraph uses the Supabase `postgres` database directly (use_supabase_db)
+    # and keeps its tables in `public` — where langgraph-api naturally creates and
+    # finds them: it connects as `postgres` on the DEFAULT search_path, does NOT
+    # honour a client-side PGOPTIONS, and recreates its tables in public whenever
+    # they're missing. Because it's the same `postgres` database Studio is pinned
+    # to, LangGraph's tables are browsable in Studio. A dedicated `langgraph`
+    # schema was attempted and abandoned (langgraph-api kept recreating tables in
+    # public → 500s + duplicate tables); a robust namespaced setup would need the
+    # role search_path baked into a supabase-db init script that runs BEFORE
+    # langgraph-api's first connection (see README). This drop cleans up any stale
+    # schema left by that attempt; idempotent (langgraph-api never recreates it).
+    - name: Drop the abandoned langgraph schema (LangGraph uses public in the postgres DB)
       shell: >
         docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
         psql -U postgres -d postgres -v ON_ERROR_STOP=1
-        -c "CREATE SCHEMA IF NOT EXISTS langgraph AUTHORIZATION postgres"
-      register: langgraph_schema
-      changed_when: false
-      when: use_supabase_db | default(false)
-
-    # `docker stack deploy` (above) starts langgraph-api before the schema exists,
-    # so on a fresh volume LangGraph's unqualified CREATEs land in `public` (the
-    # first existing schema on its search_path). Relocate them into `langgraph` —
-    # idempotent (ALTER TABLE IF EXISTS no-ops once moved), and transparent to a
-    # live langgraph-api because its search_path (PGOPTIONS) lists langgraph before
-    # public. This is the stable table set for the pinned LangGraph image; extend
-    # the list if a future version adds tables.
-    - name: Relocate LangGraph tables from public into the langgraph schema
-      shell: >
-        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
-        psql -U postgres -d postgres -v ON_ERROR_STOP=1
-        -c "ALTER TABLE IF EXISTS public.{{ item }} SET SCHEMA langgraph"
-      loop:
-        - assistant
-        - assistant_versions
-        - checkpoint_blobs
-        - checkpoint_delete_queue
-        - checkpoint_writes
-        - checkpoints
-        - cron
-        - run
-        - schema_migrations
-        - store
-        - thread
-        - thread_ttl
-      changed_when: false
-      when: use_supabase_db | default(false)
-
-    # langgraph-api connects as `postgres` and relies on the session's DEFAULT
-    # search_path (it sets none itself, and its psycopg pool does not honour the
-    # container's PGOPTIONS), so the only reliable way to route its unqualified
-    # tables into the langgraph schema is the server-side role default. Scoped to
-    # the postgres role IN the postgres DB: Supabase's other services connect as
-    # their own roles and the app migrations are `public.`-qualified, so they are
-    # unaffected. Idempotent.
-    - name: Set the langgraph search_path as the postgres role default (postgres DB)
-      shell: >
-        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
-        psql -U postgres -d postgres -v ON_ERROR_STOP=1
-        -c "ALTER ROLE postgres IN DATABASE postgres SET search_path = langgraph, public, extensions"
-      changed_when: false
-      when: use_supabase_db | default(false)
-
-    # A role default only applies to NEW sessions, so bounce langgraph-api — its
-    # pooled connections predate the ALTER ROLE above. After the restart it
-    # reconnects and resolves its unqualified tables from the langgraph schema.
-    - name: Restart langgraph-api so it reconnects with the langgraph search_path
-      shell: docker service update --force --detach muffin_langgraph-api
+        -c "DROP SCHEMA IF EXISTS langgraph CASCADE"
       changed_when: false
       when: use_supabase_db | default(false)
 

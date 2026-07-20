@@ -136,32 +136,35 @@ Adding another GoTrue provider = a couple more `GOTRUE_EXTERNAL_<P>_*` lines on 
 ### LangGraph DB cutover (langgraph-postgres → supabase-db)
 
 `use_supabase_db` (config.yml / `USE_SUPABASE_DB` repo variable) selects langgraph-api's
-`DATABASE_URI`. When `true`, langgraph-api uses a dedicated **`langgraph` schema** inside
-supabase-db's **`postgres`** database (not a separate database) — created by `muffin_stack.yml` — so
-its tables are **browsable in Supabase Studio** (Studio is pinned to a single database; a separate
-database would be invisible). langgraph-api relies on the session's default search_path (its psycopg
-pool does **not** honour a client-side `PGOPTIONS`), so the search_path is set server-side as the
-**`postgres` role default in the `postgres` DB** (`ALTER ROLE postgres IN DATABASE postgres SET
-search_path = langgraph, public, extensions`) and langgraph-api is bounced to reconnect with it.
-`extensions` is on the path so the extensions LangGraph installs resolve against Supabase's
-`extensions` schema. Runbook:
+`DATABASE_URI`. When `true`, langgraph-api uses supabase-db's **`postgres`** database directly and
+keeps its tables in **`public`** — so they're **browsable in Supabase Studio** (which is pinned to
+that one database).
+
+> **Why public, not a dedicated `langgraph` schema?** langgraph-api connects as `postgres` on the
+> **default** search_path, does not honour a client-side `PGOPTIONS`, and **recreates its tables in
+> `public` whenever they're missing**. Attempts to namespace it in a `langgraph` schema
+> (`SET SCHEMA` + role-default search_path applied *after* the stack deploys) failed: langgraph-api
+> raced ahead, recreated everything in public, and produced 500s + duplicate tables. A robust
+> namespaced setup would require the schema + role search_path baked into a **supabase-db init
+> script** (`/docker-entrypoint-initdb.d/`) so they exist *before* langgraph-api's first connection —
+> not yet done. Until then, LangGraph lives in `public` alongside the app's `research_shares` /
+> `user_backups` tables.
+
+Runbook:
 
 ```bash
 # 1. Deploy with use_supabase_db=false — Supabase comes up alongside the old DB.
-# 2. On the node: dump the old DB and restore it into the `langgraph` schema of `postgres`.
+# 2. On the node: dump the old langgraph DB and restore it into supabase-db's `postgres` (public).
 ssh ubuntu@<node-ip>
 OLD=$(sudo docker ps -qf name=muffin_langgraph-postgres | head -1)
 NEW=$(sudo docker ps -qf name=muffin_supabase-db | head -1)
 sudo docker service scale muffin_langgraph-api=0        # stop writers during the copy
-sudo docker exec $NEW psql -U postgres -d postgres -c "CREATE SCHEMA IF NOT EXISTS langgraph"
-# dump only public objects, then restore them into the langgraph schema (search_path remap):
-sudo docker exec $OLD pg_dump -U postgres --schema=public -Fc postgres > /tmp/langgraph.dump
+sudo docker exec $OLD pg_dump -U postgres -Fc postgres > /tmp/langgraph.dump
 sudo docker cp /tmp/langgraph.dump $NEW:/tmp/
-sudo docker exec $NEW sh -c 'pg_restore -U postgres -d postgres --no-owner \
-  --options="-c search_path=langgraph" /tmp/langgraph.dump'   # verify objects land in langgraph.*
+sudo docker exec $NEW pg_restore -U postgres -d postgres --no-owner /tmp/langgraph.dump
 # 3. Flip use_supabase_db=true and redeploy (terraform apply / deploy workflow).
-# 4. Verify: langgraph-api healthy, old threads visible in the app's Calls tab + the
-#    `langgraph` schema visible in Supabase Studio.
+# 4. Verify: langgraph-api healthy, old threads visible in the app's Calls tab + LangGraph's
+#    tables visible in Supabase Studio (public schema of the postgres DB).
 # 5. Rollback: flip back to false and redeploy (the old langgraph-postgres volume is untouched).
 # 6. Once verified for a few days: remove the langgraph-postgres service + volume.
 ```

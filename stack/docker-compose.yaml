@@ -86,13 +86,11 @@ services:
       REDIS_URI: redis://langgraph-redis:6379
       # LangGraph checkpointer/store DB. Flip use_supabase_db in config.yml to cut over to
       # the Supabase Postgres (see README runbook); langgraph-postgres stays deployed until the
-      # cutover is verified. On Supabase, LangGraph lives in a dedicated `langgraph` SCHEMA of the
-      # `postgres` database (created by muffin_stack.yml) — NOT a separate database — so its data is
-      # visible in Supabase Studio (Studio is pinned to a single database). langgraph-api relies on
-      # the session's default search_path and its psycopg pool does NOT honour a client-side
-      # PGOPTIONS, so the search_path that routes its unqualified tables into the langgraph schema is
-      # set server-side as the `postgres` role default in muffin_stack.yml (ALTER ROLE ... SET
-      # search_path), and langgraph-api is bounced there so it reconnects with it.
+      # cutover is verified. On Supabase, langgraph-api uses the `postgres` database directly and
+      # keeps its tables in `public` — the same database Supabase Studio browses, so LangGraph's
+      # data is visible there. (langgraph-api connects as `postgres` on the default search_path and
+      # recreates its tables in public if missing, so a dedicated non-public schema isn't reliable
+      # here — see README "LangGraph DB cutover".)
       DATABASE_URI: "{{ 'postgres://postgres:' ~ supabase_db_password ~ '@supabase-db:5432/postgres?sslmode=disable' if use_supabase_db | default(false) else 'postgres://postgres:' ~ postgres_password ~ '@langgraph-postgres:5432/postgres?sslmode=disable' }}"
       # Supabase JWT verification (auth.py mode 4): user Bearer tokens minted by GoTrue.
       SUPABASE_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
