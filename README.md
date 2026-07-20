@@ -42,6 +42,31 @@ the Access service-token id/secret.
 - Single node = no HA; back up the `langgraph-data` / `supabase-db-data` volumes (`pg_dump`).
 - See `stack/docker-compose.yaml` for the full stack + memory budget.
 
+## Data durability & the node-replacement hazard (read before deploying)
+
+**All persistent data lives in local Docker named volumes on the single node's boot volume**
+(`supabase-db-data`, `langgraph-data`, `supabase-storage-data`, `firecrawl-postgres-data`) — there
+is no separate block volume, so **anything that replaces the instance wipes every database.**
+
+The instance image comes from the `oci_core_images` data source, which resolves to the *newest*
+matching Canonical Ubuntu image. Oracle rotates that image periodically, so a routine `terraform
+apply` after a rotation used to see a changed `source_details.source_id`, mark it `# forces
+replacement`, and destroy + recreate the node — losing all data. **This happened on 2026-07-20**
+(Supabase accounts/backups + all LangGraph thread history lost; the terminated boot volume had
+`preserve_boot_volume` off and no backups, so it was unrecoverable).
+
+Guards now in `terraform/main.tf`:
+- `lifecycle { ignore_changes = [source_details[0].source_id] }` — image drift no longer forces
+  replacement; deploys are pure in-place stack updates. **A deliberate OS upgrade must back up the
+  DBs first, then remove this ignore (or `terraform taint` the instance).**
+- `preserve_boot_volume = true` — if the node is ever replaced anyway, its boot volume is kept for
+  recovery instead of deleted.
+
+**Still TODO (durability):** move the DB volumes onto a persistent OCI **block volume** (survives
+instance replacement) and add **automated Postgres backups** (`pg_dump` → Object Storage). Until
+then the single node is a single point of data loss — back up `langgraph-data` / `supabase-db-data`
+before any risky change.
+
 ## Supabase (self-hosted, M8)
 
 The stack ships a self-hosted Supabase adapted from the official
