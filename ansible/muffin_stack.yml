@@ -215,6 +215,34 @@
       changed_when: false
       when: use_supabase_db | default(false)
 
+    # `docker stack deploy` (above) starts langgraph-api before the schema exists,
+    # so on a fresh volume LangGraph's unqualified CREATEs land in `public` (the
+    # first existing schema on its search_path). Relocate them into `langgraph` —
+    # idempotent (ALTER TABLE IF EXISTS no-ops once moved), and transparent to a
+    # live langgraph-api because its search_path (PGOPTIONS) lists langgraph before
+    # public. This is the stable table set for the pinned LangGraph image; extend
+    # the list if a future version adds tables.
+    - name: Relocate LangGraph tables from public into the langgraph schema
+      shell: >
+        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
+        psql -U postgres -d postgres -v ON_ERROR_STOP=1
+        -c "ALTER TABLE IF EXISTS public.{{ item }} SET SCHEMA langgraph"
+      loop:
+        - assistant
+        - assistant_versions
+        - checkpoint_blobs
+        - checkpoint_delete_queue
+        - checkpoint_writes
+        - checkpoints
+        - cron
+        - run
+        - schema_migrations
+        - store
+        - thread
+        - thread_ttl
+      changed_when: false
+      when: use_supabase_db | default(false)
+
     - name: Apply idempotent app migrations (tables + RLS)
       shell: >
         docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)"
