@@ -62,10 +62,45 @@ Guards now in `terraform/main.tf`:
 - `preserve_boot_volume = true` — if the node is ever replaced anyway, its boot volume is kept for
   recovery instead of deleted.
 
-**Still TODO (durability):** move the DB volumes onto a persistent OCI **block volume** (survives
-instance replacement) and add **automated Postgres backups** (`pg_dump` → Object Storage). Until
-then the single node is a single point of data loss — back up `langgraph-data` / `supabase-db-data`
-before any risky change.
+**Automated backups: done** (nightly `pg_dumpall` of `supabase-db` → Object Storage — see below).
+**Still TODO (durability):** move the DB volumes onto a persistent OCI **block volume** so a node
+replacement can't lose data in the first place (the backups make it *recoverable*, not immune).
+
+## Database backups
+
+A host cron takes a **nightly logical backup of `supabase-db`** (which holds Supabase auth + the app
+tables + LangGraph's tables in `public`) and uploads it to OCI Object Storage.
+
+- **What/where:** `pg_dumpall` (whole cluster: roles + all databases — required to restore
+  self-hosted Supabase) → gzip → `s3://muffin-db-backups/supabase-db/<UTC-timestamp>.sql.gz`.
+- **Schedule/retention:** 03:00 UTC daily; objects auto-expire after **30 days** via the bucket's
+  OCI lifecycle policy (`terraform/backups.tf`). One backup also runs on every deploy.
+- **How:** `ansible/muffin_stack.yml` renders `/usr/local/bin/muffin-db-backup.sh` + the cron and
+  stages the S3 creds to `/etc/muffin/backup.env` (the **same** Customer Secret Keys as the tfstate
+  backend — `AWS_ACCESS_KEY_ID`/`SECRET` from the deploy env; no new secret). Upload is a throwaway
+  `amazon/aws-cli` container against the S3-compatible endpoint. Logs: `/var/log/muffin-db-backup.log`.
+- **Scope:** `supabase-db` only. `langgraph-postgres` (unused since the cutover) and
+  `firecrawl-postgres` (ephemeral crawl queue) are not backed up.
+
+**Restore** (into a fresh node — the reliable path, since `pg_dumpall` recreates roles + databases,
+which would clash with an already-initialised Supabase):
+
+```bash
+# Pick a backup:
+aws s3 ls s3://muffin-db-backups/supabase-db/ --endpoint-url $ENDPOINT
+aws s3 cp s3://muffin-db-backups/supabase-db/<file>.sql.gz . --endpoint-url $ENDPOINT
+
+# On the target node, restore into a *pristine* supabase-db (stop the stack, wipe the
+# supabase-db-data volume, start ONLY supabase-db so its initdb runs, then load the dump
+# before the app services connect):
+gunzip -c <file>.sql.gz | sudo docker exec -i "$(sudo docker ps -qf name=muffin_supabase-db|head -1)" \
+  psql -U postgres -v ON_ERROR_STOP=0
+# (ON_ERROR_STOP=0 tolerates the handful of "role already exists" notices from initdb-created roles.)
+# Then bring the rest of the stack up and verify: auth.users, public.checkpoints, public.user_backups.
+```
+
+> **Test your backups.** Download the latest dump and restore it into a throwaway
+> `docker run --rm postgres:17` to confirm it's valid — an untested backup is not a backup.
 
 ## Supabase (self-hosted, M8)
 

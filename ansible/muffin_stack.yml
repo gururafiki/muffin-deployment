@@ -228,3 +228,73 @@
       loop_control:
         label: "{{ item | basename }}"
       changed_when: true
+
+# --- 6. Nightly database backups (pg_dumpall -> OCI Object Storage) --------
+- name: Configure database backups
+  hosts: manager
+  become: true
+  vars:
+    muffin_template_dir: ../stack
+  tasks:
+    - name: Load non-secret config
+      include_vars:
+        file: "{{ muffin_template_dir }}/config.yml"
+
+    # The S3 Customer Secret Keys are the same ones the tfstate backend uses —
+    # already in the deploy env as AWS_ACCESS_KEY_ID/SECRET (see deploy.yml). Read
+    # them here and stage a root-only env file so the cron uploads with no new
+    # secret. If they're absent (e.g. a local run without S3 creds), skip backups.
+    - name: Detect S3 credentials in the deploy environment
+      set_fact:
+        _s3_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        _s3_secret: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+      no_log: true
+
+    - name: Note when backups are skipped (no S3 credentials)
+      debug:
+        msg: "DB backups skipped: AWS_ACCESS_KEY_ID not in the deploy environment."
+      when: (db_backups_enabled | default(true)) and (_s3_key | length == 0)
+
+    - name: Configure nightly supabase-db backups
+      when: (db_backups_enabled | default(true)) and (_s3_key | length > 0)
+      block:
+        - name: Ensure /etc/muffin exists
+          file:
+            path: /etc/muffin
+            state: directory
+            mode: "0700"
+
+        - name: Stage the S3 credentials (root-only)
+          copy:
+            dest: /etc/muffin/backup.env
+            mode: "0600"
+            content: |
+              AWS_ACCESS_KEY_ID={{ _s3_key }}
+              AWS_SECRET_ACCESS_KEY={{ _s3_secret }}
+              AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+              AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+          no_log: true
+
+        - name: Stage the backup script
+          template:
+            src: "{{ muffin_template_dir }}/muffin-db-backup.sh"
+            dest: /usr/local/bin/muffin-db-backup.sh
+            mode: "0755"
+
+        - name: Install the nightly backup cron (03:00 UTC)
+          cron:
+            name: muffin-db-backup
+            minute: "0"
+            hour: "3"
+            user: root
+            job: "/usr/local/bin/muffin-db-backup.sh >> /var/log/muffin-db-backup.log 2>&1"
+
+        - name: Take one backup now (seed the bucket + validate the path)
+          command: /usr/local/bin/muffin-db-backup.sh
+          register: backup_run
+          changed_when: true
+          failed_when: false
+
+        - name: Show the backup result
+          debug:
+            msg: "backup rc={{ backup_run.rc }} | {{ backup_run.stdout_lines | default([]) }} | {{ backup_run.stderr_lines | default([]) }}"

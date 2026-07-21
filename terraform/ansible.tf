@@ -23,5 +23,5 @@ resource "ansible_playbook" "muffin" {
     private_ip              = oci_core_instance.node[0].private_ip
   }
 
-  depends_on = [oci_core_instance.node, cloudflare_dns_record.muffin]
+  depends_on = [oci_core_instance.node, cloudflare_dns_record.muffin, oci_objectstorage_bucket.db_backups]
 }

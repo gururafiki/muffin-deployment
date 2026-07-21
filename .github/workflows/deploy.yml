@@ -111,6 +111,13 @@ jobs:
           langfuse_base_url: "https://cloud.langfuse.com"
           firecrawl_api_key: "local"
           memory_debug_user_id: "shared"
+          # Nightly DB backups -> OCI Object Storage (S3-compatible). Bucket + 30-day
+          # retention are created by terraform (backups.tf); the upload reuses the
+          # tfstate S3 Customer Secret Keys already in this job's env
+          # (AWS_ACCESS_KEY_ID/SECRET). Endpoint mirrors terraform/backend.tf.
+          db_backups_enabled: true
+          db_backups_bucket: "muffin-db-backups"
+          db_backups_s3_endpoint: "https://lrjqtgyopxbk.compat.objectstorage.uk-london-1.oraclecloud.com"
           EOF
       - name: Generate stack/secrets.yaml (secrets)
         run: |
