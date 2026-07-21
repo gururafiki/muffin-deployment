@@ -296,12 +296,12 @@
             user: root
             job: "/usr/local/bin/muffin-db-backup.sh >> /var/log/muffin-db-backup.log 2>&1"
 
-        - name: Take one backup now (seed the bucket + validate the path)
+        # Fire-and-forget (poll: 0) so it NEVER holds or severs the deploy's SSH
+        # session — a synchronous run once starved the node and knocked services
+        # to 0/1. It also runs niced + checkpoint-light now; verify the object
+        # landed with `oci os object list --bucket-name muffin-db-backups`.
+        - name: Seed one backup now (async)
           command: /usr/local/bin/muffin-db-backup.sh
-          register: backup_run
+          async: 900
+          poll: 0
           changed_when: true
-          failed_when: false
-
-        - name: Show the backup result
-          debug:
-            msg: "backup rc={{ backup_run.rc }} | {{ backup_run.stdout_lines | default([]) }} | {{ backup_run.stderr_lines | default([]) }}"

@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Nightly logical backup of supabase-db -> OCI Object Storage (S3-compatible).
 #
-# Rendered onto the node by Ansible (muffin_stack.yml). Runs `pg_dumpall` inside
-# the supabase-db container (whole cluster: roles + all databases — required to
-# restore self-hosted Supabase, whose roles/schemas must exist), gzips it, and
-# uploads it via a throwaway aws-cli container using the S3 Customer Secret Keys
-# in /etc/muffin/backup.env. Retention is the bucket's OCI lifecycle policy
-# (terraform/backups.tf), so there is no pruning here.
+# Rendered onto the node by Ansible (muffin_stack.yml). Dumps the cluster ROLES
+# plus the `postgres` database (which holds Supabase auth + storage metadata, the
+# app tables, and LangGraph's thread/run/store history), and uploads a gzipped
+# SQL file. Retention (30 days) is pruned here (the bucket has no OCI lifecycle
+# policy — that needs a tenancy IAM grant).
+#
+# IMPORTANT — the LangGraph checkpoint tables (`public.checkpoint*`) are excluded
+# from the dump DATA: they're the checkpointer's in-flight state (regenerable,
+# not DR-critical) and dwarf everything else (~1.9GB vs ~50MB for the rest). We
+# keep their SCHEMA, so a restored DB has empty checkpoint tables that LangGraph
+# repopulates. This keeps the dump small and the node calm (a full 2GB gzip -9
+# once starved the services and severed the deploy). The whole pipeline is niced
+# and gzip is level 6.
 #
 # Restore: see README "Database backups".
 set -euo pipefail
@@ -20,11 +27,20 @@ OUT="/tmp/${NAME}"
 
 log() { echo "$(date -u +%FT%TZ) muffin-db-backup: $*"; }
 
+# Reclaim any dump left behind by an interrupted run.
+rm -f /tmp/supabase-db-*.sql.gz
+
 cid="$(docker ps -qf name=muffin_supabase-db | head -1)"
 if [ -z "$cid" ]; then log "ERROR: supabase-db container not found"; exit 1; fi
 
-# PGPASSWORD is already set inside the supabase-db container.
-docker exec "$cid" pg_dumpall -U postgres | gzip -9 > "$OUT"
+# Roles (tiny) + the postgres DB minus the huge LangGraph checkpoint DATA.
+# PGPASSWORD is already set inside the container. nice/ionice + gzip -6 keep this
+# from starving the co-located services on the single node.
+nice -n 19 ionice -c 3 bash -c "
+  { docker exec '$cid' pg_dumpall -U postgres --roles-only
+    docker exec '$cid' pg_dump -U postgres -d postgres --exclude-table-data='public.checkpoint*'
+  } | gzip -6 > '$OUT'
+"
 log "dumped $(du -h "$OUT" | cut -f1) -> ${OUT}"
 
 # aws-cli is multi-arch (arm64 OK). Creds + the OCI-S3 checksum workarounds come
@@ -36,10 +52,9 @@ log "uploaded s3://${BUCKET}/supabase-db/${NAME}"
 
 rm -f "$OUT"
 
-# Retention: delete backups older than RETAIN_DAYS. The bucket has no OCI
-# lifecycle policy (that needs a tenancy IAM grant), so prune here. `aws s3 ls`
-# prints "<date> <time> <size> <key>"; keep it tolerant so a prune hiccup never
-# fails the (already-succeeded) backup.
+# Retention: delete backups older than RETAIN_DAYS (no OCI lifecycle policy —
+# that needs a tenancy IAM grant). Tolerant so a prune hiccup never fails the
+# (already-succeeded) backup. `aws s3 ls` prints "<date> <time> <size> <key>".
 RETAIN_DAYS=30
 cutoff="$(date -u -d "${RETAIN_DAYS} days ago" +%Y-%m-%d)"
 old="$(aws s3 ls "s3://${BUCKET}/supabase-db/" 2>/dev/null | awk -v c="$cutoff" '$1 < c {print $4}')" || true

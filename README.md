@@ -71,8 +71,13 @@ replacement can't lose data in the first place (the backups make it *recoverable
 A host cron takes a **nightly logical backup of `supabase-db`** (which holds Supabase auth + the app
 tables + LangGraph's tables in `public`) and uploads it to OCI Object Storage.
 
-- **What/where:** `pg_dumpall` (whole cluster: roles + all databases — required to restore
-  self-hosted Supabase) → gzip → `s3://muffin-db-backups/supabase-db/<UTC-timestamp>.sql.gz`.
+- **What/where:** cluster **roles** (`pg_dumpall --roles-only`) + the **`postgres` database**
+  (`pg_dump` — Supabase auth + storage metadata, the app tables, and LangGraph thread/run/store
+  history) → gzip → `s3://muffin-db-backups/supabase-db/<UTC-timestamp>.sql.gz`. The LangGraph
+  **`public.checkpoint*` tables are excluded from the dump DATA** — they're the checkpointer's
+  in-flight state (regenerable, ~1.9 GB vs ~50 MB for everything else); their schema is kept, so a
+  restored DB has empty checkpoint tables that LangGraph repopulates. The dump is niced + `gzip -6`
+  so it can't starve the single node.
 - **Schedule/retention:** 03:00 UTC daily; the script prunes backups older than **30 days** (an OCI
   lifecycle policy would need a tenancy IAM grant to the Object Storage service principal, so we
   prune in-script instead). One backup also runs on every deploy.
