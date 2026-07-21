@@ -141,14 +141,17 @@
       include_vars:
         file: "{{ muffin_template_dir }}/secrets.yaml"
 
-    - name: Log in to the container registry (only if a password is set; public GHCR pulls anonymously)
+    # All ghcr.io/gururafiki/* images are PUBLIC, so pulls work anonymously and a
+    # registry login is not required. We still attempt it when a password is set
+    # (in case an image is ever made private), but a failure must NOT block the
+    # deploy — e.g. an expired/rotated REGISTRY_PASSWORD. `docker stack deploy
+    # --with-registry-auth` then just forwards no ghcr credential and pulls
+    # anonymously.
+    - name: Log in to the container registry (optional; images are public)
       shell: "echo {{ registry_password | quote }} | docker login {{ registry_server }} -u {{ registry_username | quote }} --password-stdin"
       no_log: true
       changed_when: true
-      register: registry_login
-      retries: 3
-      delay: 5
-      until: registry_login.rc == 0
+      failed_when: false
       when: registry_password | default('') | length > 0
 
     - name: Create Docker secrets (idempotent)
