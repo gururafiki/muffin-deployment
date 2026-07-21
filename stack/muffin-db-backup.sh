@@ -36,9 +36,14 @@ if [ -z "$cid" ]; then log "ERROR: supabase-db container not found"; exit 1; fi
 # Roles (tiny) + the postgres DB minus the huge LangGraph checkpoint DATA.
 # PGPASSWORD is already set inside the container. nice/ionice + gzip -6 keep this
 # from starving the co-located services on the single node.
+# --clean --if-exists makes the dump self-cleaning: on restore it DROPs existing
+# objects before recreating them, so it overwrites the stub auth/storage objects
+# the supabase/postgres image pre-creates (whose columns lag GoTrue's real
+# schema) — without it, auth.users etc. fail to restore. Restore AS supabase_admin
+# (the image superuser; plain `postgres` is locked down). See README.
 nice -n 19 ionice -c 3 bash -c "
   { docker exec '$cid' pg_dumpall -U postgres --roles-only
-    docker exec '$cid' pg_dump -U postgres -d postgres --exclude-table-data='public.checkpoint*'
+    docker exec '$cid' pg_dump -U postgres -d postgres --clean --if-exists --exclude-table-data='public.checkpoint*'
   } | gzip -6 > '$OUT'
 "
 log "dumped $(du -h "$OUT" | cut -f1) -> ${OUT}"

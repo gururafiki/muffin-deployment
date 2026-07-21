@@ -88,25 +88,32 @@ tables + LangGraph's tables in `public`) and uploads it to OCI Object Storage.
 - **Scope:** `supabase-db` only. `langgraph-postgres` (unused since the cutover) and
   `firecrawl-postgres` (ephemeral crawl queue) are not backed up.
 
-**Restore** (into a fresh node — the reliable path, since `pg_dumpall` recreates roles + databases,
-which would clash with an already-initialised Supabase):
+**Restore.** Two rules that make it actually work (verified 2026-07-21 — restoring as `postgres`
+into the bare image silently drops `auth.users`):
+1. Restore **as `supabase_admin`** — in the `supabase/postgres` image `postgres` is *not* a full
+   superuser, so it can't restore the `auth`/`storage` objects.
+2. The dump is taken with **`pg_dump --clean --if-exists`**, so it DROPs the image's pre-created stub
+   objects (whose columns lag GoTrue's real schema) and recreates them from the backup.
 
 ```bash
 # Pick a backup:
 aws s3 ls s3://muffin-db-backups/supabase-db/ --endpoint-url $ENDPOINT
 aws s3 cp s3://muffin-db-backups/supabase-db/<file>.sql.gz . --endpoint-url $ENDPOINT
 
-# On the target node, restore into a *pristine* supabase-db (stop the stack, wipe the
-# supabase-db-data volume, start ONLY supabase-db so its initdb runs, then load the dump
-# before the app services connect):
+# On the target node, restore into supabase-db (ideally freshly initialised — stop the app
+# services first so nothing writes during the restore):
 gunzip -c <file>.sql.gz | sudo docker exec -i "$(sudo docker ps -qf name=muffin_supabase-db|head -1)" \
-  psql -U postgres -v ON_ERROR_STOP=0
-# (ON_ERROR_STOP=0 tolerates the handful of "role already exists" notices from initdb-created roles.)
-# Then bring the rest of the stack up and verify: auth.users, public.checkpoints, public.user_backups.
+  psql -U supabase_admin -d postgres -v ON_ERROR_STOP=0
+# ON_ERROR_STOP=0 tolerates benign notices: "role already exists" / "reserved role, only superusers
+# can modify it" (Supabase's roles are pre-created and protected) and "... does not exist, skipping"
+# from the --clean DROP IF EXISTS. Then bring the stack up and verify:
+#   auth.users (accounts), public.thread (LangGraph history), public.user_backups.
 ```
 
 > **Test your backups.** Download the latest dump and restore it into a throwaway
-> `docker run --rm postgres:17` to confirm it's valid — an untested backup is not a backup.
+> `docker run --rm -e POSTGRES_PASSWORD=x supabase/postgres:<tag>` (**as `supabase_admin`**), then
+> assert `SELECT count(*) FROM auth.users` etc. match the source — an untested backup is not a backup.
+> This exact test caught the `postgres`-vs-`supabase_admin` + stub-schema issues above.
 
 ## Supabase (self-hosted, M8)
 
