@@ -29,9 +29,21 @@ log "dumped $(du -h "$OUT" | cut -f1) -> ${OUT}"
 
 # aws-cli is multi-arch (arm64 OK). Creds + the OCI-S3 checksum workarounds come
 # from the env file. --only-show-errors keeps cron mail quiet on success.
-docker run --rm --env-file "$ENV_FILE" -v /tmp:/data amazon/aws-cli:latest \
-  s3 cp "/data/${NAME}" "s3://${BUCKET}/supabase-db/${NAME}" \
-  --endpoint-url "$ENDPOINT" --only-show-errors
+aws() { docker run --rm --env-file "$ENV_FILE" -v /tmp:/data amazon/aws-cli:latest "$@" --endpoint-url "$ENDPOINT"; }
+
+aws s3 cp "/data/${NAME}" "s3://${BUCKET}/supabase-db/${NAME}" --only-show-errors
 log "uploaded s3://${BUCKET}/supabase-db/${NAME}"
 
 rm -f "$OUT"
+
+# Retention: delete backups older than RETAIN_DAYS. The bucket has no OCI
+# lifecycle policy (that needs a tenancy IAM grant), so prune here. `aws s3 ls`
+# prints "<date> <time> <size> <key>"; keep it tolerant so a prune hiccup never
+# fails the (already-succeeded) backup.
+RETAIN_DAYS=30
+cutoff="$(date -u -d "${RETAIN_DAYS} days ago" +%Y-%m-%d)"
+old="$(aws s3 ls "s3://${BUCKET}/supabase-db/" 2>/dev/null | awk -v c="$cutoff" '$1 < c {print $4}')" || true
+for key in $old; do
+  [ -n "$key" ] || continue
+  aws s3 rm "s3://${BUCKET}/supabase-db/${key}" --only-show-errors && log "pruned ${key}"
+done

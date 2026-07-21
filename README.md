@@ -73,8 +73,9 @@ tables + LangGraph's tables in `public`) and uploads it to OCI Object Storage.
 
 - **What/where:** `pg_dumpall` (whole cluster: roles + all databases — required to restore
   self-hosted Supabase) → gzip → `s3://muffin-db-backups/supabase-db/<UTC-timestamp>.sql.gz`.
-- **Schedule/retention:** 03:00 UTC daily; objects auto-expire after **30 days** via the bucket's
-  OCI lifecycle policy (`terraform/backups.tf`). One backup also runs on every deploy.
+- **Schedule/retention:** 03:00 UTC daily; the script prunes backups older than **30 days** (an OCI
+  lifecycle policy would need a tenancy IAM grant to the Object Storage service principal, so we
+  prune in-script instead). One backup also runs on every deploy.
 - **How:** `ansible/muffin_stack.yml` renders `/usr/local/bin/muffin-db-backup.sh` + the cron and
   stages the S3 creds to `/etc/muffin/backup.env` (the **same** Customer Secret Keys as the tfstate
   backend — `AWS_ACCESS_KEY_ID`/`SECRET` from the deploy env; no new secret). Upload is a throwaway

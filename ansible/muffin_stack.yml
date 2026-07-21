@@ -145,6 +145,10 @@
       shell: "echo {{ registry_password | quote }} | docker login {{ registry_server }} -u {{ registry_username | quote }} --password-stdin"
       no_log: true
       changed_when: true
+      register: registry_login
+      retries: 3
+      delay: 5
+      until: registry_login.rc == 0
       when: registry_password | default('') | length > 0
 
     - name: Create Docker secrets (idempotent)

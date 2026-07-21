@@ -79,10 +79,10 @@ firecrawl_api_key: "local"      # any non-empty string for self-hosted Firecrawl
 memory_debug_user_id: "shared"
 
 # === Database backups (nightly pg_dumpall of supabase-db -> OCI Object Storage) ===
-# Bucket + 30-day retention are created by terraform (backups.tf). The host cron
-# uploads via the S3-compatible endpoint using the tfstate Customer Secret Keys
-# (AWS_ACCESS_KEY_ID/SECRET must be in the deploy env; absent locally = skipped).
-# See README "Database backups" for the restore runbook.
+# Bucket is created by terraform (backups.tf); the script prunes backups >30 days.
+# The host cron uploads via the S3-compatible endpoint using the tfstate Customer
+# Secret Keys (AWS_ACCESS_KEY_ID/SECRET must be in the deploy env; absent locally
+# = skipped). See README "Database backups" for the restore runbook.
 db_backups_enabled: true
 db_backups_bucket: "muffin-db-backups"
 db_backups_s3_endpoint: "https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"
