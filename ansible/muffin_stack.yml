@@ -141,18 +141,18 @@
       include_vars:
         file: "{{ muffin_template_dir }}/secrets.yaml"
 
-    # All ghcr.io/gururafiki/* images are PUBLIC, so pulls work anonymously and a
-    # registry login is not required. We still attempt it when a password is set
-    # (in case an image is ever made private), but a failure must NOT block the
-    # deploy — e.g. an expired/rotated REGISTRY_PASSWORD. `docker stack deploy
-    # --with-registry-auth` then just forwards no ghcr credential and pulls
-    # anonymously.
-    - name: Log in to the container registry (optional; images are public)
-      shell: "echo {{ registry_password | quote }} | docker login {{ registry_server }} -u {{ registry_username | quote }} --password-stdin"
-      no_log: true
-      changed_when: true
+    # All ghcr.io/gururafiki/* images are PUBLIC, so the node pulls them
+    # anonymously — no registry login, and NO --with-registry-auth on the stack
+    # deploy below. Actively CLEAR any stale ghcr.io credential (e.g. left by an
+    # earlier login with a since-rotated REGISTRY_PASSWORD): a bad/expired
+    # credential makes the registry return 401 instead of falling back to
+    # anonymous, which breaks pulls of even public images ("No such image:
+    # ghcr.io/..."). If images are ever made private, restore a `docker login`
+    # here + `--with-registry-auth` below with a valid PAT.
+    - name: Clear any stale registry credential (images are public → anonymous pulls)
+      command: "docker logout {{ registry_server }}"
+      changed_when: false
       failed_when: false
-      when: registry_password | default('') | length > 0
 
     - name: Create Docker secrets (idempotent)
       shell: "echo -n {{ item.value | quote }} | docker secret create {{ item.name }} -"
@@ -174,8 +174,8 @@
   hosts: manager
   become: true
   tasks:
-    - name: docker stack deploy (with registry auth so the node can pull private images)
-      command: "docker stack deploy -c /home/ubuntu/docker-compose.yaml --with-registry-auth muffin"
+    - name: docker stack deploy (images are public → anonymous pulls, no registry auth)
+      command: "docker stack deploy -c /home/ubuntu/docker-compose.yaml muffin"
 
 # --- 6. Supabase post-deploy migrations ------------------------------------
 # App tables reference auth.users, which GoTrue creates on ITS first boot — so these
