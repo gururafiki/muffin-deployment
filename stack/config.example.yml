@@ -37,14 +37,19 @@ registry_username: "<github-user>"
 # fallbacks). When set, `llm_chain` is authoritative for every role — it
 # supersedes `llm_provider`/`orchestrator_models`/… below. Profiles OMIT the
 # api_key (it resolves the matching *_api_key from secrets.yaml). Each profile
-# carries its own `requests_per_second` — the primary (Ollama Cloud) is left
-# relaxed, only the OpenRouter free fallback is throttled to 0.3 (=18/min, under
-# the 20/min free cap; free routes also have a daily cap). The `ollama` provider
-# uses the native /api/chat API (Ollama Cloud https://ollama.com by default —
-# NEVER append /v1, its tool calling is unreliable).
+# carries its own `requests_per_second`, and models sharing a rate share ONE
+# process-wide InMemoryRateLimiter — this is what throttles the council's ~19-way
+# parallel fan-out. Ollama Cloud rejects bursts with "too many concurrent
+# requests" (429), so the primary MUST be throttled too (effective concurrency ≈
+# rps × avg_call_latency; 0.5/s keeps a multi-second-per-call fan-out to a handful
+# in flight — tune up if too slow, down if 429s reappear). The OpenRouter free
+# fallback stays at 0.3 (=18/min, under the 20/min free cap; free routes also have
+# a daily cap). The `ollama` provider uses the native /api/chat API (Ollama Cloud
+# https://ollama.com by default — NEVER append /v1, its tool calling is unreliable).
 llm_chain:
   - provider: ollama
     model: "minimax-m3:cloud"
+    requests_per_second: 0.5
   - provider: openrouter
     model: "nvidia/nemotron-3-super-120b-a12b:free"
     requests_per_second: 0.3
