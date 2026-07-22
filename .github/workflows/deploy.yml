@@ -89,9 +89,16 @@ jobs:
           # Cross-provider model chain (primary first, rest fallbacks). Authoritative
           # for every role — supersedes llm_provider/model + the per-role *_models
           # chains. Keys resolve from the *_api_key secrets (profiles omit api_key).
+          # Both profiles carry a per-profile requests_per_second → a shared
+          # InMemoryRateLimiter throttles the council's ~19-way parallel fan-out.
+          # Ollama Cloud rejects bursts with "too many concurrent requests" (429);
+          # effective concurrency ≈ rps × avg_call_latency, so 0.5/s keeps a
+          # multi-second-per-call fan-out to a handful in flight. Tune up if the
+          # council is too slow, down if 429s reappear.
           llm_chain:
             - provider: ollama
               model: "minimax-m3:cloud"
+              requests_per_second: 0.5
             - provider: openrouter
               model: "nvidia/nemotron-3-super-120b-a12b:free"
               requests_per_second: 0.3
