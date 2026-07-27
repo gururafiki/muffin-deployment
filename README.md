@@ -74,10 +74,24 @@ tables + LangGraph's tables in `public`) and uploads it to OCI Object Storage.
 - **What/where:** cluster **roles** (`pg_dumpall --roles-only`) + the **`postgres` database**
   (`pg_dump` — Supabase auth + storage metadata, the app tables, and LangGraph thread/run/store
   history) → gzip → `s3://muffin-db-backups/supabase-db/<UTC-timestamp>.sql.gz`. The LangGraph
-  **`public.checkpoint*` tables are excluded from the dump DATA** — they're the checkpointer's
-  in-flight state (regenerable, ~1.9 GB vs ~50 MB for everything else); their schema is kept, so a
+  **`public.checkpoint*` tables are excluded from the dump DATA**; their schema is kept, so a
   restored DB has empty checkpoint tables that LangGraph repopulates. The dump is niced + `gzip -6`
   so it can't starve the single node.
+
+  > ⚠ **That exclusion is now a known data-loss decision, not a free optimisation** (2026-07-27).
+  > It was written when checkpoints were "the checkpointer's in-flight state, regenerable". They are
+  > not regenerable and they are no longer redundant: muffin-ui reconstructs a past run's **execution
+  > tree** — every sub-agent, transcript and tool call — from checkpoint history
+  > (`muffin-ui/src/lib/agent/run-history.ts`), and the bespoke capture channels that used to
+  > duplicate that into `thread.values` were deleted. **A restore from these dumps yields threads
+  > with their headline result but no record of how the run reached it.**
+  >
+  > The size figure that motivated the exclusion is also misleading. Measured on the node:
+  > `checkpoint_blobs` is 1878 MB, but **1763 MB of it belongs to a single errored council thread**
+  > (`019f8476-...`, 2026-07-21), and 95 % of all blob bytes are the `messages` channel — not the
+  > capture channels (`subagent_runs` was 350 kB). Pruning that one thread brings the tables to
+  > ~115 MB, at which point including them costs little. **Decide before relying on these dumps for
+  > run history.**
 - **Schedule/retention:** 03:00 UTC daily; the script prunes backups older than **30 days** (an OCI
   lifecycle policy would need a tenancy IAM grant to the Object Storage service principal, so we
   prune in-script instead). One backup also runs on every deploy.

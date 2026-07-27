@@ -15,11 +15,13 @@
 #
 # ⚠ THE ORIGINAL JUSTIFICATION NO LONGER HOLDS (2026-07-27). This exclusion was
 # written when checkpoints were "the checkpointer's in-flight state (regenerable,
-# not DR-critical)". muffin-ui now reconstructs a past run's EXECUTION TREE from
-# checkpoint history (`lib/agent/run-history.ts`) rather than from a bespoke
-# capture channel, so checkpoints are the only record of what a run actually did.
-# A restore from these dumps yields threads with their headline result
-# (`thread.values` survives) but NO execution tree, transcripts or tool calls.
+# not DR-critical)". They are neither. muffin-ui reconstructs a past run's
+# EXECUTION TREE — every sub-agent, transcript and tool call — from checkpoint
+# history (`lib/agent/run-history.ts`), and the bespoke capture channels that
+# used to duplicate that into `thread.values` were DELETED (muffin-agent #132).
+# Checkpoints are now the only record of what a run actually did. A restore from
+# these dumps yields threads with their headline result (`thread.values`
+# survives) but NO execution tree, transcripts or tool calls.
 #
 # Deliberately NOT changed yet — including them is a real trade-off (disk,
 # bandwidth, restore time) and the size figure that motivated the exclusion turns
