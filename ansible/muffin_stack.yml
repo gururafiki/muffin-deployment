@@ -299,6 +299,15 @@
             dest: /usr/local/bin/muffin-db-backup.sh
             mode: "0755"
 
+        # Operator tool, NOT cron: deletes one thread + its checkpoints. Staged
+        # here so it is available on the node when a single bad thread dominates
+        # checkpoint storage (see its header). Dry-run unless given --yes.
+        - name: Stage the thread-prune tool
+          copy:
+            src: "{{ muffin_template_dir }}/muffin-prune-thread.sh"
+            dest: /usr/local/bin/muffin-prune-thread.sh
+            mode: "0755"
+
         - name: Install the nightly backup cron (03:00 UTC)
           cron:
             name: muffin-db-backup

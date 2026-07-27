@@ -89,5 +89,14 @@ memory_debug_user_id: "shared"
 # Secret Keys (AWS_ACCESS_KEY_ID/SECRET must be in the deploy env; absent locally
 # = skipped). See README "Database backups" for the restore runbook.
 db_backups_enabled: true
+# Include LangGraph checkpoint DATA in the dump? Checkpoints are the ONLY record
+# of what a run did (muffin-ui reconstructs each run's execution tree from them),
+# so `false` means a restore keeps every thread's headline result but loses all
+# transcripts, tool calls and sub-agent structure.
+# Left false by default because the tables can be large. Recommended path: run
+# `muffin-prune-thread.sh <id>` on the node for any pathological thread (one
+# errored council run held 1763 MB of 1878 MB on 2026-07-27), confirm a backup
+# still completes comfortably, then flip this to true.
+db_backups_include_checkpoints: false
 db_backups_bucket: "muffin-db-backups"
 db_backups_s3_endpoint: "https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"

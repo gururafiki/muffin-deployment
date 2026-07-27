@@ -78,20 +78,30 @@ tables + LangGraph's tables in `public`) and uploads it to OCI Object Storage.
   restored DB has empty checkpoint tables that LangGraph repopulates. The dump is niced + `gzip -6`
   so it can't starve the single node.
 
-  > ⚠ **That exclusion is now a known data-loss decision, not a free optimisation** (2026-07-27).
+  > ⚠ **This exclusion is a data-loss decision, not a free optimisation** (2026-07-27).
   > It was written when checkpoints were "the checkpointer's in-flight state, regenerable". They are
-  > not regenerable and they are no longer redundant: muffin-ui reconstructs a past run's **execution
-  > tree** — every sub-agent, transcript and tool call — from checkpoint history
-  > (`muffin-ui/src/lib/agent/run-history.ts`), and the bespoke capture channels that used to
-  > duplicate that into `thread.values` were deleted. **A restore from these dumps yields threads
-  > with their headline result but no record of how the run reached it.**
+  > not regenerable and no longer redundant: muffin-ui reconstructs a past run's **execution tree**
+  > — every sub-agent, transcript and tool call — from checkpoint history
+  > (`muffin-ui/src/lib/agent/run-history.ts`), and the capture channels that used to duplicate that
+  > into `thread.values` were deleted. **With checkpoints excluded, a restore yields threads with
+  > their headline result but no record of how each run reached it.**
   >
   > The size figure that motivated the exclusion is also misleading. Measured on the node:
-  > `checkpoint_blobs` is 1878 MB, but **1763 MB of it belongs to a single errored council thread**
-  > (`019f8476-...`, 2026-07-21), and 95 % of all blob bytes are the `messages` channel — not the
-  > capture channels (`subagent_runs` was 350 kB). Pruning that one thread brings the tables to
-  > ~115 MB, at which point including them costs little. **Decide before relying on these dumps for
-  > run history.**
+  > `checkpoint_blobs` was 1878 MB, but **1763 MB of it belonged to a single errored council thread**
+  > (`019f8476-…`, 2026-07-21), and 95 % of all blob bytes are the `messages` channel — not the
+  > capture channels (`subagent_runs` was 350 kB).
+
+- **Turning it on.** Set `db_backups_include_checkpoints: true` in `config.yml`. Recommended order:
+
+  1. `muffin-prune-thread.sh <thread-uuid>` on the node — **dry run**, prints what it would delete.
+  2. Re-run with `--yes` for any pathological thread. Deleting `019f8476-…` takes the checkpoint
+     tables to ~115 MB. **Irreversible: it destroys that run's history permanently.**
+  3. Flip the flag and redeploy; confirm the next dump completes and check its size.
+
+  `pg_dump` writes only live rows, so the dump shrinks the moment a thread is deleted — no `VACUUM`
+  needed for that. The on-disk files stay their old size until autovacuum reuses the space, which is
+  fine; `VACUUM FULL` takes an ACCESS EXCLUSIVE lock and needs free space equal to the table, so it
+  is not worth running on this node just to reclaim disk.
 - **Schedule/retention:** 03:00 UTC daily; the script prunes backups older than **30 days** (an OCI
   lifecycle policy would need a tenancy IAM grant to the Object Storage service principal, so we
   prune in-script instead). One backup also runs on every deploy.
