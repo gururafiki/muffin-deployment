@@ -8,12 +8,27 @@
 # policy — that needs a tenancy IAM grant).
 #
 # IMPORTANT — the LangGraph checkpoint tables (`public.checkpoint*`) are excluded
-# from the dump DATA: they're the checkpointer's in-flight state (regenerable,
-# not DR-critical) and dwarf everything else (~1.9GB vs ~50MB for the rest). We
-# keep their SCHEMA, so a restored DB has empty checkpoint tables that LangGraph
-# repopulates. This keeps the dump small and the node calm (a full 2GB gzip -9
-# once starved the services and severed the deploy). The whole pipeline is niced
-# and gzip is level 6.
+# from the dump DATA. We keep their SCHEMA, so a restored DB has empty checkpoint
+# tables that LangGraph repopulates. This keeps the dump small and the node calm
+# (a full 2GB gzip -9 once starved the services and severed the deploy). The whole
+# pipeline is niced and gzip is level 6.
+#
+# ⚠ THE ORIGINAL JUSTIFICATION NO LONGER HOLDS (2026-07-27). This exclusion was
+# written when checkpoints were "the checkpointer's in-flight state (regenerable,
+# not DR-critical)". muffin-ui now reconstructs a past run's EXECUTION TREE from
+# checkpoint history (`lib/agent/run-history.ts`) rather than from a bespoke
+# capture channel, so checkpoints are the only record of what a run actually did.
+# A restore from these dumps yields threads with their headline result
+# (`thread.values` survives) but NO execution tree, transcripts or tool calls.
+#
+# Deliberately NOT changed yet — including them is a real trade-off (disk,
+# bandwidth, restore time) and the size figure that motivated the exclusion turns
+# out to be misleading: measured on the node, 1763 MB of the 1878 MB belongs to a
+# SINGLE errored council thread (019f8476, 2026-07-21), and 95% of all blob bytes
+# are the `messages` channel — not, as previously assumed, the capture channels
+# (`subagent_runs` is 350 kB). Pruning that one thread would bring the tables to
+# ~115 MB, at which point including them is cheap. Decide before relying on these
+# dumps for run history.
 #
 # Restore: see README "Database backups".
 set -euo pipefail
