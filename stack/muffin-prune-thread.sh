@@ -40,14 +40,20 @@ fi
 cid="$(docker ps -qf name=muffin_supabase-db | head -1)"
 if [ -z "$cid" ]; then echo "ERROR: supabase-db container not found" >&2; exit 1; fi
 
-psql() { docker exec -i "$cid" psql -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
+# TWO helpers on purpose. `docker exec -i` forwards stdin to the container, so a
+# query call made with -i silently EATS whatever is on this script's stdin — when
+# run over `ssh <<heredoc` that is the rest of the script itself, and everything
+# after the first query vanishes without an error. Queries therefore get no -i;
+# only the piped transaction does.
+psql() { docker exec "$cid" psql -U postgres -d postgres -v ON_ERROR_STOP=1 "$@" </dev/null; }
+psql_stdin() { docker exec -i "$cid" psql -U postgres -d postgres -v ON_ERROR_STOP=1; }
 
 # Deletion order: children before parents, so no delete trips a foreign key.
 # The actual set of tables is DISCOVERED below rather than assumed — this list
 # only fixes the ORDER, and anything discovered that is not named here aborts
 # the run. That way a schema change (a renamed table, a new thread-scoped one)
 # fails loudly here instead of silently leaving rows behind.
-KNOWN_TABLES=(checkpoint_writes checkpoint_blobs checkpoints run thread)
+KNOWN_TABLES=(checkpoint_delete_queue checkpoint_writes checkpoint_blobs checkpoints run thread)
 
 echo "== schema check =="
 present="$(psql -tAc "
@@ -109,7 +115,7 @@ echo "== deleting (single transaction) =="
     echo "DELETE FROM \"$t\" WHERE thread_id = '$THREAD_ID';"
   done
   echo "COMMIT;"
-} | psql
+} | psql_stdin
 
 echo
 echo "== after =="

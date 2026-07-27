@@ -71,7 +71,9 @@ jobs:
           set -euo pipefail
           cid="$(docker ps -qf name=muffin_supabase-db | head -1)"
           [ -n "$cid" ] || { echo "supabase-db not running"; exit 1; }
-          psql() { docker exec -i "$cid" psql -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
+          # No -i: `docker exec -i` would forward stdin to the container and eat
+          # the rest of THIS heredoc, so only the first query would ever run.
+          psql() { docker exec "$cid" psql -U postgres -d postgres -v ON_ERROR_STOP=1 "$@" </dev/null; }
           echo "== table sizes =="
           psql -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS total
                    FROM pg_catalog.pg_statio_user_tables
@@ -107,5 +109,5 @@ jobs:
             echo "DRY RUN (set confirm=delete to actually delete)"
           fi
           ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
-            ubuntu@"$NODE_IP" \
+            -n ubuntu@"$NODE_IP" \
             "chmod +x /tmp/muffin-prune-thread.sh && sudo /tmp/muffin-prune-thread.sh '${{ inputs.thread_id }}' $FLAG"
