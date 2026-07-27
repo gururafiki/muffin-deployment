@@ -98,9 +98,12 @@ jobs:
             echo "::error::thread_id is required for prune-thread"; exit 2
           fi
           # Copy the reviewed script rather than inlining SQL, so what runs here
-          # is the same thing that is code-reviewed in stack/.
-          scp -i ~/.ssh/oci_key -o StrictHostKeyChecking=no \
-            stack/muffin-prune-thread.sh ubuntu@"$NODE_IP":/tmp/muffin-prune-thread.sh
+          # is the same thing that is code-reviewed in stack/. Piped over ssh
+          # rather than scp: modern scp speaks SFTP, and this node's sshd has no
+          # sftp subsystem ("subsystem request failed on channel 0").
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            ubuntu@"$NODE_IP" 'cat > /tmp/muffin-prune-thread.sh' \
+            < stack/muffin-prune-thread.sh
           FLAG=""
           if [ "${{ inputs.confirm }}" = "delete" ]; then
             echo "::warning::DELETING thread ${{ inputs.thread_id }} — this is irreversible"
