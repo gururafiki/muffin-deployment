@@ -1,0 +1,111 @@
+# Operator maintenance on the deployed node, without hand-SSHing into it.
+#
+# Node access already lives in CI (the deploy job holds the SSH key and the
+# tfstate credentials), so maintenance goes through the same trusted path rather
+# than a laptop. This workflow is strictly LESS powerful than `deploy`: it never
+# runs terraform apply and never touches the stack — it copies one reviewed
+# script to the node and runs it.
+#
+# `terraform output` only reads state, so this needs the S3 backend credentials
+# but none of the OCI provider ones.
+name: Node maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options:
+          - checkpoint-report
+          - prune-thread
+        default: checkpoint-report
+      thread_id:
+        description: Thread UUID (prune-thread only)
+        type: string
+        default: ""
+      confirm:
+        description: prune-thread is a DRY RUN unless this is "delete"
+        type: string
+        default: "dry-run"
+
+concurrency:
+  group: node-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Materialise the SSH key
+        run: |
+          mkdir -p ~/.ssh
+          # trailing newline required or openssl rejects the key
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/oci_key
+          chmod 600 ~/.ssh/oci_key
+
+      - name: Resolve the node address from terraform state
+        working-directory: terraform
+        env:
+          AWS_ACCESS_KEY_ID:                ${{ secrets.TFSTATE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:            ${{ secrets.TFSTATE_S3_SECRET_ACCESS_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          terraform init -input=false
+          ip="$(terraform output -json instance_public_ips | python3 -c 'import json,sys; print(json.load(sys.stdin)[0])')"
+          [ -n "$ip" ] || { echo "::error::no instance IP in terraform state"; exit 1; }
+          echo "NODE_IP=$ip" >> "$GITHUB_ENV"
+          echo "resolved node: $ip"
+
+      - name: Checkpoint storage report (read-only)
+        if: inputs.action == 'checkpoint-report'
+        run: |
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            ubuntu@"$NODE_IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cid="$(docker ps -qf name=muffin_supabase-db | head -1)"
+          [ -n "$cid" ] || { echo "supabase-db not running"; exit 1; }
+          psql() { docker exec -i "$cid" psql -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
+          echo "== table sizes =="
+          psql -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS total
+                   FROM pg_catalog.pg_statio_user_tables
+                   WHERE relname LIKE 'checkpoint%' OR relname IN ('thread','run')
+                   ORDER BY pg_total_relation_size(relid) DESC;"
+          echo "== biggest threads by blob bytes =="
+          psql -c "SELECT thread_id, count(*) AS blobs,
+                          pg_size_pretty(sum(pg_column_size(blob))) AS bytes
+                   FROM checkpoint_blobs GROUP BY thread_id
+                   ORDER BY sum(pg_column_size(blob)) DESC LIMIT 10;"
+          echo "== blob bytes by channel =="
+          psql -c "SELECT channel, count(*) AS rows,
+                          pg_size_pretty(sum(pg_column_size(blob))) AS bytes
+                   FROM checkpoint_blobs GROUP BY channel
+                   ORDER BY sum(pg_column_size(blob)) DESC LIMIT 10;"
+          REMOTE
+
+      - name: Prune one thread
+        if: inputs.action == 'prune-thread'
+        run: |
+          if [ -z "${{ inputs.thread_id }}" ]; then
+            echo "::error::thread_id is required for prune-thread"; exit 2
+          fi
+          # Copy the reviewed script rather than inlining SQL, so what runs here
+          # is the same thing that is code-reviewed in stack/.
+          scp -i ~/.ssh/oci_key -o StrictHostKeyChecking=no \
+            stack/muffin-prune-thread.sh ubuntu@"$NODE_IP":/tmp/muffin-prune-thread.sh
+          FLAG=""
+          if [ "${{ inputs.confirm }}" = "delete" ]; then
+            echo "::warning::DELETING thread ${{ inputs.thread_id }} — this is irreversible"
+            FLAG="--yes"
+          else
+            echo "DRY RUN (set confirm=delete to actually delete)"
+          fi
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            ubuntu@"$NODE_IP" \
+            "chmod +x /tmp/muffin-prune-thread.sh && sudo /tmp/muffin-prune-thread.sh '${{ inputs.thread_id }}' $FLAG"
