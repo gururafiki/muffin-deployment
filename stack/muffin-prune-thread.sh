@@ -53,7 +53,20 @@ psql_stdin() { docker exec -i "$cid" psql -U postgres -d postgres -v ON_ERROR_ST
 # only fixes the ORDER, and anything discovered that is not named here aborts
 # the run. That way a schema change (a renamed table, a new thread-scoped one)
 # fails loudly here instead of silently leaving rows behind.
-KNOWN_TABLES=(checkpoint_delete_queue checkpoint_writes checkpoint_blobs checkpoints run thread)
+# `cron` and `thread_ttl` were discovered by the schema check on the deployed
+# node — both reference a thread, so both must go before `thread` itself. A cron
+# row means a SCHEDULE is attached to this thread; the dry run prints the counts,
+# so check them before deleting a thread you did not expect to be scheduled.
+KNOWN_TABLES=(
+  checkpoint_delete_queue
+  checkpoint_writes
+  checkpoint_blobs
+  checkpoints
+  cron
+  thread_ttl
+  run
+  thread
+)
 
 echo "== schema check =="
 present="$(psql -tAc "
