@@ -17,6 +17,7 @@ on:
         description: What to do
         type: choice
         options:
+          - service-status
           - checkpoint-report
           - thread-namespaces
           - prune-thread
@@ -63,6 +64,24 @@ jobs:
           [ -n "$ip" ] || { echo "::error::no instance IP in terraform state"; exit 1; }
           echo "NODE_IP=$ip" >> "$GITHUB_ENV"
           echo "resolved node: $ip"
+
+      # Read-only: is the stack healthy, and if not, why. First stop after a
+      # deploy that changed dependencies.
+      - name: Service status (read-only)
+        if: inputs.action == 'service-status'
+        run: |
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -n ubuntu@"$NODE_IP" '
+              echo "== services =="
+              docker service ls --format "{{.Name}}\t{{.Replicas}}\t{{.Image}}" | sort
+              echo
+              echo "== langgraph-api recent tasks =="
+              docker service ps muffin_langgraph-api --no-trunc \
+                --format "{{.Name}}\t{{.CurrentState}}\t{{.Error}}" | head -6
+              echo
+              echo "== langgraph-api logs (tail) =="
+              docker service logs muffin_langgraph-api --tail 40 2>&1 | tail -40
+            '
 
       - name: Checkpoint storage report (read-only)
         if: inputs.action == 'checkpoint-report'
