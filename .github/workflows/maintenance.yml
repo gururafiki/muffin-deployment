@@ -107,7 +107,12 @@ jobs:
                psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
                \"SELECT checkpoint_ns, count(*) AS checkpoints
                   FROM checkpoints WHERE thread_id = '${{ inputs.thread_id }}'
-                  GROUP BY checkpoint_ns ORDER BY checkpoint_ns;\""
+                  GROUP BY checkpoint_ns ORDER BY checkpoint_ns;
+                  SELECT left(checkpoint_ns, 46) AS ns, channel, count(*) AS rows,
+                         pg_size_pretty(sum(pg_column_size(blob))) AS bytes
+                  FROM checkpoint_blobs
+                  WHERE thread_id = '${{ inputs.thread_id }}' AND channel = 'messages'
+                  GROUP BY 1,2 ORDER BY sum(pg_column_size(blob)) DESC LIMIT 15;\""
 
       - name: Prune one thread
         if: inputs.action == 'prune-thread'
