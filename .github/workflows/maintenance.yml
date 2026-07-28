@@ -18,6 +18,7 @@ on:
         type: choice
         options:
           - checkpoint-report
+          - thread-namespaces
           - prune-thread
         default: checkpoint-report
       thread_id:
@@ -90,6 +91,23 @@ jobs:
                    FROM checkpoint_blobs GROUP BY channel
                    ORDER BY sum(pg_column_size(blob)) DESC LIMIT 10;"
           REMOTE
+
+      # Read-only: which checkpoint namespaces a thread actually recorded. This
+      # is how you tell "the UI can't find this sub-agent" from "the sub-agent
+      # was never checkpointed as its own namespace".
+      - name: Thread namespaces (read-only)
+        if: inputs.action == 'thread-namespaces'
+        run: |
+          if [ -z "${{ inputs.thread_id }}" ]; then
+            echo "::error::thread_id is required"; exit 2
+          fi
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -n ubuntu@"$NODE_IP" \
+            "docker exec \$(docker ps -qf name=muffin_supabase-db | head -1) \
+               psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+               \"SELECT checkpoint_ns, count(*) AS checkpoints
+                  FROM checkpoints WHERE thread_id = '${{ inputs.thread_id }}'
+                  GROUP BY checkpoint_ns ORDER BY checkpoint_ns;\""
 
       - name: Prune one thread
         if: inputs.action == 'prune-thread'
