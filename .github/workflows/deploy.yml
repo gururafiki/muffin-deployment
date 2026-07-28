@@ -123,6 +123,15 @@ jobs:
           # S3 Customer Secret Keys already in this job's env (AWS_ACCESS_KEY_ID/SECRET).
           # Endpoint mirrors terraform/backend.tf.
           db_backups_enabled: true
+          # Checkpoints are the ONLY record of what a run did — muffin-ui rebuilds
+          # each run's execution tree from them and the capture channels that used
+          # to duplicate it are gone. Excluding them means a restore keeps every
+          # thread's headline result and loses all transcripts, tool calls and
+          # sub-agent structure.
+          # Safe to enable only AFTER pruning the 1763 MB errored council thread
+          # (019f8476-...) — otherwise the post-deploy backup gzips ~1.9 GB, which
+          # has starved this node and severed a deploy before.
+          db_backups_include_checkpoints: true
           db_backups_bucket: "muffin-db-backups"
           db_backups_s3_endpoint: "https://lrjqtgyopxbk.compat.objectstorage.uk-london-1.oraclecloud.com"
           EOF
