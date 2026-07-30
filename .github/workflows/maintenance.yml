@@ -75,6 +75,16 @@ jobs:
               echo "== services =="
               docker service ls --format "{{.Name}}\t{{.Replicas}}\t{{.Image}}" | sort
               echo
+              # Every image ref here is a MUTABLE tag (:latest), so the tag alone
+              # cannot answer "is the node running the image CI just built?".
+              # Swarm pins the digest it resolved at deploy time — print that, so a
+              # deploy can be matched against the manifest digest in the build log.
+              echo "== resolved image digests (compare with the build log) =="
+              docker service ls -q | while read -r id; do
+                docker service inspect "$id" \
+                  --format "{{.Spec.Name}}\t{{.Spec.TaskTemplate.ContainerSpec.Image}}"
+              done | sort
+              echo
               echo "== langgraph-api recent tasks =="
               docker service ps muffin_langgraph-api --no-trunc \
                 --format "{{.Name}}\t{{.CurrentState}}\t{{.Error}}" | head -6
