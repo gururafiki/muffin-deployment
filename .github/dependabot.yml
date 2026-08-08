@@ -1,0 +1,33 @@
+# Dependabot configuration.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# No `docker` ecosystem: this repo builds no images. The `ghcr.io/gururafiki/*`
+# tags in stack/docker-compose.yaml are produced by the sibling build repos and
+# rolled by their auto-CD dispatch, not by a dependency update here.
+version: 2
+updates:
+  - package-ecosystem: "terraform"
+    directory: "/terraform"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # opensandbox runtime image requirements (config/opensandbox/requirements.txt) —
+  # what the sandbox has available to `execute_python`, not this repo's own deps.
+  - package-ecosystem: "pip"
+    directory: "/config/opensandbox"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
