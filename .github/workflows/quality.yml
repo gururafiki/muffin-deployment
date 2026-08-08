@@ -1,0 +1,57 @@
+name: Quality
+
+# The merge gate for this repo. Until now nothing checked a pull request here:
+# deploy.yml only fires on workflow_dispatch / repository_dispatch, so a
+# malformed .tf or a broken playbook task was discoverable only by running a
+# deploy against the live Oracle node — which is also the thing that once
+# replaced the VM and wiped every database.
+#
+# Everything below runs WITHOUT credentials and WITHOUT touching real infra:
+# `terraform init -backend=false` skips the OCI Object Storage backend, and
+# `ansible-playbook --syntax-check` needs no inventory or SSH key.
+#
+# NOTE: deliberately NO `paths` / `paths-ignore` filter. This is a REQUIRED
+# status check, and a filtered workflow never reports on a PR that misses the
+# filter — leaving the PR blocked on a check that will never arrive.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.13.1"
+          # The wrapper rewrites stdout, which makes `fmt -check` output useless.
+          terraform_wrapper: false
+      - name: Format
+        run: terraform -chdir=terraform fmt -check -recursive
+      - name: Init (no backend — no credentials needed)
+        run: terraform -chdir=terraform init -backend=false -input=false
+      - name: Validate
+        run: terraform -chdir=terraform validate
+
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ansible-core + pinned collections
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install -r ansible/requirements.yml
+      - name: Syntax check
+        # Warns about the missing inventory (manager/workers resolve at deploy
+        # time from the cloud.terraform dynamic inventory) and still exits 0 —
+        # this validates playbook and role task structure, not connectivity.
+        run: ansible-playbook --syntax-check ansible/muffin_stack.yml
