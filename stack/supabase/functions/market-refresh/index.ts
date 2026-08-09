@@ -22,7 +22,14 @@
 // real openbb-api with no Supabase running — see ./check.ts.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
-import { loadProfiles, openbbFetcher, PROFILE_TTL_MINUTES, RESOURCES } from './resources.ts'
+import {
+  loadPrices,
+  loadProfiles,
+  openbbFetcher,
+  PRICES_TTL_MINUTES,
+  PROFILE_TTL_MINUTES,
+  RESOURCES,
+} from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -33,26 +40,53 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' }
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS })
 
+/**
+ * True when the caller presented the SERVICE-ROLE key.
+ *
+ * The main router has already verified the JWT's signature, so this only has to
+ * read the claim — but it must still be checked, because `force` is the one input
+ * that lets a caller bypass the rate limit protecting the upstream provider.
+ */
+function isServiceRole(req: Request): boolean {
+  const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  if (!token) return false
+  try {
+    const [, payload] = token.split('.')
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))).role === 'service_role'
+  } catch {
+    return false
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok')
 
   let resource = 'sector-performance'
+  let force = false
   try {
     const body = await req.json()
     if (body?.resource) resource = String(body.resource)
+    // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
+    // refreshes must still collapse into one upstream fetch. Requires the
+    // service-role key: the anon key is public, and a public cache-buster is a
+    // free way to hammer the provider.
+    force = body?.force === true && isServiceRole(req)
   } catch {
     // No body / not JSON — fall back to the default resource.
   }
 
   const PROFILE_RESOURCE = 'instrument-profile'
+  const PRICES_RESOURCE = 'instrument-prices'
+  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE]
   const spec = RESOURCES[resource]
-  if (!spec && resource !== PROFILE_RESOURCE) {
-    return json(
-      { error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), PROFILE_RESOURCE] },
-      400,
-    )
+  if (!spec && !EXTRA.includes(resource)) {
+    return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
   }
-  const ttlMinutes = spec ? spec.ttlMinutes : PROFILE_TTL_MINUTES
+  const ttlMinutes = spec
+    ? spec.ttlMinutes
+    : resource === PRICES_RESOURCE
+      ? PRICES_TTL_MINUTES
+      : PROFILE_TTL_MINUTES
 
   const market = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
@@ -62,7 +96,9 @@ Deno.serve(async (req: Request) => {
   // or a recent attempt failed — either way no upstream call is made.
   const { data: claimed, error: claimError } = await market.rpc('begin_refresh', {
     p_resource: resource,
-    p_min_interval: `${ttlMinutes} minutes`,
+    // force -> a zero TTL and no error backoff, but the in-flight window stands.
+    p_min_interval: force ? '0 minutes' : `${ttlMinutes} minutes`,
+    ...(force ? { p_error_backoff: '0 minutes' } : {}),
   })
   if (claimError) return json({ error: `claim failed: ${claimError.message}` }, 500)
   if (claimed !== true) return json({ resource, skipped: true, reason: 'fresh or in flight' })
@@ -107,6 +143,22 @@ Deno.serve(async (req: Request) => {
       if (error) throw new Error(`instruments upsert failed: ${error.message}`)
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ resource, refreshed: updates.length })
+    }
+
+    if (resource === PRICES_RESOURCE) {
+      const { rows, unmapped } = await loadPrices(fetcher, await instrumentUniverse(), new Date())
+      if (rows.length === 0) throw new Error('no price rows loaded')
+      // Chunked: ~13k rows in one request is a large body for a 150 MB worker, and
+      // a single failure would lose the whole run.
+      const CHUNK = 2000
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const { error } = await market
+          .from('prices')
+          .upsert(rows.slice(i, i + CHUNK), { onConflict: 'symbol,date' })
+        if (error) throw new Error(`prices upsert failed at row ${i}: ${error.message}`)
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, refreshed: rows.length, unmapped })
     }
 
     const { rows, unmapped } = await spec!.load({

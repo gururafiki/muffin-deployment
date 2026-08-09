@@ -347,6 +347,67 @@ export const RESOURCES: Record<string, Resource> = {
   },
 }
 
+/** Daily bars per symbol, keyed by OUR scope id. Shared by performance and prices. */
+export async function loadSeries(
+  fetcher: Fetcher,
+  entries: UniverseEntry[],
+  route: 'equity/price/historical' | 'etf/historical',
+  now: Date,
+  days = 1900,
+): Promise<Map<string, Bar[]>> {
+  const symbols = [...new Set(entries.map((e) => e.symbol))]
+  const results = await fetcher(
+    `/api/v1/${route}?symbol=${symbols.join(',')}` +
+      `&provider=yfinance&start_date=${daysBefore(now, days)}&interval=1d`,
+  )
+  // A single-symbol response carries NO `symbol` column — the provider only adds it
+  // when several are requested.
+  const bySymbol = new Map<string, Bar[]>()
+  for (const r of results) {
+    const symbol = String(r.symbol ?? symbols[0])
+    const close = typeof r.close === 'number' ? r.close : Number(r.close)
+    const date = String(r.date ?? '').slice(0, 10)
+    if (!date || !Number.isFinite(close)) continue
+    const list = bySymbol.get(symbol) ?? []
+    list.push({ date, close })
+    bySymbol.set(symbol, list)
+  }
+  for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
+  return bySymbol
+}
+
+/** One row of market.prices. */
+export interface PriceRow {
+  symbol: string
+  date: string
+  close: number
+}
+
+/** Calendar days of daily closes kept for the chart — see 08-instrument-prices.sql. */
+export const PRICE_WINDOW_DAYS = 400
+export const PRICES_TTL_MINUTES = 24 * 60
+
+export async function loadPrices(
+  fetcher: Fetcher,
+  entries: UniverseEntry[],
+  now: Date,
+): Promise<{ rows: PriceRow[]; unmapped: string[] }> {
+  if (entries.length === 0) return { rows: [], unmapped: [] }
+  const bySymbol = await loadSeries(fetcher, entries, 'equity/price/historical', now, PRICE_WINDOW_DAYS)
+  const rows: PriceRow[] = []
+  const unmapped: string[] = []
+  for (const { scopeId, symbol } of entries) {
+    const series = bySymbol.get(symbol)
+    if (!series || series.length === 0) {
+      unmapped.push(symbol)
+      continue
+    }
+    // Written under OUR key, not the provider's (NESN vs NESN.SW).
+    for (const bar of series) rows.push({ symbol: scopeId, date: bar.date, close: bar.close })
+  }
+  return { rows, unmapped }
+}
+
 /**
  * Profile refresh — the ONE resource that does not write market.performance.
  *
