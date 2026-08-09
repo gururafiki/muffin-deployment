@@ -1,6 +1,6 @@
 configs:
   opensandbox-config:
-    file: extras/opensandbox/config.toml
+    file: ../config/opensandbox/config.toml
 
 volumes:
   langgraph-data:
@@ -22,6 +22,14 @@ services:
       # Set OPENSANDBOX_API_KEY in .env to enable authentication
       SANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
+      # Newer opensandbox refuses to start with an empty api_key unless this
+      # acknowledgement is set, so without it the container restart-loops on
+      # "Startup blocked: server.api_key is empty in non-interactive mode" and
+      # every sandbox tool fails locally. The Swarm stack already carries this;
+      # the local compose had drifted. Safe here: nothing outside this machine
+      # can reach it. Set OPENSANDBOX_API_KEY and flip this to NO if you want
+      # auth locally too.
+      OPENSANDBOX_INSECURE_SERVER: "${OPENSANDBOX_INSECURE_SERVER:-YES}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
@@ -32,11 +40,14 @@ services:
       - muffin-net
 
   openbb-mcp:
-    build:
-      context: extras/openbb
+    # Built by the openbb-mcp-docker repo, same image the Swarm stack deploys.
+    # The build context used to live here and left when that became its own repo.
+    image: ghcr.io/gururafiki/openbb-mcp-docker:latest
     restart: unless-stopped
-    env_file:
-      - extras/openbb/.env
+    environment:
+      # OpenBB provider API keys. Add more as needed (POLYGON_API_KEY,
+      # FRED_API_KEY, ALPHA_VANTAGE_API_KEY...); mirrors the stack.
+      FMP_API_KEY: "${FMP_API_KEY:-}"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8001),2); s.close()"]
       interval: 10s
@@ -81,7 +92,7 @@ services:
     ports:
       - "8888:8080"
     volumes:
-      - ./extras/searxng:/etc/searxng:rw
+      - ../config/searxng:/etc/searxng:rw
     environment:
       SEARXNG_SECRET_KEY: ${SEARXNG_SECRET_KEY:-changeme-set-in-env}
     healthcheck:
@@ -157,7 +168,7 @@ services:
       firecrawl-postgres:
         condition: service_healthy
     env_file:
-      - extras/firecrawl/.env
+      - ../config/firecrawl/.env
     environment:
       HOST: "0.0.0.0"
       PORT: "3002"
@@ -238,8 +249,8 @@ services:
       - muffin-net
 
   agent-chat-ui:
-    build:
-      context: extras/agent-chat-ui
+    # Built by the agent-chat-ui-docker repo, same image the Swarm stack deploys.
+    image: ghcr.io/gururafiki/agent-chat-ui-docker:latest
     restart: unless-stopped
     ports:
       - "3000:3000"
