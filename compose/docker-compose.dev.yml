@@ -28,7 +28,7 @@
 
 configs:
   opensandbox-config:
-    file: extras/opensandbox/config.dev.toml
+    file: ../config/opensandbox/config.dev.toml
 
 services:
   openbb-mcp:

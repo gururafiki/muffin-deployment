@@ -635,7 +635,7 @@ services:
     image: {{ image_openbb }}
     environment:
       # OpenBB provider API keys (from secrets.yaml). Add more providers as needed,
-      # e.g. POLYGON_API_KEY / FRED_API_KEY / ALPHA_VANTAGE_API_KEY — see extras/openbb/.env.example.
+      # e.g. POLYGON_API_KEY / FRED_API_KEY / ALPHA_VANTAGE_API_KEY — see the openbb-mcp-docker repo's README.
       FMP_API_KEY: "{{ fmp_api_key | default('') }}"
     networks:
       - muffin-net

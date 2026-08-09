@@ -24,7 +24,6 @@ plugin reads them from state, then a `terraform_data` provisioner runs `ansible-
 
 ```bash
 cd stack && cp config.example.yml config.yml && cp secrets.example.yaml secrets.yaml   # fill these in
-cd ../config && cp ../../muffin-agent/extras/opensandbox/config.toml opensandbox/   # if not already present
 cd ../terraform && cp muffin.tfvars.example terraform.tfvars                          # fill OCI + Cloudflare + key paths
 pip install ansible-core && ansible-galaxy collection install cloud.terraform
 terraform init && terraform apply        # VM + Cloudflare + Swarm + stack, one command

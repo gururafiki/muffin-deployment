@@ -1,17 +1,25 @@
 ---
 # Deploy the Muffin Agent stack to a single-node OCI Always-Free Swarm.
 #
-# Prereqs on the control machine (your Mac), in docker-stack/templates/muffin/:
-#   - config.yml           (copy from config.example.yml — non-secret deploy config)
-#   - secrets.yaml         (copy from secrets.example.yaml — API keys / passwords / tokens)
-#   - config.toml          (cp ../../../../muffin-agent/extras/opensandbox/config.toml)
-#   - searxng/             (cp -r ../../../../muffin-agent/extras/searxng)
-# Plus: images built & pushed (GitHub Actions `build-images.yml`, or build-and-push.sh locally).
+# You do not normally run this by hand — `terraform apply` runs it, via the
+# `ansible/ansible` provider plus the `cloud.terraform` dynamic inventory, which
+# reads the host straight out of Terraform state. There is no
+# generate_inventory.sh.
 #
-# Run from ansible/:
-#   ./generate_inventory.sh default
-#   export ANSIBLE_HOST_KEY_CHECKING=false
-#   ansible-playbook -i default.inventory.ini muffin_stack.yml -u ubuntu --private-key ~/.ssh/oci_key
+# What it needs on the control machine, in stack/:
+#   - config.yml    (cp config.example.yml — non-secret deploy config)
+#   - secrets.yaml  (cp secrets.example.yaml — API keys / passwords / tokens)
+# The service configs it stages are tracked in this repo under config/
+# (opensandbox/, searxng/, firecrawl/) — nothing to copy in from muffin-agent,
+# which is where they lived before 2026-06-21.
+#
+# Images come from the sibling repos' own CI (ghcr.io/gururafiki/*); this
+# playbook builds nothing.
+#
+# To run it directly anyway (debugging a deploy):
+#   cd terraform && terraform output -raw instance_public_ip
+#   cd ../ansible && ansible-playbook -i <ip>, muffin_stack.yml -u ubuntu \
+#       --private-key ~/.ssh/oci_key
 
 # --- 1. Harden every node + open Swarm/ingress ports ----------------------
 - hosts: all
