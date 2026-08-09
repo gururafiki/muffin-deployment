@@ -190,6 +190,7 @@ the `market` schema failed before `02` created it. The playbook now pipes the gl
 | `05-market-instruments.sql` | `market.instruments` — the per-sector ticker universe (35 seeded, `do nothing` so Studio edits stick) |
 | `06-instrument-price-symbol.sql` | `price_symbol`, for names the provider knows by another ticker (NESN → `NESN.SW`) |
 | `07-asset-universe.sql` | the non-equity universe (ETFs, commodities, crypto, bonds, funds, cash) + `priced` |
+| `08-instrument-prices.sql` | `market.prices` — daily closes (~400-day window) behind the stock-page chart |
 
 Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`):
 `sector-performance` (30 min) · `country-performance` (60 min) · `instrument-performance`
@@ -197,14 +198,23 @@ Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}
 rather than `market.performance`, and the only one restricted to `asset_type = 'equity'`,
 since an ETF or a coin has no sector to fetch).
 
-**There is no force-refresh.** `begin_refresh` skips while data is inside its TTL, which is
-correct but means correcting bad data needs the claim cleared first:
+Plus `instrument-prices` (24 h) — the daily closes the chart draws. It reuses the same batched
+history the performance refresh already downloads, bounded to ~400 calendar days (~280 bars),
+which is what 1M/3M/6M/1Y need; the 3Y/5Y *numbers* still come from `market.performance`.
+
+**Forcing a refresh.** `begin_refresh` skips while data is inside its TTL, which is correct but
+gets in the way when the data is fresh and *wrong*. Pass `force` — **service-role only**, since
+the anon key is public and a public cache-buster is a free way to hammer the provider:
 
 ```bash
-curl -X DELETE "https://supabase.<domain>/rest/v1/refresh_log?resource=eq.<name>" \
+curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_ROLE" -H "Authorization: Bearer $SERVICE_ROLE" \
-  -H "Content-Profile: market"
+  -H "Content-Type: application/json" \
+  -d '{"resource":"instrument-profile","force":true}'
 ```
+
+`force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
+forced refreshes still collapse into one upstream fetch.
 
 **`priced = false`** (cash, a bond yield) is excluded from the performance refresh on purpose:
 a price return there is meaningless rather than missing, so the UI shows no number.

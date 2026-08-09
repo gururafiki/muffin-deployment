@@ -15,7 +15,9 @@
 
 import {
   FINVIZ_SECTOR_IDS,
+  loadPrices,
   loadProfiles,
+  PRICE_WINDOW_DAYS,
   openbbFetcher,
   RESOURCES,
   returnsFor,
@@ -174,6 +176,28 @@ check(new Set(instruments.rows.map((r) => r.scope_id)).size === PROBE.length,
   `all ${PROBE.length} instruments produced rows`)
 check(instruments.rows.every((r) => r.scope === 'instrument'), 'every row is scoped to instrument')
 check(instruments.rows.every((r) => PERIODS.has(r.period)), 'every period is in the DB vocabulary')
+
+// --- integration: the price series behind the stock-page chart ----------------
+console.log(`\ninstrument-prices against ${BASE}`)
+const prices = await loadPrices(openbbFetcher(BASE), PROBE_ENTRIES, new Date())
+check(prices.unmapped.length === 0, 'every probe symbol returned a series',
+  prices.unmapped.join(', ') || 'none')
+const perSymbol = new Map<string, number>()
+for (const r of prices.rows) perSymbol.set(r.symbol, (perSymbol.get(r.symbol) ?? 0) + 1)
+check(perSymbol.size === PROBE_ENTRIES.length, `all ${PROBE_ENTRIES.length} symbols have bars`,
+  `got ${perSymbol.size}`)
+// ~400 calendar days is ~280 trading bars; well under that means a truncated series.
+const fewest = Math.min(...perSymbol.values())
+check(fewest > 200, 'each series has enough bars to draw a 1Y chart', `fewest = ${fewest}`)
+check(prices.rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date)), 'dates are plain ISO days')
+check(prices.rows.every((r) => Number.isFinite(r.close) && r.close > 0), 'every close is positive')
+// Written under OUR key, never the provider's.
+check(perSymbol.has('NESN') && !perSymbol.has('NESN.SW'),
+  'prices are keyed by our symbol, not the provider\'s')
+const oldest = prices.rows.reduce((m, r) => (r.date < m ? r.date : m), '9999')
+const windowStart = new Date(Date.now() - PRICE_WINDOW_DAYS * 86400000).toISOString().slice(0, 10)
+check(oldest >= windowStart, 'nothing older than the declared window', `oldest ${oldest} >= ${windowStart}`)
+console.log(`  ${prices.rows.length} bars across ${perSymbol.size} symbols`)
 
 console.log(failures === 0 ? '\nOK' : `\n${failures} FAILED`)
 if (failures > 0) Deno.exit(1)
