@@ -174,8 +174,12 @@ PostgREST verify the shared secret), Studio guarded by Access instead of Kong ba
 
 **Setup**: run `stack/supabase/generate-keys.sh` once and paste its output into
 `secrets.yaml` (locally) or the matching GitHub secrets (CI). App tables + RLS live in
-`stack/supabase/migrations/` and are re-applied idempotently on every deploy (applied by
-`*.sql` fileglob, so they run in filename order — hence the numeric prefixes).
+`stack/supabase/migrations/` and are re-applied idempotently on every deploy.
+
+**Order is explicit, not implicit.** `with_fileglob` returns filesystem order, not sorted
+order — measured 2026-08-09, it ran the migrations `04, 01, 05, 02, 03`, so the ones needing
+the `market` schema failed before `02` created it. The playbook now pipes the glob through
+`| sort`; the numeric prefixes only mean anything because of that.
 
 | Migration | What it does |
 |---|---|
