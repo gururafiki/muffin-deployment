@@ -71,7 +71,12 @@ Deno.serve(async (req: Request) => {
   // `price_symbol` is the symbol the provider knows when it differs from the
   // display ticker (NESN vs NESN.SW); `symbol` stays the key we write back under.
   const instrumentUniverse = async () => {
-    const { data, error } = await market.from('instruments').select('symbol,price_symbol')
+    // `priced = false` (cash, a bond yield) has no meaningful price return — skip it
+    // so the UI shows no number rather than a misleading one.
+    const { data, error } = await market
+      .from('instruments')
+      .select('symbol,price_symbol')
+      .eq('priced', true)
     if (error) throw new Error(`instruments read failed: ${error.message}`)
     return (data ?? []).map((i) => ({
       scopeId: i.symbol as string,
@@ -83,7 +88,18 @@ Deno.serve(async (req: Request) => {
     // The profile refresh writes market.instruments rather than market.performance,
     // so it does not go through the RESOURCES table.
     if (resource === PROFILE_RESOURCE) {
-      const updates = await loadProfiles(fetcher, await instrumentUniverse(), new Date())
+      // Equities only: an ETF, a commodity or a coin has no sector/industry to
+      // fetch, and a batch of them can come back empty, which reads as a failure.
+      const { data: eq, error: eqErr } = await market
+        .from('instruments')
+        .select('symbol,price_symbol')
+        .eq('asset_type', 'equity')
+      if (eqErr) throw new Error(`instruments read failed: ${eqErr.message}`)
+      const equities = (eq ?? []).map((i) => ({
+        scopeId: i.symbol as string,
+        symbol: (i.price_symbol as string | null) ?? (i.symbol as string),
+      }))
+      const updates = await loadProfiles(fetcher, equities, new Date())
       if (updates.length === 0) throw new Error('no profiles returned')
       // upsert, not update: `symbol` is the PK and every row already exists, but
       // upsert keeps this correct if the universe gains a ticker mid-flight.

@@ -188,11 +188,26 @@ the `market` schema failed before `02` created it. The playbook now pipes the gl
 | `03-security.sql` | **revokes anon/authenticated access to everything else in `public`** (below) |
 | `04-market-reference.sql` | classification schemes / groups / 667 memberships / 221 countries / regions — **generated** from muffin-ui's authored constants (see below) |
 | `05-market-instruments.sql` | `market.instruments` — the per-sector ticker universe (35 seeded, `do nothing` so Studio edits stick) |
+| `06-instrument-price-symbol.sql` | `price_symbol`, for names the provider knows by another ticker (NESN → `NESN.SW`) |
+| `07-asset-universe.sql` | the non-equity universe (ETFs, commodities, crypto, bonds, funds, cash) + `priced` |
 
 Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`):
 `sector-performance` (30 min) · `country-performance` (60 min) · `instrument-performance`
 (60 min) · `instrument-profile` (24 h — the only one that writes `market.instruments`
-rather than `market.performance`).
+rather than `market.performance`, and the only one restricted to `asset_type = 'equity'`,
+since an ETF or a coin has no sector to fetch).
+
+**There is no force-refresh.** `begin_refresh` skips while data is inside its TTL, which is
+correct but means correcting bad data needs the claim cleared first:
+
+```bash
+curl -X DELETE "https://supabase.<domain>/rest/v1/refresh_log?resource=eq.<name>" \
+  -H "apikey: $SERVICE_ROLE" -H "Authorization: Bearer $SERVICE_ROLE" \
+  -H "Content-Profile: market"
+```
+
+**`priced = false`** (cash, a bond yield) is excluded from the performance refresh on purpose:
+a price return there is meaningless rather than missing, so the UI shows no number.
 
 ### The `market` schema (market data for muffin-ui)
 
