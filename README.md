@@ -217,6 +217,14 @@ curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
 `force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
 forced refreshes still collapse into one upstream fetch.
 
+**Scheduled warm-up.** `.github/workflows/market-warmup.yml` nudges every resource at 02/08/14/20
+UTC. Reads are stale-while-revalidate, so a visitor is never blocked — but without this the FIRST
+visitor after a TTL expiry sees the previous values until the background fetch lands. Four runs a
+day rather than one per TTL: the TTLs are 30–60 min, so a per-TTL schedule would be ~48 runs a day
+against finviz and yfinance, and **yfinance rate-limits**. It uses the ANON key (the refresh
+endpoint applies its own TTL guard, so a warm-up needs no elevated rights) and a `skipped` reply
+counts as success — that is the warm-up finding data already fresh.
+
 **`priced = false`** (cash, a bond yield) is excluded from the performance refresh on purpose:
 a price return there is meaningless rather than missing, so the UI shows no number.
 
