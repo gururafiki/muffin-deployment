@@ -73,7 +73,17 @@ export function openbbFetcher(baseUrl: string): Fetcher {
     if (!res.ok) {
       throw new Error(`openbb ${res.status} on ${path}: ${(await res.text()).slice(0, 300)}`)
     }
-    const body = await res.json()
+    // OpenBB answers an unknown symbol with 200 and an EMPTY body, so res.json()
+    // throws a bare SyntaxError that says nothing about which call failed.
+    const text = await res.text()
+    let body: { results?: unknown }
+    try {
+      body = JSON.parse(text)
+    } catch {
+      throw new Error(
+        `openbb returned ${res.status} with an unparseable body on ${path}: ${text.slice(0, 200) || '(empty)'}`,
+      )
+    }
     const results = body?.results
     if (!Array.isArray(results) || results.length === 0) {
       throw new Error(`openbb returned no results for ${path}`)
@@ -359,17 +369,22 @@ export const PROFILE_TTL_MINUTES = 24 * 60
 
 export async function loadProfiles(
   fetcher: Fetcher,
-  symbols: string[],
+  entries: UniverseEntry[],
   now: Date,
 ): Promise<ProfileUpdate[]> {
-  if (symbols.length === 0) return []
+  if (entries.length === 0) return []
+  // The provider answers under the PRICE symbol, which is not always our primary
+  // key (NESN vs NESN.SW), so map its reply back rather than writing a row under a
+  // key that does not exist.
+  const toScopeId = new Map(entries.map((e) => [e.symbol.toUpperCase(), e.scopeId]))
   const results = await fetcher(
-    `/api/v1/equity/profile?symbol=${[...new Set(symbols)].join(',')}&provider=yfinance`,
+    `/api/v1/equity/profile?symbol=${[...new Set(entries.map((e) => e.symbol))].join(',')}` +
+      `&provider=yfinance`,
   )
   const updatedAt = now.toISOString()
   const out: ProfileUpdate[] = []
   for (const r of results) {
-    const symbol = String(r.symbol ?? '')
+    const symbol = toScopeId.get(String(r.symbol ?? '').toUpperCase())
     if (!symbol) continue
     const cap = Number(r.market_cap)
     out.push({

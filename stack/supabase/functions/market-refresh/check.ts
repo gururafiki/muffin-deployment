@@ -133,11 +133,21 @@ for (const r of c1y) console.log(`  ${r.scope_id}  1y ${String(r.change_pct).pad
 
 // --- integration: instrument profiles (the real sub-sectors) ------------------
 console.log(`\ninstrument-profile against ${BASE}`)
+// NESN is deliberately included with its PRICE symbol: it is the one seeded name
+// whose provider symbol differs from its display ticker, and it is what caught the
+// mapping-back bug (the reply arrives as NESN.SW, our key is NESN).
 const PROBE = ['AAPL', 'NVDA', 'JPM', 'XOM', 'PFE', 'NEE', 'PLD', 'BHP', 'SAP']
-const profiles = await loadProfiles(openbbFetcher(BASE), PROBE, new Date())
+const PROBE_ENTRIES = [
+  ...PROBE.map((symbol) => ({ scopeId: symbol, symbol })),
+  { scopeId: 'NESN', symbol: 'NESN.SW' },
+]
+const profiles = await loadProfiles(openbbFetcher(BASE), PROBE_ENTRIES, new Date())
 
-check(profiles.length === PROBE.length, `all ${PROBE.length} probe symbols returned a profile`,
-  `got ${profiles.length}`)
+check(profiles.length === PROBE_ENTRIES.length,
+  `all ${PROBE_ENTRIES.length} probe symbols returned a profile`, `got ${profiles.length}`)
+check(profiles.some((p) => p.symbol === 'NESN'),
+  'a differing price symbol is written back under OUR key (NESN.SW -> NESN)',
+  profiles.map((p) => p.symbol).join(','))
 // The whole point of this resource: a REAL sub-sector per instrument. yfinance puts
 // it in `industry_category`; the `industry` field also exists and is always null,
 // which is exactly the kind of silent empty this asserts against.
