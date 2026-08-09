@@ -23,7 +23,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import {
-  loadPrices,
+  loadPricesBatched,
   loadProfiles,
   openbbFetcher,
   PRICES_TTL_MINUTES,
@@ -146,19 +146,22 @@ Deno.serve(async (req: Request) => {
     }
 
     if (resource === PRICES_RESOURCE) {
-      const { rows, unmapped } = await loadPrices(fetcher, await instrumentUniverse(), new Date())
-      if (rows.length === 0) throw new Error('no price rows loaded')
-      // Chunked: ~13k rows in one request is a large body for a 150 MB worker, and
-      // a single failure would lose the whole run.
-      const CHUNK = 2000
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        const { error } = await market
-          .from('prices')
-          .upsert(rows.slice(i, i + CHUNK), { onConflict: 'symbol,date' })
-        if (error) throw new Error(`prices upsert failed at row ${i}: ${error.message}`)
-      }
+      // Fetched and written in batches so peak memory is one batch, not the whole
+      // universe — the one-shot version died on the node without answering.
+      let batchNo = 0
+      const { written, unmapped } = await loadPricesBatched(
+        fetcher,
+        await instrumentUniverse(),
+        new Date(),
+        async (rows) => {
+          const n = batchNo++
+          const { error } = await market.from('prices').upsert(rows, { onConflict: 'symbol,date' })
+          if (error) throw new Error(`prices upsert failed on batch ${n} (${rows.length} rows): ${error.message}`)
+        },
+      )
+      if (written === 0) throw new Error('no price rows loaded')
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, refreshed: rows.length, unmapped })
+      return json({ resource, refreshed: written, unmapped })
     }
 
     const { rows, unmapped } = await spec!.load({

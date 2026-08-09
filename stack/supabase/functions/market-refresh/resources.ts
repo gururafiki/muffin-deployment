@@ -424,26 +424,68 @@ export function downsampleForChart(series: Bar[], now: Date): Bar[] {
   return out
 }
 
+/** Symbols fetched per batch — see loadPricesBatched. */
+export const PRICE_BATCH_SIZE = 12
+
+/**
+ * Fetch and shape prices in BATCHES, handing each batch to `sink` before the next
+ * is fetched.
+ *
+ * Doing the whole universe at once works locally but returned 502 from the deployed
+ * worker — Kong's bare 502, i.e. the worker died rather than answering, which is not
+ * something the function's own try/catch can report. The exact cause was never
+ * reproduced off the node; what IS true is that the one-shot version holds the raw
+ * response, the parsed bars and every output row live simultaneously, and the worker
+ * has a 150 MB cap on a box that is otherwise fully committed.
+ *
+ * Batching bounds peak memory to roughly one batch and makes a failure attributable
+ * to a specific set of symbols instead of "the refresh". If the 502 returns, it will
+ * name the batch.
+ */
+export async function loadPricesBatched(
+  fetcher: Fetcher,
+  entries: UniverseEntry[],
+  now: Date,
+  sink: (rows: PriceRow[]) => Promise<void>,
+  batchSize = PRICE_BATCH_SIZE,
+): Promise<{ written: number; unmapped: string[] }> {
+  const unmapped: string[] = []
+  let written = 0
+
+  for (let i = 0; i < entries.length; i += batchSize) {
+    const batch = entries.slice(i, i + batchSize)
+    const bySymbol = await loadSeries(fetcher, batch, 'equity/price/historical', now, PRICE_WINDOW_DAYS)
+    const rows: PriceRow[] = []
+    for (const { scopeId, symbol } of batch) {
+      const series = bySymbol.get(symbol)
+      if (!series || series.length === 0) {
+        unmapped.push(symbol)
+        continue
+      }
+      // Written under OUR key, not the provider's (NESN vs NESN.SW).
+      for (const bar of downsampleForChart(series, now)) {
+        rows.push({ symbol: scopeId, date: bar.date, close: bar.close })
+      }
+    }
+    bySymbol.clear()
+    if (rows.length > 0) {
+      await sink(rows)
+      written += rows.length
+    }
+  }
+  return { written, unmapped }
+}
+
+/** Collect-everything variant, for tests that want the whole set in hand. */
 export async function loadPrices(
   fetcher: Fetcher,
   entries: UniverseEntry[],
   now: Date,
 ): Promise<{ rows: PriceRow[]; unmapped: string[] }> {
-  if (entries.length === 0) return { rows: [], unmapped: [] }
-  const bySymbol = await loadSeries(fetcher, entries, 'equity/price/historical', now, PRICE_WINDOW_DAYS)
   const rows: PriceRow[] = []
-  const unmapped: string[] = []
-  for (const { scopeId, symbol } of entries) {
-    const series = bySymbol.get(symbol)
-    if (!series || series.length === 0) {
-      unmapped.push(symbol)
-      continue
-    }
-    // Written under OUR key, not the provider's (NESN vs NESN.SW).
-    for (const bar of downsampleForChart(series, now)) {
-      rows.push({ symbol: scopeId, date: bar.date, close: bar.close })
-    }
-  }
+  const { unmapped } = await loadPricesBatched(fetcher, entries, now, async (batch) => {
+    rows.push(...batch)
+  })
   return { rows, unmapped }
 }
 
