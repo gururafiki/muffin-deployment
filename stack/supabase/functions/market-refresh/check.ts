@@ -15,8 +15,10 @@
 
 import {
   FINVIZ_SECTOR_IDS,
+  downsampleForChart,
   loadPrices,
   loadProfiles,
+  PRICE_DAILY_DAYS,
   PRICE_WINDOW_DAYS,
   openbbFetcher,
   RESOURCES,
@@ -188,7 +190,28 @@ check(perSymbol.size === PROBE_ENTRIES.length, `all ${PROBE_ENTRIES.length} symb
   `got ${perSymbol.size}`)
 // ~400 calendar days is ~280 trading bars; well under that means a truncated series.
 const fewest = Math.min(...perSymbol.values())
-check(fewest > 200, 'each series has enough bars to draw a 1Y chart', `fewest = ${fewest}`)
+// Downsampled: daily inside PRICE_DAILY_DAYS, weekly before it. ~107 bars/symbol.
+// Too FEW cannot draw 1M; too MANY is what timed out the worker in production.
+check(fewest > 60, 'each series has enough bars to draw a 1M chart at daily resolution',
+  `fewest = ${fewest}`)
+const most = Math.max(...perSymbol.values())
+check(most < 180, 'series are downsampled, not full daily', `most = ${most}`)
+{
+  // The recent window must stay DAILY — weekly there would make 1M a 4-point line.
+  const now = new Date()
+  const daily = new Date(Date.now() - PRICE_DAILY_DAYS * 86400000).toISOString().slice(0, 10)
+  const aapl = prices.rows.filter((r) => r.symbol === 'AAPL' && r.date >= daily)
+  check(aapl.length > 50, 'the recent window is still daily', `${aapl.length} bars in ${PRICE_DAILY_DAYS}d`)
+  const synth = Array.from({ length: 400 }, (_, i) => ({
+    date: new Date(Date.now() - (399 - i) * 86400000).toISOString().slice(0, 10),
+    close: 100 + i,
+  }))
+  const kept = downsampleForChart(synth, now)
+  check(kept[kept.length - 1].date === synth[synth.length - 1].date,
+    'the most recent bar is always kept')
+  check(kept.length < synth.length / 2, 'downsampling actually reduces the series',
+    `${synth.length} -> ${kept.length}`)
+}
 check(prices.rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date)), 'dates are plain ISO days')
 check(prices.rows.every((r) => Number.isFinite(r.close) && r.close > 0), 'every close is positive')
 // Written under OUR key, never the provider's.

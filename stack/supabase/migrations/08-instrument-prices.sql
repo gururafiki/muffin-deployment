@@ -5,12 +5,17 @@
 -- and it keeps the read path the same as everything else: the app reads a table, no
 -- API server in between.
 --
--- BOUNDED TO ~400 CALENDAR DAYS ON PURPOSE. That is ~280 trading bars per symbol
--- (~13k rows across the universe), which draws 1M/3M/6M/YTD/1Y correctly. The 3Y and
--- 5Y *numbers* still exist in market.performance — only the CHART is bounded, and
--- the UI offers no range it cannot draw. Storing the full 5.2y at daily granularity
--- would be ~60k rows rewritten on every refresh for detail no phone-sized chart can
--- show.
+-- BOUNDED AND DOWNSAMPLED ON PURPOSE: ~400 calendar days, daily for the most recent
+-- 90 and weekly before that — ~107 bars per symbol, ~4.8k rows across the universe.
+--
+-- Measured 2026-08-09: storing all ~275 daily bars per symbol (12,625 rows) pushed
+-- the edge worker past its 60 s limit while upserting, and production returned 502.
+-- The openbb fetch is only ~9 s of that; the write is the cost. Downsampling keeps
+-- 1M at full daily resolution and gives 1Y more points than a phone-width chart can
+-- resolve.
+--
+-- The 3Y/5Y *numbers* still come from market.performance — only the CHART is
+-- bounded, and the UI offers no range it cannot draw.
 
 create table if not exists market.prices (
   symbol text        not null references market.instruments (symbol) on delete cascade,

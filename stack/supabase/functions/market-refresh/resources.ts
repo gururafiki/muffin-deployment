@@ -383,9 +383,46 @@ export interface PriceRow {
   close: number
 }
 
-/** Calendar days of daily closes kept for the chart — see 08-instrument-prices.sql. */
+/** Calendar days of history kept for the chart — see 08-instrument-prices.sql. */
 export const PRICE_WINDOW_DAYS = 400
+/** Inside this many days the series is kept DAILY; before it, weekly. */
+export const PRICE_DAILY_DAYS = 90
 export const PRICES_TTL_MINUTES = 24 * 60
+
+/**
+ * Keep daily bars for the recent window and one bar per week before that.
+ *
+ * Measured 2026-08-09: storing all ~275 daily bars for 45 symbols is 12,625 rows,
+ * and upserting that through PostgREST took the worker past its 60 s limit (the
+ * openbb fetch itself is only ~9 s) — production returned 502. Downsampling gives
+ * ~107 bars/symbol (~4.8k rows), which still draws 1M at full daily resolution and
+ * 1Y with more points than a phone-width chart can resolve.
+ *
+ * The most recent bar is always kept: it is the one the chart's last point and the
+ * "current" level come from.
+ */
+export function downsampleForChart(series: Bar[], now: Date): Bar[] {
+  if (series.length === 0) return series
+  const dailyFrom = daysBefore(now, PRICE_DAILY_DAYS)
+  const out: Bar[] = []
+  let lastBucket = ''
+  for (const bar of series) {
+    if (bar.date >= dailyFrom) {
+      out.push(bar)
+      continue
+    }
+    // Fixed 7-day buckets from the epoch — calendar weeks are not needed, only a
+    // stable one-per-week choice.
+    const bucket = String(Math.floor(new Date(`${bar.date}T00:00:00Z`).getTime() / 604_800_000))
+    if (bucket !== lastBucket) {
+      out.push(bar)
+      lastBucket = bucket
+    }
+  }
+  const newest = series[series.length - 1]
+  if (out[out.length - 1]?.date !== newest.date) out.push(newest)
+  return out
+}
 
 export async function loadPrices(
   fetcher: Fetcher,
@@ -403,7 +440,9 @@ export async function loadPrices(
       continue
     }
     // Written under OUR key, not the provider's (NESN vs NESN.SW).
-    for (const bar of series) rows.push({ symbol: scopeId, date: bar.date, close: bar.close })
+    for (const bar of downsampleForChart(series, now)) {
+      rows.push({ symbol: scopeId, date: bar.date, close: bar.close })
+    }
   }
   return { rows, unmapped }
 }
