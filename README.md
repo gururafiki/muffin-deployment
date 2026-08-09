@@ -191,6 +191,7 @@ the `market` schema failed before `02` created it. The playbook now pipes the gl
 | `06-instrument-price-symbol.sql` | `price_symbol`, for names the provider knows by another ticker (NESN → `NESN.SW`) |
 | `07-asset-universe.sql` | the non-equity universe (ETFs, commodities, crypto, bonds, funds, cash) + `priced` |
 | `08-instrument-prices.sql` | `market.prices` — daily closes (~400-day window) behind the stock-page chart |
+| `09-market-rls.sql` | **RLS on every `market` table** — public read policy, writes service-role only |
 
 Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`):
 `sector-performance` (30 min) · `country-performance` (60 min) · `instrument-performance`
@@ -255,6 +256,27 @@ docker run --rm --network host -v "$PWD:/w" -w /w -e OPENBB_API_URL=http://local
   denoland/deno:alpine run --allow-net --allow-env \
   stack/supabase/functions/market-refresh/check.ts
 ```
+
+### RLS on the `market` schema (`09-market-rls.sql`)
+
+02–08 controlled access with **grants alone**. That is genuinely restrictive, but it leaves RLS
+disabled — which Supabase's advisor flags as `rls_disabled_in_public`, and which is one stray
+`grant` away from being wrong. Grants and policies now agree:
+
+| Tables | RLS | Policy | Effect |
+|---|---|---|---|
+| reference + market data (9 tables) | on | `for select to public using (true)` | public read; **no** write policy, so writes are impossible even if a grant were added by mistake |
+| `refresh_log` | on | **none** | RLS with zero policies denies every ordinary role; only `service_role` (BYPASSRLS) can touch the refresh mutex |
+
+`service_role` bypasses RLS, so the `market-refresh` edge function is unaffected. Verified by
+behaviour, not just flags: anon reads, anon writes are refused, `refresh_log` is invisible to
+anon, and service_role can still read, write and call `begin_refresh`.
+
+**LangGraph's tables in `public` are deliberately NOT given RLS**, even though the advisor flags
+them too. They are already unreachable — `03-security.sql` revokes anon/authenticated and
+re-applies every deploy. Enabling RLS there depends on langgraph-api's role having `BYPASSRLS`,
+which has **not** been verified against the deployed `supabase/postgres` image; if it does not,
+every agent run breaks. Silencing a warning on already-unreachable tables is not worth that.
 
 ### `03-security.sql` — the anon exposure on LangGraph's tables
 
