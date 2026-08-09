@@ -16,6 +16,27 @@ config/      service configs (searxng, opensandbox, firecrawl)
 Images come from the sibling repos: `muffin-agent`, `openbb-mcp-docker`, `agent-chat-ui-docker`,
 `nuq-postgres-docker` (all `ghcr.io/gururafiki/*`).
 
+**`openbb-mcp-docker` is deployed twice, as two services from ONE image.** `openbb-core`
+hard-depends on fastapi/uvicorn, so the OpenBB Platform REST app ships in the same image as
+the MCP server — `openbb-api` is just a different command against it:
+
+| Service | Command | Port | Used by |
+|---|---|---|---|
+| `openbb-mcp` | `openbb-mcp` (image default) | 8001 | the agent's data-collection tools (MCP) |
+| `openbb-api` | `uvicorn openbb_core.api.rest_api:app` | 6900 | the `market-refresh` edge function (plain REST) |
+
+Neither is exposed through Traefik — both are overlay-internal and carry the provider API
+keys. Browse the REST surface at `/docs` (278 routes) or `/openapi.json`. The route convention
+is `obb.x.y.z` → `/api/v1/x/y/z`, but it is **not perfectly regular**: compare
+`/api/v1/equity/price/performance` (slash) with `/api/v1/etf/price_performance` (underscore).
+Check `/openapi.json` before adding a caller.
+
+Provider notes worth not re-deriving: **finviz and yfinance need no API key**, and
+`equity/compare/groups` (the sector/country/industry performance endpoint) is finviz-only and
+**US-listed stocks only**. finviz's per-symbol `price_performance` is **broken upstream** — it
+duplicates the first character of the symbol (`AAPL` → `'AAAPL' is not in list`, HTTP 422) — so
+per-symbol performance must use **fmp**, which needs `FMP_API_KEY`.
+
 ## One-command deploy (single `terraform apply`)
 
 Terraform provisions the infra **and** runs Ansible (no `generate_inventory.sh`): the
@@ -153,7 +174,71 @@ PostgREST verify the shared secret), Studio guarded by Access instead of Kong ba
 
 **Setup**: run `stack/supabase/generate-keys.sh` once and paste its output into
 `secrets.yaml` (locally) or the matching GitHub secrets (CI). App tables + RLS live in
-`stack/supabase/migrations/` and are re-applied idempotently on every deploy.
+`stack/supabase/migrations/` and are re-applied idempotently on every deploy (applied by
+`*.sql` fileglob, so they run in filename order — hence the numeric prefixes).
+
+| Migration | What it does |
+|---|---|
+| `01-app.sql` | `user_backups`, `research_shares` (+ RLS) |
+| `02-market.sql` | the **`market` schema**: sectors, `performance`, and the refresh claim (below) |
+| `03-security.sql` | **revokes anon/authenticated access to everything else in `public`** (below) |
+| `04-market-reference.sql` | classification schemes / groups / 667 memberships / 221 countries / regions — **generated** from muffin-ui's authored constants (see below) |
+| `05-market-instruments.sql` | `market.instruments` — the per-sector ticker universe (35 seeded, `do nothing` so Studio edits stick) |
+
+Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`):
+`sector-performance` (30 min) · `country-performance` (60 min) · `instrument-performance`
+(60 min) · `instrument-profile` (24 h — the only one that writes `market.instruments`
+rather than `market.performance`).
+
+### The `market` schema (market data for muffin-ui)
+
+`market.performance` holds every market figure the app renders, one row per
+`(scope, scope_id, period)` — `scope` is `sector` / `country` / `instrument` / `group`, so new
+data types add ROWS, not tables. Each row carries `as_of` + `stale_after`.
+
+The app **reads it directly over PostgREST** (`supabase.schema('market')`) — there is no API
+server in the path, which is why reads are fast and work before sign-in. Writes come only from
+the **`market-refresh` edge function** (`stack/supabase/functions/market-refresh/`), which
+fetches `openbb-api` and upserts. Requires `market` in `PGRST_DB_SCHEMAS` on **both**
+`supabase-rest` and `supabase-studio`.
+
+Freshness is **stale-while-revalidate**: a reader always gets what is in the table and never
+waits on OpenBB; a stale row triggers a background refresh. Because the anon key is public,
+`market.begin_refresh()` is an atomic claim that returns false if a refresh is in flight, if
+one succeeded within the TTL, or if the last attempt failed and is still cooling off — so
+concurrent triggers collapse into at most one upstream fetch.
+
+`04-market-reference.sql` was **generated** from muffin-ui's authored constants rather than
+transcribed. It carries two different conflict rules on purpose: schemes, groups and countries
+upsert with `do update` (names, colours and ETF proxies are app presentation, so the app wins
+on redeploy), while **memberships use `do nothing`** — which country sits in which group is
+reference data meant to be corrected in Studio, and a redeploy must not revert an edit. To
+force a reset, delete that scheme/lens's rows first.
+
+`market.countries.etf_symbol` is the single-country ETF used as each country's equity-market
+proxy; the refresh reads it from the table, so a corrected proxy takes effect with no redeploy.
+
+Verify the provider mapping without deploying anything (needs only `openbb-api`):
+
+```bash
+docker compose -f compose/docker-compose.yml up -d openbb-api
+docker run --rm --network host -v "$PWD:/w" -w /w -e OPENBB_API_URL=http://localhost:6900 \
+  denoland/deno:alpine run --allow-net --allow-env \
+  stack/supabase/functions/market-refresh/check.ts
+```
+
+### `03-security.sql` — the anon exposure on LangGraph's tables
+
+Measured 2026-08-09: PostgREST publishes every `public` table the `anon` role can SELECT, and
+Supabase grants that by default. Since LangGraph also keeps its tables in `public` (see the
+cutover section), `GET /rest/v1/thread` and `/rest/v1/checkpoint_blobs` returned **real rows to
+anyone holding the public anon key**. A sampled `checkpoints.metadata` row carried no
+secret-shaped fields, so this was a content/privacy exposure rather than a credential leak.
+
+The migration revokes `all` on everything in `public` from `anon`/`authenticated`, re-grants
+only the app's own two tables, and — importantly — revokes the **default privileges** so
+tables langgraph-api creates later do not re-acquire the grant. Being re-applied every deploy
+is what makes it self-healing against LangGraph recreating its schema.
 
 **On the legacy `anon` / `service_role` keys** (Studio shows a "deprecated" banner):
 those are Supabase's new opaque **publishable** (`sb_publishable_…`) / **secret**
@@ -237,8 +322,14 @@ sudo docker exec $NEW pg_restore -U postgres -d postgres --no-owner /tmp/langgra
 # 4. Verify: langgraph-api healthy, old threads visible in the app's Calls tab + LangGraph's
 #    tables visible in Supabase Studio (public schema of the postgres DB).
 # 5. Rollback: flip back to false and redeploy (the old langgraph-postgres volume is untouched).
-# 6. Once verified for a few days: remove the langgraph-postgres service + volume.
 ```
+
+**Step 6 is now automatic.** `langgraph-postgres` is wrapped in
+`{% if not use_supabase_db %}` in the stack template, so once the flag is true the service is
+simply not rendered — freeing its 1 GB, which is what pays for the `openbb-api` service. Its
+`langgraph-data` **volume is deliberately still declared**: the pre-cutover data stays on disk,
+so flipping the flag back really is a rollback. Nothing here deletes it; that needs an explicit
+`docker volume rm`.
 
 Auth note: sign-in is **optional** (`MUFFIN_AUTH_OPTIONAL=true` on `langgraph-api`) —
 anonymous requests share one `owner=anonymous` thread pool; signed-in users only see

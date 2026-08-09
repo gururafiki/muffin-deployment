@@ -57,6 +57,31 @@ services:
     networks:
       - muffin-net
 
+  openbb-api:
+    # The OpenBB Platform REST API — SAME image as openbb-mcp (openbb-core depends on
+    # fastapi/uvicorn, so the REST app is already installed); this is just a second
+    # command against it. The `market-refresh` edge function calls it over plain HTTP
+    # because the MCP endpoint needs an MCP client.
+    #
+    # Browse the surface at http://localhost:6900/docs (278 routes). Convention is
+    # `obb.x.y.z` -> `/api/v1/x/y/z`, but it is not perfectly regular — compare
+    # `/api/v1/equity/price/performance` with `/api/v1/etf/price_performance`.
+    image: ghcr.io/gururafiki/openbb-mcp-docker:latest
+    command: ["uvicorn", "openbb_core.api.rest_api:app", "--host", "0.0.0.0", "--port", "6900"]
+    restart: unless-stopped
+    ports:
+      - "6900:6900"
+    environment:
+      FMP_API_KEY: "${FMP_API_KEY:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',6900),2); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - muffin-net
+
   langgraph-redis:
     image: redis:6
     restart: unless-stopped

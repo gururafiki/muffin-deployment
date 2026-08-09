@@ -25,6 +25,9 @@ secrets:
     external: true               # Cloudflare Zone:DNS:Edit token for Traefik DNS-01
 
 volumes:
+  # Still declared after the Supabase cutover even though langgraph-postgres is no
+  # longer rendered (see the service block): it keeps the pre-cutover checkpointer
+  # data on disk so flipping use_supabase_db back is a genuine rollback.
   langgraph-data:
   firecrawl-postgres-data:
   traefik-acme:
@@ -221,6 +224,16 @@ services:
         - "traefik.http.services.app.loadbalancer.server.port=80"
 
   # --- LangGraph state + streaming (internal) -----------------------------
+{% if not (use_supabase_db | default(false)) %}
+  # Rendered ONLY before the Supabase cutover. Once use_supabase_db is true,
+  # langgraph-api points at supabase-db and this service is pure overhead (1 GB) —
+  # so it is omitted from the stack rather than left running idle, which is what
+  # pays for the openbb-api service below.
+  #
+  # The `langgraph-data` volume is deliberately still DECLARED (see the volumes
+  # block): removing the service leaves the old checkpointer data on disk and
+  # recoverable, so flipping use_supabase_db back is a full rollback. Nothing here
+  # deletes data — that would need an explicit `docker volume rm`.
   langgraph-postgres:
     image: postgres:16
     environment:
@@ -248,6 +261,7 @@ services:
       resources:
         limits:
           memory: 1G
+{% endif %}
 
   langgraph-redis:
     image: redis:6
@@ -392,7 +406,10 @@ services:
     image: postgrest/postgrest:v14.12
     environment:
       PGRST_DB_URI: postgres://authenticator:{{ supabase_db_password }}@supabase-db:5432/postgres
-      PGRST_DB_SCHEMAS: public,graphql_public
+      # `market` holds the market reference + performance tables (02-market.sql).
+      # PostgREST only exposes schemas named here; clients select it with
+      # supabase.schema('market') or an `Accept-Profile: market` header.
+      PGRST_DB_SCHEMAS: public,graphql_public,market
       PGRST_DB_MAX_ROWS: "1000"
       PGRST_DB_EXTRA_SEARCH_PATH: public
       PGRST_DB_ANON_ROLE: anon
@@ -514,6 +531,8 @@ services:
       SUPABASE_ANON_KEY: "{{ supabase_anon_key }}"
       SUPABASE_SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
       SUPABASE_DB_URL: postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres
+      # The market-refresh function reaches OpenBB over the overlay (internal only).
+      OPENBB_API_URL: http://openbb-api:6900
       VERIFY_JWT: "true"
     volumes:
       - /home/ubuntu/supabase/functions:/home/deno/functions
@@ -603,7 +622,9 @@ services:
       POSTGRES_PASSWORD: "{{ supabase_db_password }}"
       POSTGRES_USER_READ_WRITE: postgres
       PG_META_CRYPTO_KEY: "{{ supabase_pg_meta_crypto_key }}"
-      PGRST_DB_SCHEMAS: public,graphql_public
+      # Mirrors supabase-rest so the `market` reference tables (classifications,
+      # sectors, countries) are browsable and editable in Studio.
+      PGRST_DB_SCHEMAS: public,graphql_public,market
       DEFAULT_ORGANIZATION_NAME: Muffin
       DEFAULT_PROJECT_NAME: Muffin
       SUPABASE_URL: http://supabase-kong:8000
@@ -652,6 +673,43 @@ services:
       resources:
         limits:
           memory: 1536M
+
+  # --- Market data: OpenBB REST API (internal) -----------------------------
+  # SAME IMAGE as openbb-mcp — `openbb-core` hard-depends on fastapi/uvicorn, so the
+  # OpenBB Platform REST app ships in the image we already build. This is just a
+  # second command against it; there is no separate repo, image or CI for this.
+  #
+  # It exists because the MCP endpoint can only be driven by an MCP client, and the
+  # `market-refresh` edge function needs plain HTTP. Route convention is
+  # `obb.x.y.z` -> `/api/v1/x/y/z` (278 paths; browsable at /docs, machine-readable
+  # at /openapi.json) — but NOTE the convention is not perfectly regular:
+  # `/api/v1/equity/price/performance` (slash) vs `/api/v1/etf/price_performance`
+  # (underscore). Check /openapi.json before adding a caller.
+  #
+  # NEVER give this Traefik labels: it has no authentication of any kind and it
+  # carries the provider API keys below.
+  openbb-api:
+    image: {{ image_openbb }}
+    command: ["uvicorn", "openbb_core.api.rest_api:app", "--host", "0.0.0.0", "--port", "6900"]
+    environment:
+      # Same provider keys as openbb-mcp. finviz + yfinance need none; FMP is
+      # required for per-symbol price performance (see the edge function).
+      FMP_API_KEY: "{{ fmp_api_key | default('') }}"
+    networks:
+      - muffin-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',6900),2); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          memory: 1G
 
   # --- Self-hosted meta-search (internal) ---------------------------------
   searxng:
