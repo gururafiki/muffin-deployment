@@ -249,8 +249,11 @@
         docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)"
         psql -U postgres -v ON_ERROR_STOP=1 -d postgres
         < "/home/ubuntu/supabase/migrations/{{ item | basename }}"
-      with_fileglob:
-        - "{{ playbook_dir }}/../stack/supabase/migrations/*.sql"
+      # `with_fileglob` does NOT sort — it returns Python glob order, which is
+      # filesystem order. Measured 2026-08-09: the migrations ran 04, 01, 05, 02, 03,
+      # so 04/05 hit a `market` schema that 02 had not created yet and the deploy
+      # failed. The numeric prefixes only mean anything if this is sorted.
+      loop: "{{ query('fileglob', playbook_dir + '/../stack/supabase/migrations/*.sql') | sort }}"
       loop_control:
         label: "{{ item | basename }}"
       changed_when: true
