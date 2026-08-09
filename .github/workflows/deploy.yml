@@ -30,6 +30,12 @@ name: Deploy to Oracle Cloud
 # repository_dispatch(type: deploy) sent by the image repos when a new image is published (auto-CD).
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "apply = deploy; plan = show the diff and fail if anything would be REPLACED"
+        type: choice
+        options: [apply, plan]
+        default: apply
   repository_dispatch:
     types: [deploy]
 
@@ -166,10 +172,39 @@ jobs:
           supabase_google_client_id: "${{ secrets.SUPABASE_GOOGLE_CLIENT_ID }}"
           supabase_google_secret: "${{ secrets.SUPABASE_GOOGLE_SECRET }}"
           EOF
-      - name: Terraform apply (provisions + runs Ansible)
+      - name: Terraform ${{ inputs.mode || 'apply' }}
         working-directory: terraform
         run: |
           terraform init -input=false
+
+          if [ "${{ inputs.mode || 'apply' }}" = "plan" ]; then
+            # Plan-only path. Exists because `terraform validate` — the check that
+            # gates PRs here — never touches state, so it cannot answer the only
+            # question that matters for a provider upgrade: would this REPLACE the
+            # node? On 2026-07-20 a routine apply did exactly that and wiped every
+            # local Docker volume, i.e. all databases. Run this on the branch first
+            # (`gh workflow run deploy.yml --ref <branch> -f mode=plan`).
+            terraform plan -input=false -out=tfplan
+            terraform show -json tfplan > plan.json
+
+            # A replacement is delete+create in either order. Print one address
+            # per line; empty output means nothing is being replaced.
+            replaced=$(python3 -c 'import json,sys; p=json.load(open("plan.json")); print("\n".join(rc["address"] for rc in p.get("resource_changes",[]) if set(rc["change"]["actions"])=={"delete","create"}))')
+
+            {
+              echo "### Resources this plan would REPLACE"
+              if [ -n "$replaced" ]; then echo "$replaced" | sed 's/^/- `/; s/$/`/'; else echo "_none_"; fi
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ -n "$replaced" ]; then
+              echo "::error::This plan REPLACES the resources listed in the job summary. Replacing the instance destroys its local Docker volumes — every database. Do not apply."
+              exit 1
+            fi
+
+            echo "No replacements. Safe to apply."
+            exit 0
+          fi
+
           # ansible_playbook.muffin has replayable=true, so apply re-runs the idempotent playbook
           # every time (docker stack deploy --resolve-image always re-resolves :latest) — no -replace.
           terraform apply -auto-approve -input=false
