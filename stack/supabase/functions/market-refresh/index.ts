@@ -68,18 +68,22 @@ Deno.serve(async (req: Request) => {
   if (claimed !== true) return json({ resource, skipped: true, reason: 'fresh or in flight' })
 
   const fetcher = openbbFetcher(OPENBB_URL)
-  const instrumentSymbols = async (): Promise<string[]> => {
-    const { data, error } = await market.from('instruments').select('symbol')
+  // `price_symbol` is the symbol the provider knows when it differs from the
+  // display ticker (NESN vs NESN.SW); `symbol` stays the key we write back under.
+  const instrumentUniverse = async () => {
+    const { data, error } = await market.from('instruments').select('symbol,price_symbol')
     if (error) throw new Error(`instruments read failed: ${error.message}`)
-    return (data ?? []).map((i) => i.symbol as string)
+    return (data ?? []).map((i) => ({
+      scopeId: i.symbol as string,
+      symbol: (i.price_symbol as string | null) ?? (i.symbol as string),
+    }))
   }
 
   try {
     // The profile refresh writes market.instruments rather than market.performance,
     // so it does not go through the RESOURCES table.
     if (resource === PROFILE_RESOURCE) {
-      const symbols = await instrumentSymbols()
-      const updates = await loadProfiles(fetcher, symbols, new Date())
+      const updates = await loadProfiles(fetcher, await instrumentUniverse(), new Date())
       if (updates.length === 0) throw new Error('no profiles returned')
       // upsert, not update: `symbol` is the PK and every row already exists, but
       // upsert keeps this correct if the universe gains a ticker mid-flight.
@@ -95,9 +99,7 @@ Deno.serve(async (req: Request) => {
       // Universes live in the DB (editable in Studio), not in the function, so a
       // corrected ETF proxy or a new ticker takes effect without a redeploy.
       universe: async () => {
-        if (resource === 'instrument-performance') {
-          return (await instrumentSymbols()).map((symbol) => ({ scopeId: symbol, symbol }))
-        }
+        if (resource === 'instrument-performance') return await instrumentUniverse()
         const { data, error } = await market
           .from('countries')
           .select('iso2,etf_symbol')
