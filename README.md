@@ -442,6 +442,40 @@ fresh. `market-verify.yml` runs separately at 03:00 UTC and asserts the result a
 **TTLs are pre-launch values — deliberately long.** Nobody is watching these numbers yet and every
 refresh spends someone's free-tier quota. Tightening them at launch is tracked in `todos.md`.
 
+### Making yourself an admin
+
+Refresh is **admin-only** — any holder of the published anon key could otherwise spend the
+deployment's provider quota. Admin is a Supabase-native claim: `app_metadata.role = 'admin'`.
+
+**`app_metadata`, never `user_metadata`.** A signed-in user can write their own `user_metadata`
+through the ordinary auth API, so a role kept there is self-assignable and worth nothing.
+`app_metadata` is writable only with the service key or in Studio, and GoTrue copies it into every
+token it issues — so it survives a refresh with no extra lookup.
+
+Run this in Supabase Studio's SQL editor (`https://supabase-studio.<domain>`), against your own
+account:
+
+```sql
+update auth.users
+   set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"role":"admin"}'::jsonb
+ where email = 'you@example.com';
+```
+
+Then **sign out and back in** in the app — the claim is baked into the access token when it is
+issued, so an existing session keeps the old one until it refreshes.
+
+To check it took:
+
+```sql
+select email, raw_app_meta_data->>'role' as role from auth.users where email = 'you@example.com';
+```
+
+To revoke: `set raw_app_meta_data = raw_app_meta_data - 'role'`.
+
+Once the claim is live the app shows a **Refresh** control on each market page, and
+`market-refresh` accepts your user token directly. Without it the endpoint answers **403** and the
+control is not rendered at all.
+
 ### Running one by hand
 
 ```bash
