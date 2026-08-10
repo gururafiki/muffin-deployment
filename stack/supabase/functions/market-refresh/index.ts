@@ -531,10 +531,20 @@ Deno.serve(async (req: Request) => {
             .select('id,scheme_id,etf')
             .not('etf', 'is', null)
           if (error) throw new Error(`group universe read failed: ${error.message}`)
-          return (data ?? []).map((g) => ({
-            scopeId: `${g.scheme_id as string}:${g.id as string}`,
-            symbol: g.etf as string,
-          }))
+          // Skip funds already marked dead in tracked_fund. FM stopped filing in 2024 because it
+          // was liquidated, and a liquidated fund has no price series either — asking for one is
+          // how this resource spent a day returning 502s.
+          const { data: dead } = await market
+            .from('tracked_fund')
+            .select('symbol')
+            .eq('enabled', false)
+          const retired = new Set((dead ?? []).map((f) => f.symbol as string))
+          return (data ?? [])
+            .filter((g) => !retired.has(g.etf as string))
+            .map((g) => ({
+              scopeId: `${g.scheme_id as string}:${g.id as string}`,
+              symbol: g.etf as string,
+            }))
         }
         const { data, error } = await market
           .from('countries')
