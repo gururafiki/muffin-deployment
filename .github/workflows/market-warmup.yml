@@ -67,6 +67,7 @@ jobs:
             RESOURCES=$(printf '%s\n' \
               sector-performance \
               country-performance \
+              group-performance \
               instrument-performance \
               instrument-profile \
               instrument-prices \

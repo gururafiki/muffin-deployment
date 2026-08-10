@@ -408,30 +408,85 @@ US-registered, so they file SEC **N-PORT** quarterly — public, keyless, and ca
 name/LEI/CUSIP/ISIN/country/weight per holding. Current state: **38 funds → 9,786 securities,
 16,424 holdings, 514 sector constituents**, replacing 35 hand-authored tickers.
 
-### Operating it
+### The refresh model — who calls what, and when
 
-`market.tracked_fund` is the control surface and `market.ingest_run` is the log. Everything
-below is a **row edit in Studio**, never a migration and a deploy:
+Every write to the `market` schema goes through ONE edge function, `market-refresh`, dispatched by
+a `resource` name. Reads never go through it: the app reads the tables directly over PostgREST,
+which is why a page renders instantly even while a refresh is in flight.
 
-| I want to… | Do this |
-|---|---|
-| add an ETF | insert `(symbol, name, kind, represents_code)`, then run the scoped refresh below |
-| retire one | `enabled = false` — its holdings history is kept |
-| change what a fund classifies | edit `represents_code`, then run `derive-classifications` |
-| ingest one fund now | `{"resource":"fund-holdings","fund":"XLE","force":true}` |
-| see what a run did | `select * from market.ingest_run order by started_at desc` |
+**Three things can trigger a refresh, and only one is automatic.**
+
+| Trigger | Who | When | Credential |
+|---|---|---|---|
+| `market-warmup.yml` | GitHub Actions cron | 02:10 / 08:10 / 14:10 / 20:10 UTC | anon key |
+| stale-while-revalidate | the app itself | a reader touches a row past `stale_after` | anon key |
+| manual | you | on demand | anon, or service-role for `force` |
+
+Every resource self-skips inside its TTL, so a warm-up pass costs almost nothing when the data is
+fresh. `market-verify.yml` runs separately at 03:00 UTC and asserts the result as anon.
+
+### The resources
+
+| Resource | Writes | Upstream | TTL |
+|---|---|---|---|
+| `sector-performance` | `performance` (sectors) | finviz — **US-listed only** | 1 day |
+| `country-performance` | `performance` (countries) | yfinance, per-country ETF | 1 day |
+| `group-performance` | `performance` (tiers) | yfinance, per-group ETF | 1 day |
+| `instrument-performance` | `performance` (35 curated) | yfinance | 1 day |
+| `instrument-profile` | `instruments` sector/industry/cap | yfinance | 1 week |
+| `instrument-prices` | `prices` (~400-day window) | yfinance, batched 12 | 1 day |
+| `fund-holdings` | `security`, `issuer`, `fund_holding` | **SEC EDGAR** | 1 month |
+| `derive-classifications` | `security_taxonomy`, country | none — a SQL join | 1 month |
+| `security-tickers` | ticker identifiers | **OpenFIGI** | 1 day |
+
+**TTLs are pre-launch values — deliberately long.** Nobody is watching these numbers yet and every
+refresh spends someone's free-tier quota. Tightening them at launch is tracked in `todos.md`.
+
+### Running one by hand
 
 ```bash
-# scoped refresh (service-role key required for `force`)
+# Any resource, via CI (uses the anon key; respects the TTL):
+gh workflow run market-warmup.yml -f resource=fund-holdings
+
+# Directly, with `force` to bypass the TTL — SERVICE-ROLE ONLY, because the anon key is public
+# and a public cache-buster is a free way to hammer the provider:
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
-  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
+  -H 'Content-Type: application/json' \
   -d '{"resource":"fund-holdings","fund":"XLE","force":true}'
 ```
 
-Resources: `fund-holdings` (SEC → securities + holdings), `derive-classifications`
-(sector/country from fund membership), `security-tickers` (ISIN → symbol via OpenFIGI),
-plus the existing performance/profile/prices ones. `market-warmup.yml` runs them four times
-a day; `market-verify.yml` asserts the result daily.
+`force` clears the TTL and the error backoff but **not** the in-flight lock, so concurrent forced
+refreshes still collapse into one upstream fetch.
+
+### Adding an ETF (no deploy)
+
+`market.tracked_fund` is the control surface and `market.ingest_run` is the log.
+
+1. Insert a row in Studio: `symbol`, `name`, `kind` (`sector` / `country` / `group` / `other`),
+   and `represents_code` — the `market.sectors` id for a sector fund, the ISO-2 for a country one.
+   Leave it null and the fund contributes holdings but classifies nothing.
+2. `{"resource":"fund-holdings","fund":"<SYMBOL>","force":true}` — seconds, not the monthly pass.
+3. `{"resource":"derive-classifications","force":true}` — turns the new holdings into sector and
+   country membership.
+4. `{"resource":"security-tickers","force":true}` — resolves ISINs the new fund introduced.
+
+To make a country drillable in the UI it also needs `market.countries.etf_symbol` set, which is
+what `country-performance` reads.
+
+Retire a fund with `enabled = false` — its holdings history is kept. `notes` is respected by the
+migrations, so a hand edit is never reverted by a redeploy.
+
+### What is missing, in one place
+
+- **Sector classification is US-only** — it derives from the 11 US sector SPDRs, so a non-US
+  security has no sector and a sector page filtered to a non-US country is empty.
+- **Per-security % change covers only the 35 curated symbols**, so most constituents show no number.
+- **Market cap and fundamentals are absent** — FMP's free tier gates them per SYMBOL.
+- **`sector-performance` is finviz and US-listed only.** Do not present it as global, and do not
+  present it on a country page as if it were that country's.
+- **Only US-registered funds file N-PORT**, so non-US UCITS funds cannot be tracked at all.
+- Full list, with what each would take: the umbrella `todos.md`.
 
 ### Things that will bite you
 

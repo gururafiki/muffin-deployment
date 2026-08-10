@@ -333,6 +333,20 @@ Deno.serve(async (req: Request) => {
       // corrected ETF proxy or a new ticker takes effect without a redeploy.
       universe: async () => {
         if (resource === 'instrument-performance') return await instrumentUniverse()
+        if (resource === 'group-performance') {
+          // Tiers get their growth from each group's proxy ETF, which the reference data already
+          // names. Scoped `<scheme>:<group>` because a group id is not unique across schemes —
+          // MSCI and FTSE both have `developed`, backed by DIFFERENT funds (URTH vs VEA).
+          const { data, error } = await market
+            .from('classification_groups')
+            .select('id,scheme_id,etf')
+            .not('etf', 'is', null)
+          if (error) throw new Error(`group universe read failed: ${error.message}`)
+          return (data ?? []).map((g) => ({
+            scopeId: `${g.scheme_id as string}:${g.id as string}`,
+            symbol: g.etf as string,
+          }))
+        }
         const { data, error } = await market
           .from('countries')
           .select('iso2,etf_symbol')
