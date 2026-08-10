@@ -1,0 +1,92 @@
+# Assert the market reference data is not silently wrong.
+#
+# WHY THIS EXISTS. Landing N-PORT holdings surfaced four defects that produced NO error
+# of any kind. The worst: SEC writes `<cusip>000000000</cusip>` to mean "no CUSIP", and
+# 72% of holdings carry it — so treating it as an identifier collapsed Accenture, Seagate,
+# TE Connectivity and NXP into a SINGLE security. Every request returned 200. The only
+# visible symptom was one fund's weights summing to 97.1% instead of 100%.
+#
+# So the checks here are deliberately about SHAPE rather than exceptions. Silent corruption
+# in this pipeline looks like plausible data with the wrong totals, and the way to catch it
+# is to assert the totals.
+#
+# Reads only, with the ANON key — exactly what a visitor sees. If a check here fails on
+# data the ingest reported as successful, the RLS or the schema cache is the suspect.
+name: Market data verify
+
+on:
+  schedule:
+    # 03:00 UTC — after the 02:10 warm-up has had time to land.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: market-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check market invariants
+        env:
+          BASE: "https://${{ vars.SUPABASE_SUBDOMAIN || 'supabase' }}.${{ vars.DOMAIN }}"
+          ANON: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${ANON:-}" ]; then echo "::error::SUPABASE_ANON_KEY is not set"; exit 1; fi
+
+          fail=0
+          # PostgREST returns the row count in Content-Range with Prefer: count=exact, so a
+          # count costs one request and no body.
+          count() {
+            curl -sS --max-time 60 -o /dev/null -D - "$BASE/rest/v1/$1" \
+              -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+              -H 'Accept-Profile: market' -H 'Prefer: count=exact' -H 'Range: 0-0' \
+              2>/dev/null | tr -d '\r' | awk -F'/' '/^[Cc]ontent-[Rr]ange:/ {print $2}'
+          }
+          check_min() { # name, actual, floor
+            if [ -z "${2:-}" ] || [ "$2" = "*" ]; then
+              echo "::error::$1 — could not read a count (auth, schema cache, or service down)"; fail=1; return
+            fi
+            if [ "$2" -lt "$3" ]; then
+              echo "::error::$1 = $2, expected at least $3"; fail=1
+            else
+              echo "  ok   $1 = $2 (floor $3)"
+            fi
+          }
+          check_zero() {
+            if [ -z "${2:-}" ] || [ "$2" = "*" ]; then
+              echo "::error::$1 — could not read a count"; fail=1; return
+            fi
+            if [ "$2" -ne 0 ]; then echo "::error::$1 = $2, expected 0"; fail=1
+            else echo "  ok   $1 = 0"; fi
+          }
+
+          # 1. The universe exists and is the size fund holdings actually produce. A floor
+          #    catches the collapse case: the placeholder-CUSIP bug merged thousands of
+          #    securities into hundreds while every request still returned 200.
+          check_min "securities"  "$(count 'security?select=security_id')"            5000
+          check_min "identifiers" "$(count 'security_identifier?select=value')"       8000
+          check_min "holdings"    "$(count 'fund_holding?select=fund_id')"           12000
+          check_min "issuers"     "$(count 'issuer?select=issuer_id')"                3000
+
+          # 2. No placeholder ever becomes an identifier again. This is the exact value that
+          #    caused the merge, asserted directly.
+          check_zero "all-zero CUSIPs" "$(count 'security_identifier?select=value&kind_code=eq.cusip&value=eq.000000000')"
+          check_zero "all-zero ISINs"  "$(count 'security_identifier?select=value&kind_code=eq.isin&value=eq.000000000000')"
+
+          # 3. ISIN coverage. Measured at 98%+; a sharp drop means parsing broke — and note
+          #    that identifiers are XML ATTRIBUTES, so reading them as element text yields
+          #    empty strings and loses every one of them without erroring.
+          check_min "ISIN identifiers" "$(count 'security_identifier?select=value&kind_code=eq.isin')" 7000
+
+          # 4. The funds are actually being tracked and were ingested.
+          check_min "enabled tracked funds" "$(count 'tracked_fund?select=symbol&enabled=eq.true')" 30
+          check_min "funds ingested"        "$(count 'tracked_fund?select=symbol&last_report_date=not.is.null')" 30
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::market reference data failed verification — see the failures above"
+            exit 1
+          fi
+          echo "all market invariants hold"
