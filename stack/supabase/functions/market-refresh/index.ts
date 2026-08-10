@@ -32,6 +32,7 @@ import {
   PRICES_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
   REFERENCE_TTL_MINUTES,
+  TICKERS_TTL_MINUTES,
   RESOURCES,
 } from './resources.ts'
 
@@ -95,9 +96,13 @@ Deno.serve(async (req: Request) => {
     ? spec.ttlMinutes
     : resource === PRICES_RESOURCE
       ? PRICES_TTL_MINUTES
-      : resource === HOLDINGS_RESOURCE || resource === TICKERS_RESOURCE || resource === DERIVE_RESOURCE
-        // Reference data, not prices: N-PORT is quarterly and a resolved ticker does not expire.
-        // A short TTL here would just re-ask SEC and OpenFIGI for last quarter's answer.
+      // Incremental: each run drains a slice of the backlog, so the TTL must be short enough that
+      // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
+      : resource === TICKERS_RESOURCE
+        ? TICKERS_TTL_MINUTES
+      // Reference data, not prices: N-PORT is quarterly, so a short TTL would just re-ask SEC for
+      // last quarter's answer. Both of these finish what they start in a single run.
+      : resource === HOLDINGS_RESOURCE || resource === DERIVE_RESOURCE
         ? REFERENCE_TTL_MINUTES
         : PROFILE_TTL_MINUTES
 
