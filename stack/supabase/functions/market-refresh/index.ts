@@ -34,6 +34,9 @@ import {
   REFERENCE_TTL_MINUTES,
   TICKERS_TTL_MINUTES,
   RESOURCES,
+  FINVIZ_SECTOR_IDS,
+  loadEquityReturns,
+  SEC_PERF_TTL_MINUTES,
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
@@ -52,15 +55,39 @@ const json = (body: unknown, status = 200) =>
  * read the claim — but it must still be checked, because `force` is the one input
  * that lets a caller bypass the rate limit protecting the upstream provider.
  */
-function isServiceRole(req: Request): boolean {
+function claims(req: Request): Record<string, unknown> | null {
   const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-  if (!token) return false
+  if (!token) return null
   try {
     const [, payload] = token.split('.')
-    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))).role === 'service_role'
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
   } catch {
-    return false
+    return null
   }
+}
+
+function isServiceRole(req: Request): boolean {
+  return claims(req)?.role === 'service_role'
+}
+
+/**
+ * True for an ADMIN user, the Supabase-native way: `app_metadata.role === 'admin'`.
+ *
+ * `app_metadata` is the right home rather than `user_metadata` — a user can edit their own
+ * `user_metadata` through the normal auth API, so a role kept there is self-assignable and worth
+ * nothing. `app_metadata` can only be written with the service key (or in Studio), and GoTrue
+ * copies it into every token it issues, so it survives a refresh with no extra lookup.
+ *
+ * The main router has already verified the JWT's SIGNATURE, so reading the claim here is safe —
+ * an attacker cannot mint one. Grant it with:
+ *   `update auth.users set raw_app_meta_data = raw_app_meta_data || '{"role":"admin"}' where email = '…';`
+ */
+function isAdmin(req: Request): boolean {
+  const c = claims(req)
+  if (!c) return false
+  if (c.role === 'service_role') return true
+  const app = c.app_metadata as Record<string, unknown> | undefined
+  return app?.role === 'admin' || (Array.isArray(app?.roles) && app.roles.includes('admin'))
 }
 
 Deno.serve(async (req: Request) => {
@@ -87,7 +114,12 @@ Deno.serve(async (req: Request) => {
   const HOLDINGS_RESOURCE = 'fund-holdings'
   const TICKERS_RESOURCE = 'security-tickers'
   const DERIVE_RESOURCE = 'derive-classifications'
-  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE]
+  const SEC_PROFILE_RESOURCE = 'security-profiles'
+  const SEC_PERF_RESOURCE = 'security-performance'
+  const EXTRA = [
+    PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
+    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE,
+  ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
@@ -98,13 +130,25 @@ Deno.serve(async (req: Request) => {
       ? PRICES_TTL_MINUTES
       // Incremental: each run drains a slice of the backlog, so the TTL must be short enough that
       // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
-      : resource === TICKERS_RESOURCE
+      // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
+      // that the NEXT run is allowed to continue the backlog.
+      : resource === TICKERS_RESOURCE || resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE
         ? TICKERS_TTL_MINUTES
       // Reference data, not prices: N-PORT is quarterly, so a short TTL would just re-ask SEC for
       // last quarter's answer. Both of these finish what they start in a single run.
       : resource === HOLDINGS_RESOURCE || resource === DERIVE_RESOURCE
         ? REFERENCE_TTL_MINUTES
         : PROFILE_TTL_MINUTES
+
+  // WRITES ARE ADMIN-ONLY. Reads never come through here — the app reads the tables directly over
+  // PostgREST — so refusing a non-admin costs a visitor nothing. Previously any valid JWT (i.e.
+  // anyone holding the published anon key) could trigger an upstream fetch; the TTL bounded the
+  // damage but the endpoint was still a free way to spend someone else's provider quota.
+  //
+  // The scheduled warm-up therefore runs with the SERVICE-ROLE key, not the anon key.
+  if (!isAdmin(req)) {
+    return json({ error: 'refresh is restricted to admin users', resource }, 403)
+  }
 
   const market = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
@@ -225,6 +269,107 @@ Deno.serve(async (req: Request) => {
       if (error) throw new Error(`derive_classifications failed: ${error.message}`)
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ resource, classified })
+    }
+
+    // Sector for securities NO sector SPDR holds — i.e. everything non-US. Written as a SECOND
+    // source (`yfinance`, priority 100) beside the filing-derived one (`sec-nport`, 300), so a
+    // security XLK holds keeps its filing sector and everything else gains a provider opinion.
+    if (resource === SEC_PROFILE_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_profile')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(1000)
+      if (pendErr) throw new Error(`pending_profile read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: r.symbol as string,
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, classified: 0, remaining: 0, note: 'every security has a sector' })
+      }
+
+      // muffin sector id -> taxonomy node, resolved once.
+      const { data: nodes, error: nodeErr } = await market
+        .from('taxonomy_node')
+        .select('node_id,code')
+        .eq('taxonomy_id', 'muffin')
+      if (nodeErr) throw new Error(`taxonomy_node read failed: ${nodeErr.message}`)
+      const nodeByCode = new Map((nodes ?? []).map((n) => [n.code as string, n.node_id as string]))
+
+      const deadline = Date.now() + 35_000
+      const BATCH = 50
+      let classified = 0
+      let unmapped = 0
+      for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
+        const batch = wanted.slice(i, i + BATCH)
+        const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
+        const rows = await fetcher(
+          `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+        ).catch(() => [])
+
+        const writes: Record<string, unknown>[] = []
+        for (const r of rows) {
+          const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+          const code = FINVIZ_SECTOR_IDS[String(r.sector ?? '')]
+          // An unrecognised provider label is COUNTED, not silently dropped: a vocabulary change
+          // upstream would otherwise look like a provider with no sectors.
+          if (!securityId || !code) { unmapped++; continue }
+          const nodeId = nodeByCode.get(code)
+          if (!nodeId) { unmapped++; continue }
+          writes.push({
+            security_id: securityId,
+            node_id: nodeId,
+            source_code: 'yfinance',
+            as_of: new Date().toISOString(),
+          })
+        }
+        if (writes.length > 0) {
+          const { error } = await market
+            .from('security_taxonomy')
+            .upsert(writes, { onConflict: 'security_id,node_id,source_code' })
+          if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
+          classified += writes.length
+        }
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, classified, unmapped, remaining: Math.max(0, wanted.length - classified - unmapped) })
+    }
+
+    // Per-security returns. This is why most constituents render no % change: market.performance
+    // scope='instrument' only ever covered the 35 curated symbols.
+    if (resource === SEC_PERF_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_performance')
+        .select('symbol')
+        .order('best_weight', { ascending: false })
+        .limit(1000)
+      if (pendErr) throw new Error(`pending_performance read failed: ${pendErr.message}`)
+      const symbols = [...new Set((pending ?? []).map((r) => r.symbol as string))]
+      if (symbols.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, refreshed: 0, remaining: 0, note: 'every security has fresh returns' })
+      }
+
+      // 40 symbols x ~400 bars is ~1 MB. The country refresh proves 19 symbols x 1900 bars (~4 MB)
+      // is safe, so this stays well inside the worker while still covering a page per batch.
+      const BATCH = 40
+      const deadline = Date.now() + 35_000
+      const now = new Date()
+      let written = 0
+      for (let i = 0; i < symbols.length && Date.now() < deadline; i += BATCH) {
+        const batch = symbols.slice(i, i + BATCH)
+        const rows = await loadEquityReturns(fetcher, batch, now, SEC_PERF_TTL_MINUTES).catch(() => [])
+        if (rows.length === 0) continue
+        const { error } = await market
+          .from('performance')
+          .upsert(rows, { onConflict: 'scope,scope_id,period' })
+        if (error) throw new Error(`performance upsert failed: ${error.message}`)
+        written += rows.length
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, refreshed: written, remaining: Math.max(0, symbols.length - written) })
     }
 
     if (resource === TICKERS_RESOURCE) {
