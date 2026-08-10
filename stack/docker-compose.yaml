@@ -655,9 +655,15 @@ services:
   openbb-mcp:
     image: {{ image_openbb }}
     environment:
-      # OpenBB provider API keys (from secrets.yaml). Add more providers as needed,
-      # e.g. POLYGON_API_KEY / FRED_API_KEY / ALPHA_VANTAGE_API_KEY — see the openbb-mcp-docker repo's README.
+      # OpenBB provider credentials (from secrets.yaml). The env var is the provider's
+      # declared credential name upper-cased — which is NOT always *_API_KEY:
+      # tiingo declares `tiingo_token`, cftc declares `cftc_app_token`. Check with
+      # `RegistryLoader.from_extensions().providers[<name>].credentials` before adding one.
       FMP_API_KEY: "{{ fmp_api_key | default('') }}"
+      FRED_API_KEY: "{{ fred_api_key | default('') }}"
+      ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
+      TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
+      BIZTOC_API_KEY: "{{ biztoc_api_key | default('') }}"
     networks:
       - muffin-net
     healthcheck:
@@ -692,9 +698,13 @@ services:
     image: {{ image_openbb }}
     command: ["uvicorn", "openbb_core.api.rest_api:app", "--host", "0.0.0.0", "--port", "6900"]
     environment:
-      # Same provider keys as openbb-mcp. finviz + yfinance need none; FMP is
-      # required for per-symbol price performance (see the edge function).
+      # Same provider credentials as openbb-mcp — keep the two in step. finviz,
+      # yfinance and sec need none; FMP is required for per-symbol price performance.
       FMP_API_KEY: "{{ fmp_api_key | default('') }}"
+      FRED_API_KEY: "{{ fred_api_key | default('') }}"
+      ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
+      TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
+      BIZTOC_API_KEY: "{{ biztoc_api_key | default('') }}"
     networks:
       - muffin-net
     healthcheck:
