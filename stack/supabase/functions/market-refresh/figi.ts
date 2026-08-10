@@ -48,11 +48,28 @@ interface FigiJob {
  */
 export async function mapIsinsToTickers(
   requests: FigiRequest[],
-  opts: { apiKey?: string; maxRequests?: number; budgetMs?: number } = {},
-): Promise<{ results: FigiResult[]; requestsUsed: number; unresolved: number }> {
+  opts: {
+    apiKey?: string
+    maxRequests?: number
+    budgetMs?: number
+    /**
+     * Called with each batch as it resolves, so results are PERSISTED AS THEY ARRIVE rather than
+     * accumulated and written at the end.
+     *
+     * With a key a run maps thousands of ISINs, and holding all of that plus every response body
+     * in a 150 MB worker is what made it die and return a bare 502 — the same failure mode, and
+     * the same fix, as the price refresh. Writing per batch also means a worker that dies keeps
+     * the progress it already made.
+     */
+    onBatch?: (batch: FigiResult[]) => Promise<void>
+  } = {},
+): Promise<{ results: FigiResult[]; requestsUsed: number; unresolved: number; resolvedCount: number }> {
   const apiKey = opts.apiKey?.trim() || undefined;
   const perRequest = apiKey ? KEYED_JOBS_PER_REQUEST : ANON_JOBS_PER_REQUEST;
-  const maxRequests = opts.maxRequests ?? (apiKey ? 40 : 15);
+  // Keyed: 25 requests x 100 ISINs = 2,500 per run, which clears a ~9,600 backlog in four passes
+  // without asking one worker to do the whole thing. The failure mode when a run is too ambitious
+  // is a dead worker returning a bare 502, not a slow success.
+  const maxRequests = opts.maxRequests ?? (apiKey ? 25 : 15);
 
   /**
    * A WALL-CLOCK budget, not just a request count.
@@ -71,6 +88,7 @@ export async function mapIsinsToTickers(
   const results: FigiResult[] = [];
   let requestsUsed = 0;
   let unresolved = 0;
+  let resolvedCount = 0;
 
   for (let i = 0; i < requests.length && requestsUsed < maxRequests; i += perRequest) {
     // Leave room for the request itself plus the writes the caller still has to do.
@@ -98,6 +116,7 @@ export async function mapIsinsToTickers(
     }
 
     const body = (await res.json()) as ({ data?: Record<string, unknown>[]; warning?: string })[];
+    const resolved: FigiResult[] = [];
     for (let j = 0; j < batch.length; j++) {
       // The response is POSITIONAL — entry j answers job j. A filtered or reordered read here
       // would attach the wrong ticker to the wrong security, which is worse than no ticker.
@@ -108,13 +127,16 @@ export async function mapIsinsToTickers(
         unresolved++;
         continue;
       }
-      results.push({
+      resolved.push({
         securityId: batch[j].securityId,
         ticker: ticker.toUpperCase(),
         exchCode: hit?.exchCode ? String(hit.exchCode) : undefined,
         securityType: hit?.securityType ? String(hit.securityType) : undefined,
       });
     }
+    if (opts.onBatch) await opts.onBatch(resolved);
+    else results.push(...resolved);
+    resolvedCount += resolved.length;
 
     // Stay under the per-minute ceiling without needing to track a window. Skip the wait when the
     // budget is spent — the loop is about to exit anyway.
@@ -124,5 +146,5 @@ export async function mapIsinsToTickers(
     }
   }
 
-  return { results, requestsUsed, unresolved };
+  return { results, requestsUsed, unresolved, resolvedCount };
 }
