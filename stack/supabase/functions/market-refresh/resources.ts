@@ -509,6 +509,16 @@ export interface ProfileUpdate {
 
 export const PROFILE_TTL_MINUTES = 24 * 60
 
+/**
+ * Reference data (fund holdings, resolved tickers) — a week.
+ *
+ * N-PORT is quarterly and filed ~60 days in arrears, and a ticker resolved from an ISIN does not
+ * go stale. A price-shaped TTL here would just re-ask SEC and OpenFIGI for last quarter's answer.
+ * The ticker resolution is incremental, so this also has to be short enough that consecutive runs
+ * can work through the backlog rather than being told the data is fresh.
+ */
+export const REFERENCE_TTL_MINUTES = 7 * 24 * 60
+
 export async function loadProfiles(
   fetcher: Fetcher,
   entries: UniverseEntry[],
