@@ -305,12 +305,29 @@ Deno.serve(async (req: Request) => {
       const BATCH = 50
       let classified = 0
       let unmapped = 0
+      let batchesFailed = 0
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
-        const rows = await fetcher(
-          `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
-        ).catch(() => [])
+        // A THROW and an EMPTY ANSWER are different facts and must not be collapsed. If the whole
+        // batch fails, the provider is down or rate-limiting — mark nothing, or a single outage
+        // would negative-cache thousands of perfectly answerable securities for a month.
+        let rows: Record<string, unknown>[] = []
+        let providerFailed = false
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+          )
+        } catch (_e) {
+          providerFailed = true
+        }
+        if (providerFailed || rows.length === 0) {
+          // Zero rows for a whole batch is indistinguishable from a failure, so it is treated as
+          // one. This is exactly the state that made the drain loop spin: `classified: 0,
+          // unmapped: 0, remaining: 1000`, run after run, with nothing to say why.
+          batchesFailed++
+          continue
+        }
 
         const writes: Record<string, unknown>[] = []
         for (const r of rows) {
@@ -335,9 +352,33 @@ Deno.serve(async (req: Request) => {
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
           classified += writes.length
         }
+
+        // Everything in the batch the provider DID answer for, but not about — a ticker it does
+        // not carry, or a sector label outside the map. Recorded so it stops being re-asked; the
+        // batch answering at all is what proves the provider was up.
+        const answered = new Set(writes.map((w) => w.security_id as string))
+        const missed = batch.filter((b) => !answered.has(b.securityId)).map((b) => b.securityId)
+        if (missed.length > 0) {
+          const { error } = await market
+            .from('security')
+            .update({ profile_missing_at: new Date().toISOString() })
+            .in('security_id', missed)
+          if (error) throw new Error(`profile_missing_at update failed: ${error.message}`)
+        }
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, classified, unmapped, remaining: Math.max(0, wanted.length - classified - unmapped) })
+      // `batchesFailed` is reported rather than hidden: a run that classified nothing because the
+      // provider was down must not look like a run that found nothing left to do.
+      if (batchesFailed > 0 && classified === 0) {
+        throw new Error(`profile provider returned nothing for all ${batchesFailed} batches`)
+      }
+      return json({
+        resource,
+        classified,
+        unmapped,
+        batchesFailed,
+        remaining: Math.max(0, wanted.length - classified - unmapped),
+      })
     }
 
     // Per-security returns. This is why most constituents render no % change: market.performance
