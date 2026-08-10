@@ -186,9 +186,80 @@ export function returnsFor(series: Bar[], now: Date): Record<string, number> {
   return out
 }
 
+
+/**
+ * Multi-period returns for a set of ETFs, in ONE batched request.
+ *
+ * Shared by `country-performance` and `group-performance`: a country's proxy fund and a tier's
+ * proxy fund are the same problem, and the batching, the single-symbol `symbol`-column quirk and
+ * the provider choice below are all things that should only be got right once.
+ *
+ * Provider is yfinance because both alternatives are unavailable: finviz's per-symbol
+ * `price_performance` is broken upstream (it duplicates the first character of the symbol), and
+ * fmp's `etf/price_performance` is PREMIUM and 402s on this deployment's free key.
+ */
+async function etfReturns(
+  fetcher: Fetcher,
+  entries: UniverseEntry[],
+  now: Date,
+  scope: string,
+  ttlMinutes: number,
+): Promise<{ rows: PerfRow[]; unmapped: string[] }> {
+  // yfinance accepts a comma list and tags each row with `symbol`; ~19 symbols over ~5.2y is
+  // ~4 MB and ~5s, inside the worker's 150 MB / 60 s budget. Per-symbol calls would be 19 round
+  // trips and risk the timeout.
+  const symbols = [...new Set(entries.map((e) => e.symbol))]
+  const start = daysBefore(now, 1900)
+  const results = await fetcher(
+    `/api/v1/etf/historical?symbol=${symbols.join(',')}` +
+      `&provider=yfinance&start_date=${start}&interval=1d`,
+  )
+
+  // A single-symbol response carries NO `symbol` column — the provider only adds it when several
+  // are requested. Fall back to the one symbol asked for.
+  const bySymbol = new Map<string, Bar[]>()
+  for (const r of results) {
+    const symbol = String(r.symbol ?? symbols[0])
+    const close = typeof r.close === 'number' ? r.close : Number(r.close)
+    const date = String(r.date ?? '').slice(0, 10)
+    if (!date || !Number.isFinite(close)) continue
+    const list = bySymbol.get(symbol) ?? []
+    list.push({ date, close })
+    bySymbol.set(symbol, list)
+  }
+  for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
+
+  const asOf = now.toISOString()
+  const staleAfter = new Date(now.getTime() + ttlMinutes * 60_000).toISOString()
+  const rows: PerfRow[] = []
+  const unmapped: string[] = []
+
+  for (const { scopeId, symbol } of entries) {
+    const series = bySymbol.get(symbol)
+    // A fund that has been liquidated returns nothing (MSCI Frontier's FM stopped trading), so a
+    // missing series is reported rather than silently omitted.
+    if (!series || series.length < 2) {
+      unmapped.push(`${scopeId}:${symbol}`)
+      continue
+    }
+    for (const [period, changePct] of Object.entries(returnsFor(series, now))) {
+      rows.push({
+        scope,
+        scope_id: scopeId,
+        period,
+        change_pct: changePct,
+        as_of: asOf,
+        stale_after: staleAfter,
+        source: 'yfinance',
+      })
+    }
+  }
+  return { rows, unmapped }
+}
+
 export const RESOURCES: Record<string, Resource> = {
   'sector-performance': {
-    ttlMinutes: 30,
+    ttlMinutes: 24 * 60,
     async load({ fetcher, now }) {
       // provider=finviz is keyless. NOTE: finviz's own field description says
       // "US-listed stocks only", so this is US sector performance — which is what
@@ -227,72 +298,46 @@ export const RESOURCES: Record<string, Resource> = {
   },
 
   'country-performance': {
-    ttlMinutes: 60,
+    ttlMinutes: 24 * 60,
     async load({ fetcher, now, universe }) {
       if (!universe) throw new Error('country-performance needs a universe resolver')
       const entries = await universe()
       if (entries.length === 0) throw new Error('no countries with an etf_symbol')
+      const out = await etfReturns(fetcher, entries, now, 'country', this.ttlMinutes)
+      if (out.rows.length === 0) throw new Error('no country returns computed')
+      return out
+    },
+  },
 
-      // ONE batched call for every country ETF. yfinance accepts a comma list and
-      // tags each row with `symbol`; 19 symbols over ~5.2y is ~4 MB and ~5s, well
-      // inside the worker's 150 MB / 60 s budget. Per-symbol calls would be 19 round
-      // trips and risk the timeout.
-      //
-      // Provider is yfinance because BOTH alternatives are unavailable: finviz's
-      // per-symbol price_performance is broken upstream (it duplicates the first
-      // character of the symbol), and fmp's etf/price_performance is a PREMIUM
-      // endpoint that 402s on the free key this deployment has.
-      const symbols = [...new Set(entries.map((e) => e.symbol))]
-      const start = daysBefore(now, 1900)
-      const results = await fetcher(
-        `/api/v1/etf/historical?symbol=${symbols.join(',')}` +
-          `&provider=yfinance&start_date=${start}&interval=1d`,
-      )
-
-      // A single-symbol response carries NO `symbol` column — the provider only adds
-      // it when several are requested. Fall back to the one symbol asked for.
-      const bySymbol = new Map<string, Bar[]>()
-      for (const r of results) {
-        const symbol = String(r.symbol ?? symbols[0])
-        const close = typeof r.close === 'number' ? r.close : Number(r.close)
-        const date = String(r.date ?? '').slice(0, 10)
-        if (!date || !Number.isFinite(close)) continue
-        const list = bySymbol.get(symbol) ?? []
-        list.push({ date, close })
-        bySymbol.set(symbol, list)
-      }
-      for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
-
-      const asOf = now.toISOString()
-      const staleAfter = new Date(now.getTime() + this.ttlMinutes * 60_000).toISOString()
-      const rows: PerfRow[] = []
-      const unmapped: string[] = []
-
-      for (const { scopeId, symbol } of entries) {
-        const series = bySymbol.get(symbol)
-        if (!series || series.length < 2) {
-          unmapped.push(`${scopeId}:${symbol}`)
-          continue
-        }
-        for (const [period, changePct] of Object.entries(returnsFor(series, now))) {
-          rows.push({
-            scope: 'country',
-            scope_id: scopeId,
-            period,
-            change_pct: changePct,
-            as_of: asOf,
-            stale_after: staleAfter,
-            source: 'yfinance',
-          })
-        }
-      }
-      if (rows.length === 0) throw new Error('no country returns computed')
-      return { rows, unmapped }
+  /**
+   * Growth per TIER (developed / emerging / frontier), from each group's proxy ETF.
+   *
+   * `market.classification_groups.etf` already names them (MSCI developed = URTH, emerging = EEM;
+   * FTSE developed = VEA), which is why this needs no new reference data — only the same batched
+   * price call the countries use.
+   *
+   * `scope_id` is `<scheme>:<group>` because a group id is NOT unique across schemes: MSCI and
+   * FTSE both have `developed`, and they are different funds (URTH vs VEA) precisely because the
+   * two providers disagree about which countries belong. Keying on the bare id would make one
+   * silently overwrite the other.
+   *
+   * The World Bank scheme has no ETFs at all (income bands are not investable), so it contributes
+   * nothing here and its groups keep showing no number rather than a borrowed one.
+   */
+  'group-performance': {
+    ttlMinutes: 24 * 60,
+    async load({ fetcher, now, universe }) {
+      if (!universe) throw new Error('group-performance needs a universe resolver')
+      const entries = await universe()
+      if (entries.length === 0) throw new Error('no classification groups with an etf')
+      const out = await etfReturns(fetcher, entries, now, 'group', this.ttlMinutes)
+      if (out.rows.length === 0) throw new Error('no group returns computed')
+      return out
     },
   },
 
   'instrument-performance': {
-    ttlMinutes: 60,
+    ttlMinutes: 24 * 60,
     async load({ fetcher, now, universe }) {
       if (!universe) throw new Error('instrument-performance needs a universe resolver')
       const entries = await universe()
@@ -387,6 +432,15 @@ export interface PriceRow {
 export const PRICE_WINDOW_DAYS = 400
 /** Inside this many days the series is kept DAILY; before it, weekly. */
 export const PRICE_DAILY_DAYS = 90
+/**
+ * TTLs are PRE-LAUNCH values: deliberately long, because nobody is watching these numbers yet and
+ * every refresh spends someone's free-tier quota (finviz, yfinance, SEC, OpenFIGI). Going live is
+ * when they should tighten — see `todos.md` -> "Market data TTLs (revisit at launch)" for the
+ * intended production values (30-60 min for performance, weekly for holdings).
+ *
+ * A TTL is about how often it is worth ASKING, not about how often the data changes: sector
+ * performance moves continuously, but a day-old number is fine for a page nobody has open.
+ */
 export const PRICES_TTL_MINUTES = 24 * 60
 
 /**
@@ -507,7 +561,7 @@ export interface ProfileUpdate {
   updated_at: string
 }
 
-export const PROFILE_TTL_MINUTES = 24 * 60
+export const PROFILE_TTL_MINUTES = 7 * 24 * 60
 
 /**
  * Reference data (fund holdings, resolved tickers) — a week.
@@ -517,17 +571,21 @@ export const PROFILE_TTL_MINUTES = 24 * 60
  * The ticker resolution is incremental, so this also has to be short enough that consecutive runs
  * can work through the backlog rather than being told the data is fresh.
  */
-export const REFERENCE_TTL_MINUTES = 7 * 24 * 60
+export const REFERENCE_TTL_MINUTES = 30 * 24 * 60
 
 /**
- * Ticker resolution — SHORT, because the resource is INCREMENTAL.
+ * Ticker resolution.
  *
- * A TTL expresses "the answer is still good". That is true of a quarterly filing and false of a
- * resource that deliberately does a slice per run: giving it the reference TTL meant one run
- * resolved a page and the next 7 days of runs were told the data was fresh, so the backlog could
- * never drain. Cheap to re-run — with an empty backlog it returns without calling anything.
+ * This MUST stay shorter than the fund-holdings TTL. The resource is INCREMENTAL — it does a slice
+ * per run — so a TTL sized as "the answer is still good" stalls it: it once carried the 7-day
+ * reference TTL, one run resolved a page, and every run for the next week was told the data was
+ * fresh while ~9,600 securities sat unresolved.
+ *
+ * A day is safe now only because the backlog is drained and new securities appear just after a
+ * monthly holdings ingest. If a fund is added by hand, run this with `force` rather than waiting.
+ * Cheap either way: with an empty backlog it returns without calling OpenFIGI at all.
  */
-export const TICKERS_TTL_MINUTES = 10
+export const TICKERS_TTL_MINUTES = 24 * 60
 
 export async function loadProfiles(
   fetcher: Fetcher,
