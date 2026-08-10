@@ -97,6 +97,22 @@ jobs:
           #    on the final state — it fails only if resolution has produced essentially nothing.
           check_min "resolved tickers" "$(count 'security_identifier?select=value&kind_code=eq.ticker')" 100
 
+          # 7. NO DUPLICATE constituents. `security_taxonomy` is many-to-many over sources on
+          #    purpose, so a security classified by both a filing and a provider appeared TWICE in
+          #    the sector list and was counted twice in the donut. The views now pick by source
+          #    priority; this asserts they still do, by comparing one sector's row count against
+          #    its DISTINCT security count.
+          tot=$(count 'sector_constituents?select=security_id&sector_id=eq.information-technology')
+          uniq=$(curl -sS --max-time 60 "$BASE/rest/v1/sector_constituents?select=security_id&sector_id=eq.information-technology" \
+            -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' \
+            | tr ',' '\n' | grep -c security_id || true)
+          if [ "${tot:-0}" -ne "${uniq:-1}" ]; then
+            echo "::error::sector_constituents has duplicates — $tot rows vs $uniq distinct securities"
+            fail=1
+          else
+            echo "  ok   sector_constituents has no duplicates ($tot)"
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
