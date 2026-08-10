@@ -214,27 +214,44 @@ async function etfReturns(
   scope: string,
   ttlMinutes: number,
 ): Promise<{ rows: PerfRow[]; unmapped: string[] }> {
-  // yfinance accepts a comma list and tags each row with `symbol`; ~19 symbols over ~5.2y is
-  // ~4 MB and ~5s, inside the worker's 150 MB / 60 s budget. Per-symbol calls would be 19 round
-  // trips and risk the timeout.
+  // BATCHED, and that is load-bearing rather than tidiness. yfinance accepts a comma list, but ONE
+  // bad symbol takes the whole call down with it: `group-performance` 502'd every time (a dead
+  // worker, no error body) purely because its five symbols include FM, a fund that was liquidated
+  // in 2025 — while `country-performance` sailed through with 45 live ones. Batching bounds the
+  // blast radius to a batch, and the per-batch catch means a delisted fund costs its own row and
+  // nothing else.
   const symbols = [...new Set(entries.map((e) => e.symbol))]
   const start = daysBefore(now, 1900)
-  const results = await fetcher(
-    `/api/v1/etf/historical?symbol=${symbols.join(',')}` +
-      `&provider=yfinance&start_date=${start}&interval=1d`,
-  )
+  const BATCH = 12
 
-  // A single-symbol response carries NO `symbol` column — the provider only adds it when several
-  // are requested. Fall back to the one symbol asked for.
   const bySymbol = new Map<string, Bar[]>()
-  for (const r of results) {
-    const symbol = String(r.symbol ?? symbols[0])
-    const close = typeof r.close === 'number' ? r.close : Number(r.close)
-    const date = String(r.date ?? '').slice(0, 10)
-    if (!date || !Number.isFinite(close)) continue
-    const list = bySymbol.get(symbol) ?? []
-    list.push({ date, close })
-    bySymbol.set(symbol, list)
+  const failedBatches: string[] = []
+  for (let i = 0; i < symbols.length; i += BATCH) {
+    const chunk = symbols.slice(i, i + BATCH)
+    let results: Record<string, unknown>[] = []
+    try {
+      results = await fetcher(
+        `/api/v1/etf/historical?symbol=${chunk.join(',')}` +
+          `&provider=yfinance&start_date=${start}&interval=1d`,
+      )
+    } catch (e) {
+      failedBatches.push(`${chunk.join('/')}: ${e instanceof Error ? e.message : String(e)}`)
+      continue
+    }
+    // A single-symbol response carries NO `symbol` column — the provider only adds it when several
+    // are requested. Fall back to the one symbol asked for.
+    for (const r of results) {
+      const symbol = String(r.symbol ?? chunk[0])
+      const close = typeof r.close === 'number' ? r.close : Number(r.close)
+      const date = String(r.date ?? '').slice(0, 10)
+      if (!date || !Number.isFinite(close)) continue
+      const list = bySymbol.get(symbol) ?? []
+      list.push({ date, close })
+      bySymbol.set(symbol, list)
+    }
+  }
+  if (failedBatches.length > 0) {
+    console.error(`${scope}: ${failedBatches.length} batch(es) failed: ${failedBatches.join(' | ')}`)
   }
   for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
 
