@@ -48,14 +48,22 @@ interface FigiJob {
  */
 export async function mapIsinsToTickers(
   requests: FigiRequest[],
-  opts: { apiKey?: string; maxRequests?: number } = {},
+  opts: { apiKey?: string; maxRequests?: number; budgetMs?: number } = {},
 ): Promise<{ results: FigiResult[]; requestsUsed: number; unresolved: number }> {
   const apiKey = opts.apiKey?.trim() || undefined;
   const perRequest = apiKey ? KEYED_JOBS_PER_REQUEST : ANON_JOBS_PER_REQUEST;
-  // The worker dies at 60s. Anonymous needs a 2.5s gap between requests to respect 25/min, so 15
-  // requests is ~40s of pacing plus the calls themselves — 20 measured at 55s, which is too close.
-  // A key drops the gap to 250ms, so it can do far more in the same budget.
   const maxRequests = opts.maxRequests ?? (apiKey ? 40 : 15);
+
+  /**
+   * A WALL-CLOCK budget, not just a request count.
+   *
+   * The worker is killed at 60s ("WorkerRequestCancelled: request has been cancelled by
+   * supervisor"), and a request count cannot express that: 15 anonymous requests took ~40s on a
+   * laptop and blew the limit on the Oracle node, which is slower and further from the API. Since
+   * the resource is incremental, stopping early costs nothing — the remainder is the next run's
+   * work — while overrunning loses the entire batch including what was already resolved.
+   */
+  const deadline = Date.now() + (opts.budgetMs ?? 35_000);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['X-OPENFIGI-APIKEY'] = apiKey;
@@ -65,6 +73,8 @@ export async function mapIsinsToTickers(
   let unresolved = 0;
 
   for (let i = 0; i < requests.length && requestsUsed < maxRequests; i += perRequest) {
+    // Leave room for the request itself plus the writes the caller still has to do.
+    if (Date.now() > deadline) break;
     const batch = requests.slice(i, i + perRequest);
     const jobs: FigiJob[] = batch.map((r) => ({
       idType: 'ID_ISIN',
@@ -106,8 +116,12 @@ export async function mapIsinsToTickers(
       });
     }
 
-    // Stay under the per-minute ceiling without needing to track a window.
-    if (requestsUsed < maxRequests) await new Promise((r) => setTimeout(r, apiKey ? 250 : 2500));
+    // Stay under the per-minute ceiling without needing to track a window. Skip the wait when the
+    // budget is spent — the loop is about to exit anyway.
+    const gap = apiKey ? 250 : 2500;
+    if (requestsUsed < maxRequests && Date.now() + gap < deadline) {
+      await new Promise((r) => setTimeout(r, gap));
+    }
   }
 
   return { results, requestsUsed, unresolved };

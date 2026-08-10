@@ -85,7 +85,8 @@ Deno.serve(async (req: Request) => {
   const PRICES_RESOURCE = 'instrument-prices'
   const HOLDINGS_RESOURCE = 'fund-holdings'
   const TICKERS_RESOURCE = 'security-tickers'
-  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE]
+  const DERIVE_RESOURCE = 'derive-classifications'
+  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
@@ -94,7 +95,7 @@ Deno.serve(async (req: Request) => {
     ? spec.ttlMinutes
     : resource === PRICES_RESOURCE
       ? PRICES_TTL_MINUTES
-      : resource === HOLDINGS_RESOURCE || resource === TICKERS_RESOURCE
+      : resource === HOLDINGS_RESOURCE || resource === TICKERS_RESOURCE || resource === DERIVE_RESOURCE
         // Reference data, not prices: N-PORT is quarterly and a resolved ticker does not expire.
         // A short TTL here would just re-ask SEC and OpenFIGI for last quarter's answer.
         ? REFERENCE_TTL_MINUTES
@@ -209,6 +210,16 @@ Deno.serve(async (req: Request) => {
       if (clsErr) throw new Error(`derive_classifications failed: ${clsErr.message}`)
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ resource, funds: results.length, securitiesAdded: added, holdings, classified, failures, results })
+    }
+
+    // Standalone so a mapping edited in Studio (tracked_fund.represents_code) takes effect without
+    // re-ingesting 38 filings — and so classification can be re-run when the holdings themselves are
+    // still inside their 7-day TTL, which is what blocked the first production run.
+    if (resource === DERIVE_RESOURCE) {
+      const { data: classified, error } = await market.rpc('derive_classifications')
+      if (error) throw new Error(`derive_classifications failed: ${error.message}`)
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, classified })
     }
 
     if (resource === TICKERS_RESOURCE) {
