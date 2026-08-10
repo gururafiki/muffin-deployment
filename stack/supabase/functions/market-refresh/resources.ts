@@ -519,6 +519,16 @@ export const PROFILE_TTL_MINUTES = 24 * 60
  */
 export const REFERENCE_TTL_MINUTES = 7 * 24 * 60
 
+/**
+ * Ticker resolution — SHORT, because the resource is INCREMENTAL.
+ *
+ * A TTL expresses "the answer is still good". That is true of a quarterly filing and false of a
+ * resource that deliberately does a slice per run: giving it the reference TTL meant one run
+ * resolved a page and the next 7 days of runs were told the data was fresh, so the backlog could
+ * never drain. Cheap to re-run — with an empty backlog it returns without calling anything.
+ */
+export const TICKERS_TTL_MINUTES = 10
+
 export async function loadProfiles(
   fetcher: Fetcher,
   entries: UniverseEntry[],
