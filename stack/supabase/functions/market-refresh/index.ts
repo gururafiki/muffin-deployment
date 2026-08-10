@@ -258,7 +258,17 @@ Deno.serve(async (req: Request) => {
       // holding all of that in a 150 MB worker is what killed it (a bare 502, no error body — the
       // same failure and the same fix as the price refresh). This also means a worker that dies
       // keeps the progress it already made.
-      const writeBatch = async (batch: { securityId: string; ticker: string }[]) => {
+      const writeBatch = async (batch: { securityId: string; ticker: string }[], missed: string[]) => {
+        // Record the misses FIRST — a negative result is a result. Without it the ~80% of holdings
+        // with no US listing stay in the backlog and are re-sent to OpenFIGI four times a day
+        // forever, starving the securities that could actually resolve.
+        if (missed.length > 0) {
+          const { error: missErr } = await market
+            .from('security')
+            .update({ figi_missing_at: new Date().toISOString() })
+            .in('security_id', missed)
+          if (missErr) throw new Error(`figi_missing_at update failed: ${missErr.message}`)
+        }
         if (batch.length === 0) return
         // A ticker is NOT globally unique (identifier_kind says so), so two securities can
         // legitimately want the same symbol — a different exchange, or a delisted line. The PK

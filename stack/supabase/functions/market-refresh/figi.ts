@@ -61,7 +61,7 @@ export async function mapIsinsToTickers(
      * the same fix, as the price refresh. Writing per batch also means a worker that dies keeps
      * the progress it already made.
      */
-    onBatch?: (batch: FigiResult[]) => Promise<void>
+    onBatch?: (batch: FigiResult[], missed: string[]) => Promise<void>
   } = {},
 ): Promise<{ results: FigiResult[]; requestsUsed: number; unresolved: number; resolvedCount: number }> {
   const apiKey = opts.apiKey?.trim() || undefined;
@@ -117,6 +117,9 @@ export async function mapIsinsToTickers(
 
     const body = (await res.json()) as ({ data?: Record<string, unknown>[]; warning?: string })[];
     const resolved: FigiResult[] = [];
+    // Securities OpenFIGI had no US listing for. Recorded so they are not re-asked on every run —
+    // most of a Japan or emerging-markets fund can never resolve against `exchCode: 'US'`.
+    const missed: string[] = [];
     for (let j = 0; j < batch.length; j++) {
       // The response is POSITIONAL — entry j answers job j. A filtered or reordered read here
       // would attach the wrong ticker to the wrong security, which is worse than no ticker.
@@ -125,6 +128,7 @@ export async function mapIsinsToTickers(
       const ticker = hit?.ticker ? String(hit.ticker) : '';
       if (!ticker) {
         unresolved++;
+        missed.push(batch[j].securityId);
         continue;
       }
       resolved.push({
@@ -134,7 +138,7 @@ export async function mapIsinsToTickers(
         securityType: hit?.securityType ? String(hit.securityType) : undefined,
       });
     }
-    if (opts.onBatch) await opts.onBatch(resolved);
+    if (opts.onBatch) await opts.onBatch(resolved, missed);
     else results.push(...resolved);
     resolvedCount += resolved.length;
 
