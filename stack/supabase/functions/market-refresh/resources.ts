@@ -271,6 +271,19 @@ async function etfReturns(
 export const SEC_PERF_TTL_MINUTES = 24 * 60
 
 /**
+ * TTL for the BACKLOG resources (`security-profiles`, `security-performance`).
+ *
+ * Short on purpose, and it costs nothing: an incremental resource with an empty backlog returns
+ * without calling any provider, so the TTL only has to be long enough to avoid a pointless table
+ * read. It has to be SHORT while a backlog exists, though — these have ~9,000 securities to work
+ * through at ~1,000 a run, and a day-long TTL would stretch that over a week and a half.
+ *
+ * This is the same trap `security-tickers` fell into: it once carried the 7-day reference TTL, one
+ * run resolved a page, and every run for the next week was told the data was fresh.
+ */
+export const BACKLOG_TTL_MINUTES = 10
+
+/**
  * Multi-period returns for EQUITIES, batched.
  *
  * Separate from `etfReturns` because the endpoint differs (`equity/price/historical`, not
