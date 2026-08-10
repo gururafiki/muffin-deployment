@@ -401,6 +401,53 @@ UPDATE thread SET metadata = metadata || '{"owner": "anonymous"}'::jsonb
 WHERE NOT metadata ? 'owner';
 ```
 
+## Market reference data (SEC N-PORT → the `market` schema)
+
+The stock universe is built from **fund holdings**, not a screener. The tracked ETFs are
+US-registered, so they file SEC **N-PORT** quarterly — public, keyless, and carrying
+name/LEI/CUSIP/ISIN/country/weight per holding. Current state: **38 funds → 9,786 securities,
+16,424 holdings, 514 sector constituents**, replacing 35 hand-authored tickers.
+
+### Operating it
+
+`market.tracked_fund` is the control surface and `market.ingest_run` is the log. Everything
+below is a **row edit in Studio**, never a migration and a deploy:
+
+| I want to… | Do this |
+|---|---|
+| add an ETF | insert `(symbol, name, kind, represents_code)`, then run the scoped refresh below |
+| retire one | `enabled = false` — its holdings history is kept |
+| change what a fund classifies | edit `represents_code`, then run `derive-classifications` |
+| ingest one fund now | `{"resource":"fund-holdings","fund":"XLE","force":true}` |
+| see what a run did | `select * from market.ingest_run order by started_at desc` |
+
+```bash
+# scoped refresh (service-role key required for `force`)
+curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"resource":"fund-holdings","fund":"XLE","force":true}'
+```
+
+Resources: `fund-holdings` (SEC → securities + holdings), `derive-classifications`
+(sector/country from fund membership), `security-tickers` (ISIN → symbol via OpenFIGI),
+plus the existing performance/profile/prices ones. `market-warmup.yml` runs them four times
+a day; `market-verify.yml` asserts the result daily.
+
+### Things that will bite you
+
+- **`<cusip>000000000</cusip>` is a placeholder, not a value**, and 72% of holdings carry it.
+  Treating it as an identifier merges every one of them into a single security — silently.
+- **An LEI names the issuer, not the security.** Resolution is ISIN → CUSIP → FIGI; the LEI
+  populates `market.issuer`.
+- **Find a filing with EDGAR full-text search**, not by walking a trust's submissions — a
+  1,433-filing CIK buries a given fund deeper than any probe budget.
+- **Fund weights do not sum to 100** (EWT's filing sums to 110.38). The `*_weight` views
+  renormalise; anything else must too.
+- **A PostgREST `in.()` filter is a URL** — 500 ISINs is 6.5 KB and the proxy returns a bare 502.
+- **Ticker resolution is incremental** by design (OpenFIGI anonymous is 25 req/min × 10). Setting
+  the free `OPENFIGI_API_KEY` raises it to 250 × 100 and clears the backlog in one pass.
+- **Only US-registered funds file N-PORT**, so a non-US UCITS fund cannot be tracked at all.
+
 ## Remote state (OCI Object Storage)
 
 Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend
