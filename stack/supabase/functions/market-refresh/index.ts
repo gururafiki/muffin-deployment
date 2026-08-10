@@ -22,6 +22,8 @@
 // real openbb-api with no Supabase running — see ./check.ts.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
+import { ingestFund } from './ingest.ts'
+import { loadFundDirectory } from './edgar.ts'
 import {
   loadPricesBatched,
   loadProfiles,
@@ -62,10 +64,12 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok')
 
   let resource = 'sector-performance'
+  let fundScope: string | undefined
   let force = false
   try {
     const body = await req.json()
     if (body?.resource) resource = String(body.resource)
+    if (body?.fund) fundScope = String(body.fund).toUpperCase()
     // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
     // refreshes must still collapse into one upstream fetch. Requires the
     // service-role key: the anon key is public, and a public cache-buster is a
@@ -77,7 +81,8 @@ Deno.serve(async (req: Request) => {
 
   const PROFILE_RESOURCE = 'instrument-profile'
   const PRICES_RESOURCE = 'instrument-prices'
-  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE]
+  const HOLDINGS_RESOURCE = 'fund-holdings'
+  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
@@ -143,6 +148,56 @@ Deno.serve(async (req: Request) => {
       if (error) throw new Error(`instruments upsert failed: ${error.message}`)
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ resource, refreshed: updates.length })
+    }
+
+    if (resource === HOLDINGS_RESOURCE) {
+      // Scope to one fund so a newly added ETF is ingested in seconds instead of
+      // waiting for the monthly pass or re-running all 40.
+      let symbols: string[]
+      if (fundScope) {
+        symbols = [fundScope]
+      } else {
+        const { data, error } = await market
+          .from('tracked_fund')
+          .select('symbol')
+          .eq('enabled', true)
+          .order('symbol')
+        if (error) throw new Error(`tracked_fund read failed: ${error.message}`)
+        symbols = (data ?? []).map((f) => f.symbol as string)
+      }
+      if (symbols.length === 0) throw new Error('no enabled funds in market.tracked_fund')
+
+      // One shared SEC directory fetch (28k rows) for the whole run.
+      const directory = await loadFundDirectory()
+      const results = []
+      const failures: string[] = []
+      let added = 0
+      let holdings = 0
+      for (const sym of symbols) {
+        try {
+          const r = await ingestFund(market, sym, directory)
+          if (!r) { failures.push(`${sym}: no filing found`); continue }
+          results.push(r)
+          added += r.securitiesAdded
+          holdings += r.holdings
+        } catch (e) {
+          // One fund's filing being malformed must not lose the other 39.
+          failures.push(`${sym}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      await market.from('ingest_run').insert({
+        source_code: 'sec-nport',
+        resource,
+        scope: fundScope ?? null,
+        finished_at: new Date().toISOString(),
+        ok: failures.length < symbols.length,
+        securities_added: added,
+        holdings_written: holdings,
+        error: failures.length ? failures.join(' | ').slice(0, 2000) : null,
+      })
+      if (results.length === 0) throw new Error(`every fund failed: ${failures.join(' | ').slice(0, 300)}`)
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, funds: results.length, securitiesAdded: added, holdings, failures, results })
     }
 
     if (resource === PRICES_RESOURCE) {
