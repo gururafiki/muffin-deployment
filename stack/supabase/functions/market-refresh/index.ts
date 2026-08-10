@@ -23,6 +23,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
+import { mapIsinsToTickers } from './figi.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
   loadPricesBatched,
@@ -30,6 +31,7 @@ import {
   openbbFetcher,
   PRICES_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
+  REFERENCE_TTL_MINUTES,
   RESOURCES,
 } from './resources.ts'
 
@@ -82,7 +84,8 @@ Deno.serve(async (req: Request) => {
   const PROFILE_RESOURCE = 'instrument-profile'
   const PRICES_RESOURCE = 'instrument-prices'
   const HOLDINGS_RESOURCE = 'fund-holdings'
-  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE]
+  const TICKERS_RESOURCE = 'security-tickers'
+  const EXTRA = [PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
@@ -91,7 +94,11 @@ Deno.serve(async (req: Request) => {
     ? spec.ttlMinutes
     : resource === PRICES_RESOURCE
       ? PRICES_TTL_MINUTES
-      : PROFILE_TTL_MINUTES
+      : resource === HOLDINGS_RESOURCE || resource === TICKERS_RESOURCE
+        // Reference data, not prices: N-PORT is quarterly and a resolved ticker does not expire.
+        // A short TTL here would just re-ask SEC and OpenFIGI for last quarter's answer.
+        ? REFERENCE_TTL_MINUTES
+        : PROFILE_TTL_MINUTES
 
   const market = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
@@ -196,8 +203,73 @@ Deno.serve(async (req: Request) => {
         error: failures.length ? failures.join(' | ').slice(0, 2000) : null,
       })
       if (results.length === 0) throw new Error(`every fund failed: ${failures.join(' | ').slice(0, 300)}`)
+      // Classify from the holdings we just landed. A sector SPDR's holdings ARE that sector, so this
+      // needs no provider — but it has to run AFTER the ingest, when the holdings are complete.
+      const { data: classified, error: clsErr } = await market.rpc('derive_classifications')
+      if (clsErr) throw new Error(`derive_classifications failed: ${clsErr.message}`)
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, funds: results.length, securitiesAdded: added, holdings, failures, results })
+      return json({ resource, funds: results.length, securitiesAdded: added, holdings, classified, failures, results })
+    }
+
+    if (resource === TICKERS_RESOURCE) {
+      // Only securities that still need one, MOST VISIBLE FIRST. `pending_ticker` orders by the
+      // security's weight in a sector fund, so the names a sector page actually renders are
+      // resolved in the first run rather than after the whole 9.7k backlog.
+      const { data: pending, error: pendErr } = await market
+        .from('pending_ticker')
+        .select('security_id,isin')
+        // Ordered explicitly rather than trusting the view's ORDER BY: a view's ordering is not
+        // contractual once PostgREST wraps it, and the ordering is the whole point of the backlog.
+        .order('best_weight', { ascending: false })
+        .limit(4000)
+      if (pendErr) throw new Error(`pending_ticker read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        isin: r.isin as string,
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, resolved: 0, remaining: 0, note: 'every security already has a ticker' })
+      }
+
+      const { results, requestsUsed, unresolved } = await mapIsinsToTickers(wanted, {
+        apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
+      })
+
+      // A ticker is NOT globally unique (identifier_kind says so), so two securities can legitimately
+      // want the same symbol — different exchanges, or a delisted line. The PK keeps the first and
+      // `ignoreDuplicates` stops the whole batch failing over it.
+      let written = 0
+      for (let i = 0; i < results.length; i += 500) {
+        const chunk = results.slice(i, i + 500)
+        const { error } = await market.from('security_identifier').upsert(
+          chunk.map((r) => ({
+            kind_code: 'ticker',
+            value: r.ticker,
+            security_id: r.securityId,
+            source_code: 'openfigi',
+          })),
+          { onConflict: 'kind_code,value', ignoreDuplicates: true },
+        )
+        if (error) throw new Error(`ticker upsert failed: ${error.message}`)
+        written += chunk.length
+      }
+      // Now priceable and linkable, which is what `is_tradeable` means.
+      for (let i = 0; i < results.length; i += 500) {
+        const ids = results.slice(i, i + 500).map((r) => r.securityId)
+        const { error } = await market.from('security').update({ is_tradeable: true }).in('security_id', ids)
+        if (error) throw new Error(`is_tradeable update failed: ${error.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        resolved: written,
+        unresolved,
+        requestsUsed,
+        // What is left for the next run — this resource is incremental by design.
+        remaining: Math.max(0, wanted.length - written - unresolved),
+      })
     }
 
     if (resource === PRICES_RESOURCE) {

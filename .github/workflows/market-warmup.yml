@@ -59,12 +59,19 @@ jobs:
           if [ -n "${ONLY:-}" ]; then
             RESOURCES="$ONLY"
           else
+            # security-tickers is INCREMENTAL: OpenFIGI's anonymous limit means each run
+            # resolves ~150 of the backlog, most-visible-first, so it belongs on every pass
+            # rather than a slow schedule. fund-holdings has a 7-day TTL and self-skips, so
+            # including it here costs one cheap 200 and keeps N-PORT current without a
+            # second schedule.
             RESOURCES=$(printf '%s\n' \
               sector-performance \
               country-performance \
               instrument-performance \
               instrument-profile \
-              instrument-prices)
+              instrument-prices \
+              security-tickers \
+              fund-holdings)
           fi
 
           total=0
