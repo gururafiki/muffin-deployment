@@ -258,6 +258,22 @@
         label: "{{ item | basename }}"
       changed_when: true
 
+    # A new table is INVISIBLE over the API until PostgREST rebuilds its schema
+    # cache. Every migration ends with `notify pgrst, 'reload schema'`, but that
+    # proved unreliable here — 10-reference-model.sql's tables 404'd as PGRST205
+    # after two consecutive deploys. Earlier migrations only ever appeared because
+    # their deploy happened to change supabase-rest's config and restart it, which
+    # hid the problem.
+    #
+    # SIGUSR1 is PostgREST's documented "reload the schema cache" signal: no
+    # restart, no dropped connections, and it does not depend on LISTEN/NOTIFY
+    # having survived. Idempotent and harmless when nothing changed.
+    - name: Reload PostgREST's schema cache (SIGUSR1) so new tables are visible
+      shell: >
+        docker kill -s SIGUSR1 "$(docker ps -qf name=muffin_supabase-rest | head -1)"
+      changed_when: false
+      failed_when: false
+
 # --- 6. Nightly database backups (pg_dumpall -> OCI Object Storage) --------
 - name: Configure database backups
   hosts: manager
