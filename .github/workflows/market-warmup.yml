@@ -71,7 +71,8 @@ jobs:
               instrument-profile \
               instrument-prices \
               security-tickers \
-              fund-holdings)
+              fund-holdings \
+              derive-classifications)
           fi
 
           total=0
