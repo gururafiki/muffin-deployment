@@ -25,7 +25,16 @@ export interface PerfRow {
  * Financials / Health Care / Materials / Information Technology. All 11 map 1:1.
  * An unmapped name is reported, never silently inserted under a wrong id.
  */
+/**
+ * Provider sector label -> muffin sector id.
+ *
+ * Covers BOTH finviz (`equity/compare/groups`) and yfinance (`equity/profile`), because the two
+ * vocabularies are the same except for one label: yfinance says "Financial Services" where finviz
+ * says "Financial". Keeping one map means a security classified from a profile lands in the same
+ * bucket as a sector read from the sector endpoint — the whole point of having sector ids at all.
+ */
 export const FINVIZ_SECTOR_IDS: Record<string, string> = {
+  'Financial Services': 'financials',
   'Energy': 'energy',
   'Utilities': 'utilities',
   'Real Estate': 'real-estate',
@@ -255,6 +264,70 @@ async function etfReturns(
     }
   }
   return { rows, unmapped }
+}
+
+
+/** Per-security returns are reference-ish: a slice per run, so the TTL must let the next run continue. */
+export const SEC_PERF_TTL_MINUTES = 24 * 60
+
+/**
+ * Multi-period returns for EQUITIES, batched.
+ *
+ * Separate from `etfReturns` because the endpoint differs (`equity/price/historical`, not
+ * `etf/historical`) and the window is much shorter: a constituent list offers 1D-1Y, so ~400 days
+ * is enough, where a country card offers 3Y/5Y and needs ~1900. That difference is the whole
+ * reason 40 equities cost about what 19 ETFs do.
+ *
+ * Returns rows rather than writing, so the caller can persist per batch and keep peak memory to
+ * one batch — the lesson the price refresh's bare 502 taught.
+ */
+export async function loadEquityReturns(
+  fetcher: Fetcher,
+  symbols: string[],
+  now: Date,
+  ttlMinutes: number,
+): Promise<PerfRow[]> {
+  if (symbols.length === 0) return []
+  const start = daysBefore(now, 400)
+  const results = await fetcher(
+    `/api/v1/equity/price/historical?symbol=${symbols.join(',')}` +
+      `&provider=yfinance&start_date=${start}&interval=1d`,
+  )
+
+  // A single-symbol response carries NO `symbol` column — the provider only adds it when several
+  // are requested.
+  const bySymbol = new Map<string, Bar[]>()
+  for (const r of results) {
+    const symbol = String(r.symbol ?? symbols[0]).toUpperCase()
+    const close = typeof r.close === 'number' ? r.close : Number(r.close)
+    const date = String(r.date ?? '').slice(0, 10)
+    if (!date || !Number.isFinite(close)) continue
+    const list = bySymbol.get(symbol) ?? []
+    list.push({ date, close })
+    bySymbol.set(symbol, list)
+  }
+  for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
+
+  const asOf = now.toISOString()
+  const staleAfter = new Date(now.getTime() + ttlMinutes * 60_000).toISOString()
+  const rows: PerfRow[] = []
+  for (const symbol of symbols) {
+    const series = bySymbol.get(symbol.toUpperCase())
+    // A delisted or renamed ticker returns nothing. Skipped rather than written as zero.
+    if (!series || series.length < 2) continue
+    for (const [period, changePct] of Object.entries(returnsFor(series, now))) {
+      rows.push({
+        scope: 'instrument',
+        scope_id: symbol,
+        period,
+        change_pct: changePct,
+        as_of: asOf,
+        stale_after: staleAfter,
+        source: 'yfinance',
+      })
+    }
+  }
+  return rows
 }
 
 export const RESOURCES: Record<string, Resource> = {

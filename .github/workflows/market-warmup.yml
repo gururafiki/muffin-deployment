@@ -11,13 +11,14 @@
 # testing). Four runs a day keep the common case fresh without hammering the
 # providers; between runs the SWR path still corrects anything a visitor touches.
 #
-# LEAST PRIVILEGE: this uses the ANON key, not service_role. The refresh endpoint
-# accepts any valid JWT and applies its own TTL guard, so a warm-up needs no
-# elevated rights — and `force` (which bypasses the TTL) is service-role only and
-# deliberately NOT used here.
+# CREDENTIAL: the SERVICE-ROLE key. This used to run as anon on a least-privilege
+# argument, which stopped being true when refresh became admin-only: the endpoint
+# now rejects a plain authenticated JWT, because "any holder of the published anon
+# key can spend our provider quota" was a worse problem than the elevated key here.
+# `force` is still NOT used — the TTL guard is what keeps a warm-up cheap.
 #
-# Requires: secret SUPABASE_ANON_KEY; vars DOMAIN, SUPABASE_SUBDOMAIN (default
-# "supabase") — all already present for `deploy`.
+# Requires: secret SUPABASE_SERVICE_ROLE_KEY; vars DOMAIN, SUPABASE_SUBDOMAIN
+# (default "supabase") — all already present for `deploy`.
 name: Market data warm-up
 
 on:
@@ -45,11 +46,11 @@ jobs:
       - name: Refresh market data
         env:
           BASE: "https://${{ vars.SUPABASE_SUBDOMAIN || 'supabase' }}.${{ vars.DOMAIN }}"
-          ANON: ${{ secrets.SUPABASE_ANON_KEY }}
+          KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           ONLY: ${{ inputs.resource }}
         run: |
           set -uo pipefail
-          if [ -z "${ANON:-}" ]; then echo "::error::SUPABASE_ANON_KEY is not set"; exit 1; fi
+          if [ -z "${KEY:-}" ]; then echo "::error::SUPABASE_SERVICE_ROLE_KEY is not set"; exit 1; fi
 
           # NEWLINE-delimited and read explicitly rather than relying on word
           # splitting of an unquoted variable — that behaviour differs between
@@ -72,6 +73,8 @@ jobs:
               instrument-profile \
               instrument-prices \
               security-tickers \
+              security-profiles \
+              security-performance \
               fund-holdings \
               derive-classifications)
           fi
@@ -83,7 +86,7 @@ jobs:
             total=$((total + 1))
             body=$(curl -sS --max-time 240 -w '\n%{http_code}' \
               -X POST "$BASE/functions/v1/market-refresh" \
-              -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+              -H "apikey: $KEY" -H "Authorization: Bearer $KEY" \
               -H "Content-Type: application/json" \
               -d "{\"resource\":\"$r\"}" || printf '\n000')
             code=$(printf '%s' "$body" | tail -n1)
