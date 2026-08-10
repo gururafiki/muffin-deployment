@@ -37,6 +37,7 @@ import {
   FINVIZ_SECTOR_IDS,
   loadEquityReturns,
   SEC_PERF_TTL_MINUTES,
+  BACKLOG_TTL_MINUTES,
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
@@ -132,7 +133,9 @@ Deno.serve(async (req: Request) => {
       // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
       // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
       // that the NEXT run is allowed to continue the backlog.
-      : resource === TICKERS_RESOURCE || resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE
+      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE
+        ? BACKLOG_TTL_MINUTES
+      : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
       // Reference data, not prices: N-PORT is quarterly, so a short TTL would just re-ask SEC for
       // last quarter's answer. Both of these finish what they start in a single run.
