@@ -254,18 +254,17 @@ Deno.serve(async (req: Request) => {
         return json({ resource, resolved: 0, remaining: 0, note: 'every security already has a ticker' })
       }
 
-      const { results, requestsUsed, unresolved } = await mapIsinsToTickers(wanted, {
-        apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
-      })
-
-      // A ticker is NOT globally unique (identifier_kind says so), so two securities can legitimately
-      // want the same symbol — different exchanges, or a delisted line. The PK keeps the first and
-      // `ignoreDuplicates` stops the whole batch failing over it.
-      let written = 0
-      for (let i = 0; i < results.length; i += 500) {
-        const chunk = results.slice(i, i + 500)
-        const { error } = await market.from('security_identifier').upsert(
-          chunk.map((r) => ({
+      // Written PER BATCH rather than accumulated: with a key a run maps thousands of ISINs, and
+      // holding all of that in a 150 MB worker is what killed it (a bare 502, no error body — the
+      // same failure and the same fix as the price refresh). This also means a worker that dies
+      // keeps the progress it already made.
+      const writeBatch = async (batch: { securityId: string; ticker: string }[]) => {
+        if (batch.length === 0) return
+        // A ticker is NOT globally unique (identifier_kind says so), so two securities can
+        // legitimately want the same symbol — a different exchange, or a delisted line. The PK
+        // keeps the first and `ignoreDuplicates` stops one collision failing the batch.
+        const { error: insErr } = await market.from('security_identifier').upsert(
+          batch.map((r) => ({
             kind_code: 'ticker',
             value: r.ticker,
             security_id: r.securityId,
@@ -273,24 +272,28 @@ Deno.serve(async (req: Request) => {
           })),
           { onConflict: 'kind_code,value', ignoreDuplicates: true },
         )
-        if (error) throw new Error(`ticker upsert failed: ${error.message}`)
-        written += chunk.length
+        if (insErr) throw new Error(`ticker upsert failed: ${insErr.message}`)
+        // Now priceable and linkable, which is what `is_tradeable` means.
+        const { error: updErr } = await market
+          .from('security')
+          .update({ is_tradeable: true })
+          .in('security_id', batch.map((r) => r.securityId))
+        if (updErr) throw new Error(`is_tradeable update failed: ${updErr.message}`)
       }
-      // Now priceable and linkable, which is what `is_tradeable` means.
-      for (let i = 0; i < results.length; i += 500) {
-        const ids = results.slice(i, i + 500).map((r) => r.securityId)
-        const { error } = await market.from('security').update({ is_tradeable: true }).in('security_id', ids)
-        if (error) throw new Error(`is_tradeable update failed: ${error.message}`)
-      }
+
+      const { requestsUsed, unresolved, resolvedCount } = await mapIsinsToTickers(wanted, {
+        apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
+        onBatch: writeBatch,
+      })
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
-        resolved: written,
+        resolved: resolvedCount,
         unresolved,
         requestsUsed,
         // What is left for the next run — this resource is incremental by design.
-        remaining: Math.max(0, wanted.length - written - unresolved),
+        remaining: Math.max(0, wanted.length - resolvedCount - unresolved),
       })
     }
 
