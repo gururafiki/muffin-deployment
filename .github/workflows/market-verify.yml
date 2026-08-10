@@ -85,6 +85,18 @@ jobs:
           check_min "enabled tracked funds" "$(count 'tracked_fund?select=symbol&enabled=eq.true')" 30
           check_min "funds ingested"        "$(count 'tracked_fund?select=symbol&last_report_date=not.is.null')" 30
 
+          # 5. The SERVING VIEWS the app reads. A view can exist in Postgres and still be
+          #    invisible over the API — PostgREST caches the schema, and a missing grant or a
+          #    stale cache both present as "relation does not exist" to the client while every
+          #    psql query looks fine. This is the check that says the UI can actually read it.
+          check_min "sector_constituents (view, as anon)" "$(count 'sector_constituents?select=security_id')" 400
+          check_min "security_current (view, as anon)"    "$(count 'security_current?select=security_id')"   5000
+          check_min "fund_sector_weight (view, as anon)"  "$(count 'fund_sector_weight?select=fund_symbol')"   30
+
+          # 6. Ticker resolution is incremental, so this is a PROGRESS check rather than a floor
+          #    on the final state — it fails only if resolution has produced essentially nothing.
+          check_min "resolved tickers" "$(count 'security_identifier?select=value&kind_code=eq.ticker')" 100
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
