@@ -226,18 +226,24 @@ Deno.serve(async (req: Request) => {
       // Only securities that still need one, MOST VISIBLE FIRST. `pending_ticker` orders by the
       // security's weight in a sector fund, so the names a sector page actually renders are
       // resolved in the first run rather than after the whole 9.7k backlog.
-      const { data: pending, error: pendErr } = await market
-        .from('pending_ticker')
-        .select('security_id,isin')
-        // Ordered explicitly rather than trusting the view's ORDER BY: a view's ordering is not
-        // contractual once PostgREST wraps it, and the ordering is the whole point of the backlog.
-        .order('best_weight', { ascending: false })
-        .limit(4000)
-      if (pendErr) throw new Error(`pending_ticker read failed: ${pendErr.message}`)
-      const wanted = (pending ?? []).map((r) => ({
-        securityId: r.security_id as string,
-        isin: r.isin as string,
-      }))
+      // PAGED: PostgREST caps a response at db-max-rows (1000 here), so a bare .limit(4000)
+      // silently returns 1000 and the run resolves a quarter of what it could. With an API key
+      // one run can map 4,000, so the page size is the binding constraint, not the rate limit.
+      const PAGE = 1000
+      const wanted: { securityId: string; isin: string }[] = []
+      for (let page = 0; page < 4; page++) {
+        const { data, error: pendErr } = await market
+          .from('pending_ticker')
+          .select('security_id,isin')
+          // Ordered explicitly rather than trusting the view's ORDER BY: a view's ordering is not
+          // contractual once PostgREST wraps it, and the ordering is the whole point of the backlog.
+          .order('best_weight', { ascending: false })
+          .range(page * PAGE, (page + 1) * PAGE - 1)
+        if (pendErr) throw new Error(`pending_ticker read failed: ${pendErr.message}`)
+        const rows = data ?? []
+        wanted.push(...rows.map((r) => ({ securityId: r.security_id as string, isin: r.isin as string })))
+        if (rows.length < PAGE) break
+      }
       if (wanted.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
         return json({ resource, resolved: 0, remaining: 0, note: 'every security already has a ticker' })

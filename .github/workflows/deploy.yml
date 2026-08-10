@@ -12,6 +12,8 @@ name: Deploy to Oracle Cloud
 #   LANGSMITH_API_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY,
 #   OpenBB providers (all optional, each unlocks endpoints): FMP_API_KEY, FRED_API_KEY,
 #   ALPHA_VANTAGE_API_KEY, TIINGO_TOKEN (token, not api_key), BIZTOC_API_KEY,
+#   OPENFIGI_API_KEY (free, no approval — lifts ISIN->ticker mapping from 25 req/min x 10
+#   to 250 x 100, which is what lets the whole backlog clear in one run rather than ~80),
 #   POSTGRES_PASSWORD, FIRECRAWL_POSTGRES_PASSWORD, SEARXNG_SECRET_KEY, REGISTRY_PASSWORD,
 #   SUPABASE_DB_PASSWORD, SUPABASE_JWT_SECRET, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
 #   SUPABASE_PG_META_CRYPTO_KEY, SUPABASE_SECRET_KEY_BASE, SUPABASE_REALTIME_DB_ENC_KEY
@@ -156,6 +158,7 @@ jobs:
           alpha_vantage_api_key: "${{ secrets.ALPHA_VANTAGE_API_KEY }}"
           tiingo_token: "${{ secrets.TIINGO_TOKEN }}"
           biztoc_api_key: "${{ secrets.BIZTOC_API_KEY }}"
+          openfigi_api_key: "${{ secrets.OPENFIGI_API_KEY }}"
           postgres_password: "${{ secrets.POSTGRES_PASSWORD }}"
           firecrawl_postgres_password: "${{ secrets.FIRECRAWL_POSTGRES_PASSWORD }}"
           searxng_secret_key: "${{ secrets.SEARXNG_SECRET_KEY }}"
