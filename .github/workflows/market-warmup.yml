@@ -77,6 +77,7 @@ jobs:
               security-profiles \
               security-industries \
               security-fundamentals \
+              security-statements \
               security-performance \
               fund-holdings \
               derive-classifications)

@@ -151,10 +151,11 @@ Deno.serve(async (req: Request) => {
   const PROMOTE_RESOURCE = 'promote-listing'
   const ONE_SECURITY_RESOURCE = 'security-refresh'
   const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
+  const STATEMENTS_RESOURCE = 'security-statements'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
-    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE,
+    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE, STATEMENTS_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -170,7 +171,8 @@ Deno.serve(async (req: Request) => {
       // that the NEXT run is allowed to continue the backlog.
       : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
         resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE ||
-        resource === ONE_SECURITY_RESOURCE || resource === FUNDAMENTALS_RESOURCE
+        resource === ONE_SECURITY_RESOURCE || resource === FUNDAMENTALS_RESOURCE ||
+        resource === STATEMENTS_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -327,6 +329,87 @@ Deno.serve(async (req: Request) => {
     // the resources it wraps are budgeted for a backlog and would refuse on their TTL, and because
     // fundamentals cost one of 25 daily calls — spending those on what someone is looking at is
     // the only shape that provider supports.
+    // Statements are fetched PER SECURITY, not per batch: each of the three endpoints returns one
+    // row per PERIOD, and a multi-symbol response would interleave periods from different
+    // companies with only a `symbol` field to tell them apart. One symbol at a time keeps the
+    // attribution structural rather than something to get right.
+    if (resource === STATEMENTS_RESOURCE) {
+      const { data: pending, error: pErr } = await market
+        .from('pending_statements')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 60)
+      if (pErr) throw new Error(`pending_statements read failed: ${pErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: r.symbol as string,
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every security has statements' })
+      }
+
+      const deadline = Date.now() + 60_000
+      let written = 0
+      let none = 0
+      let failed = 0
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - 6_000) break
+        const rows: Record<string, unknown>[] = []
+        let anyAnswer = false
+        for (const kind of ['income', 'balance', 'cash'] as const) {
+          const remaining = deadline - Date.now()
+          if (remaining < 5_000) break
+          try {
+            const got = await fetcher(
+              `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(item.symbol)}` +
+                `&provider=yfinance&limit=4`,
+              Math.min(12_000, remaining),
+            )
+            if (got.length > 0) anyAnswer = true
+            for (const r of got) {
+              const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
+              if (!period) continue
+              rows.push({
+                security_id: item.securityId,
+                statement: kind,
+                period_ending: period,
+                period_type: r.fiscal_period ? String(r.fiscal_period) : null,
+                currency: r.reported_currency ? String(r.reported_currency) : null,
+                data: r,
+                source_code: 'yfinance',
+                as_of: new Date().toISOString(),
+              })
+            }
+          } catch (_e) {
+            failed++
+          }
+        }
+
+        if (rows.length > 0) {
+          const { error } = await market
+            .from('security_statement')
+            .upsert(rows, { onConflict: 'security_id,statement,period_ending' })
+          if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
+          written += rows.length
+        } else if (anyAnswer || failed === 0) {
+          // Answered with nothing, rather than not answered at all — record it so this security
+          // stops being re-asked. A provider failure is NOT marked, or one outage would silence
+          // thousands of companies for a month.
+          none++
+          const { error } = await market
+            .from('security')
+            .update({ statements_missing_at: new Date().toISOString() })
+            .eq('security_id', item.securityId)
+          if (error) throw new Error(`statements_missing_at update failed: ${error.message}`)
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, written, none, failed, remaining: Math.max(0, wanted.length - written) })
+    }
+
     if (resource === FUNDAMENTALS_RESOURCE) {
       const { data: pending, error: pErr } = await market
         .from('pending_fundamentals')
