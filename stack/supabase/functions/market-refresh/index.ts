@@ -436,26 +436,23 @@ Deno.serve(async (req: Request) => {
     if (resource === INDUSTRY_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_industry')
-        .select('security_id,symbol')
+        .select('security_id,symbol,sector_id')
         .order('best_weight', { ascending: false })
         .limit(1000)
       if (pendErr) throw new Error(`pending_industry read failed: ${pendErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
         symbol: r.symbol as string,
+        sectorId: r.sector_id as string,
       }))
       if (wanted.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
         return json({ resource, classified: 0, remaining: 0, note: 'every security has an industry' })
       }
 
-      // The security's SECTOR node, needed as the parent of any industry node created below.
-      const { data: secRows, error: secErr } = await market
-        .from('sector_constituents')
-        .select('security_id,sector_id')
-        .in('security_id', wanted.map((w) => w.securityId).slice(0, 500))
-      if (secErr) throw new Error(`sector lookup failed: ${secErr.message}`)
-      const sectorOf = new Map((secRows ?? []).map((r) => [r.security_id as string, r.sector_id as string]))
+      // The sector comes WITH the backlog row. Looking it up separately meant an `in.()` filter
+      // holding 500 uuids — an ~18 KB URL, and PostgREST answers those with a bare 502.
+      const sectorOf = new Map(wanted.map((w) => [w.securityId, w.sectorId]))
 
       const { data: nodes, error: nodeErr } = await market
         .from('taxonomy_node')

@@ -96,10 +96,15 @@ group by fi.value, coalesce(c.code, 'unclassified');
 -- ── the backlog ──────────────────────────────────────────────────────────────
 -- Securities that already have a yfinance SECTOR but no industry. They are re-fetched once; the
 -- sector upsert is idempotent, so the only new cost is the industry.
-create or replace view market.pending_industry as
+-- Carries `sector_id` deliberately. The handler used to look it up separately with an
+-- `in.(500 uuids)` filter — an ~18 KB URL, which PostgREST answers with a bare 502 (500 ISINs at
+-- 6.5 KB already did). Returning it here removes the query rather than chunking it.
+drop view if exists market.pending_industry;
+create view market.pending_industry as
 select
   s.security_id,
   coalesce(ps.symbol, t.value) as symbol,
+  sec_n.code as sector_id,
   coalesce(max(h.weight), 0) as best_weight
 from market.security s
 join market.security_taxonomy sec_st on sec_st.security_id = s.security_id
@@ -116,7 +121,7 @@ left join market.fund_holding_current h on h.security_id = s.security_id
 where ind_n.node_id is null
   and coalesce(ps.symbol, t.value) is not null
   and (s.industry_missing_at is null or s.industry_missing_at < now() - interval '30 days')
-group by s.security_id, coalesce(ps.symbol, t.value)
+group by s.security_id, coalesce(ps.symbol, t.value), sec_n.code
 order by best_weight desc;
 
 grant select on market.pending_industry to service_role;
