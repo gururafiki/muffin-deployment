@@ -113,6 +113,22 @@ jobs:
             echo "  ok   sector_constituents has no duplicates ($tot)"
           fi
 
+          # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
+          #    because OpenFIGI returns `exchCode` bare for some venues and labelled for others
+          #    ("KS" vs "TT (Taiwan Stock Exchange)"), so an exact match resolved Korea and dropped
+          #    Taiwan with no error anywhere. A country with securities but no symbols at all is
+          #    that signature, and nothing else looks like it.
+          for iso in TW KR JP IN HK BR AU; do
+            secs=$(count "security?select=security_id&country_iso2=eq.$iso&security_type_code=eq.equity")
+            syms=$(count "security_provider_symbol?select=symbol,security!inner(country_iso2)&security.country_iso2=eq.$iso")
+            if [ "${secs:-0}" -gt 20 ] && [ "${syms:-0}" -eq 0 ]; then
+              echo "::error::$iso has $secs securities and NO provider symbols — silently dropped"
+              fail=1
+            else
+              echo "  ok   $iso: $secs securities, $syms provider symbols"
+            fi
+          done
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1

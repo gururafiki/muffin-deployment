@@ -85,6 +85,19 @@ export const hasLocalExchange = (iso2: string | null | undefined): boolean =>
  * the price provider does not recognise is worse than no symbol: it produces an empty series that
  * looks like a quiet outage.
  */
+/**
+ * OpenFIGI returns `exchCode` INCONSISTENTLY: bare for some venues and labelled for others.
+ * Samsung comes back as `KS`, TSMC as `TT (Taiwan Stock Exchange)`. An exact comparison therefore
+ * matches Korea and silently drops Taiwan — 534 securities with no symbol, no sector and no price,
+ * and no error anywhere to say so.
+ *
+ * Found by measuring, not by reading: every other country had provider symbols and Taiwan had
+ * exactly zero. The four samples this table was originally checked against all happened to be the
+ * bare form.
+ */
+const exchCodeOf = (raw: string | undefined): string =>
+  (raw ?? '').split(' (')[0].trim().toUpperCase();
+
 export function pickLocalSymbol(
   iso2: string,
   matches: { ticker?: string; exchCode?: string; compositeFIGI?: string }[],
@@ -92,7 +105,7 @@ export function pickLocalSymbol(
   const venues = LOCAL_EXCHANGES[iso2];
   if (!venues) return null;
   for (const venue of venues) {
-    const hit = matches.find((m) => m.exchCode === venue.figi && m.ticker);
+    const hit = matches.find((m) => exchCodeOf(m.exchCode) === venue.figi && m.ticker);
     // The composite FIGI comes back with the match and is the ONLY key that joins a security to
     // `exchange_listing` — the directory endpoint returns no ISIN. Capturing it here is what makes
     // that table joinable at all, so it is carried even though nothing needs it in this call.
