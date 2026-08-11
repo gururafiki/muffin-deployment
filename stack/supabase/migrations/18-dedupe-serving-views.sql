@@ -17,7 +17,12 @@
 -- (kind, value), not on security), which is a second, quieter way to duplicate a row — hence the
 -- lateral limit 1 rather than a plain join.
 
-create or replace view market.sector_constituents as
+-- DROP before CREATE, always, for a view any LATER migration also defines. `create or replace`
+-- cannot rename or reorder columns, and every migration re-runs in order on every deploy — so
+-- whichever file runs first keeps trying to impose its own column list on the other's. Third time
+-- this has failed a deploy.
+drop view if exists market.sector_constituents;
+create view market.sector_constituents as
 select distinct on (tn.code, s.security_id)
   tn.code        as sector_id,
   s.security_id,
@@ -49,7 +54,8 @@ left join lateral (
 -- The filing wins over the provider: priority is sec-nport 300, yfinance 100.
 order by tn.code, s.security_id, ds.priority desc, st.as_of desc;
 
-create or replace view market.fund_sector_weight as
+drop view if exists market.fund_sector_weight;
+create view market.fund_sector_weight as
 with classified as (
   -- One sector per security, chosen the same way, BEFORE any summing.
   select distinct on (st.security_id) st.security_id, tn.code

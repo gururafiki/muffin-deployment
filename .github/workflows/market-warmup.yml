@@ -75,6 +75,7 @@ jobs:
               security-local-symbols \
               security-tickers \
               security-profiles \
+              security-industries \
               security-performance \
               fund-holdings \
               derive-classifications)
