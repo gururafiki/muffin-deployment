@@ -101,6 +101,7 @@ Deno.serve(async (req: Request) => {
 
   let resource = 'sector-performance'
   let fundScope: string | undefined
+  let figiScope: string | undefined
   let force = false
   // Caps how much a backlog resource attempts in one run. Added as a BISECT tool: when
   // `security-industries` died in 3.8s with a bare 502, nothing distinguished "too much work"
@@ -123,6 +124,7 @@ Deno.serve(async (req: Request) => {
     const body = await req.json()
     if (body?.resource) resource = String(body.resource)
     if (body?.fund) fundScope = String(body.fund).toUpperCase()
+    if (body?.figi) figiScope = String(body.figi).trim()
     if (Number.isFinite(body?.limit)) scopeLimit = Math.max(1, Math.min(1000, Number(body.limit)))
     // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
     // refreshes must still collapse into one upstream fetch. Requires the
@@ -143,10 +145,11 @@ Deno.serve(async (req: Request) => {
   const SEC_PERF_RESOURCE = 'security-performance'
   const LOCAL_SYM_RESOURCE = 'security-local-symbols'
   const LISTINGS_RESOURCE = 'exchange-listings'
+  const PROMOTE_RESOURCE = 'promote-listing'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
-    INDUSTRY_RESOURCE,
+    INDUSTRY_RESOURCE, PROMOTE_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -161,7 +164,7 @@ Deno.serve(async (req: Request) => {
       // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
       // that the NEXT run is allowed to continue the backlog.
       : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
-        resource === INDUSTRY_RESOURCE
+        resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -311,6 +314,65 @@ Deno.serve(async (req: Request) => {
     // Enumerate one exchange per run, resuming from its cursor. A venue is thousands of rows at
     // 100 per request, so this is the same slice-per-run shape as every other backlog — the
     // difference is that the slice boundary is OpenFIGI's own cursor rather than our ordering.
+    // Pull one directory listing into the universe. Deliberately creates ONLY identity — the
+    // existing backlogs then classify and price it with no new code, which is the whole reason
+    // they select on "has a symbol, lacks X" rather than on a fixed list.
+    if (resource === PROMOTE_RESOURCE) {
+      const figi = String(figiScope ?? '').trim()
+      if (!figi) return json({ error: 'promote-listing needs a `figi`' }, 400)
+
+      const { data: listing, error: lErr } = await market
+        .from('untracked_listing')
+        .select('figi,composite_figi,exch_code,ticker,name,country_iso2,provider_symbol')
+        .eq('figi', figi)
+        .maybeSingle()
+      if (lErr) throw new Error(`untracked_listing read failed: ${lErr.message}`)
+      // Already promoted is a SUCCESS, not an error: two people tapping the same row should not
+      // produce a failure for the second one.
+      if (!listing) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, figi, promoted: false, reason: 'already tracked or unknown figi' })
+      }
+
+      const securityId = crypto.randomUUID()
+      const { error: sErr } = await market.from('security').insert({
+        security_id: securityId,
+        name: listing.name,
+        security_type_code: 'equity',
+        country_iso2: listing.country_iso2 ?? null,
+        is_tradeable: true,
+      })
+      if (sErr) throw new Error(`security insert failed: ${sErr.message}`)
+
+      // FIGI first — it is what stops this listing being offered as untracked again.
+      const identifiers = [
+        { kind_code: 'figi', value: listing.composite_figi ?? listing.figi, security_id: securityId, source_code: 'openfigi' },
+        { kind_code: 'ticker', value: listing.ticker, security_id: securityId, source_code: 'openfigi' },
+      ]
+      const { error: iErr } = await market
+        .from('security_identifier')
+        .upsert(identifiers, { onConflict: 'kind_code,value', ignoreDuplicates: true })
+      if (iErr) throw new Error(`identifier insert failed: ${iErr.message}`)
+
+      if (listing.provider_symbol) {
+        const { error: pErr } = await market.from('security_provider_symbol').upsert(
+          { security_id: securityId, provider_code: 'yfinance', symbol: listing.provider_symbol },
+          { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
+        )
+        if (pErr) throw new Error(`provider symbol insert failed: ${pErr.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        figi,
+        promoted: true,
+        securityId,
+        symbol: listing.provider_symbol ?? listing.ticker,
+        note: 'sector and returns arrive on the next security-profiles / security-performance run',
+      })
+    }
+
     if (resource === LISTINGS_RESOURCE) {
       const { data: cursors, error: curErr } = await market
         .from('exchange_cursor')
