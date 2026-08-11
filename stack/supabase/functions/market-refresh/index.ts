@@ -556,6 +556,7 @@ Deno.serve(async (req: Request) => {
       const BATCH = 20
       let classified = 0
       let noIndustry = 0
+      let capped = 0
       let batchesFailed = 0
 
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
@@ -582,10 +583,17 @@ Deno.serve(async (req: Request) => {
         // while the vocabulary was still filling, which killed the worker (a bare 502).
         const wantNode = new Map<string, { label: string; parent: string }>()
         const pairs: { securityId: string; code: string }[] = []
+        // Market cap rides along here too. `pending_profile` excludes anything already classified,
+        // so `security-profiles` never revisits it — but this resource fetches EXACTLY that set
+        // (has a sector, lacks an industry), which is where the caps for the existing universe
+        // come from. Same response, no extra request.
+        const caps: { security_id: string; market_cap: number }[] = []
         for (const r of rows) {
           const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
           if (!securityId) continue
           answered.add(securityId)
+          const cap = Number(r.market_cap)
+          if (Number.isFinite(cap) && cap > 0) caps.push({ security_id: securityId, market_cap: cap })
           // `industry_category`, NOT `industry` — the latter is present on the yfinance response
           // and is always null, which is how the old sub-sectors silently came back empty.
           const label = String(r.industry_category ?? '').trim()
@@ -617,6 +625,15 @@ Deno.serve(async (req: Request) => {
           if (readErr) throw new Error(`taxonomy_node read-back failed: ${readErr.message}`)
           for (const n of got ?? []) industryNode.set(n.code as string, n.node_id as string)
         }
+
+        for (const c of caps) {
+          const { error } = await market
+            .from('security')
+            .update({ market_cap: c.market_cap, market_cap_at: new Date().toISOString() })
+            .eq('security_id', c.security_id)
+          if (error) throw new Error(`market_cap update failed: ${error.message}`)
+        }
+        capped += caps.length
 
         const writes = pairs
           .filter((p) => industryNode.has(p.code))
@@ -656,6 +673,7 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         classified,
+        capped,
         noIndustry,
         batchesFailed,
         remaining: Math.max(0, wanted.length - classified - noIndustry),
@@ -693,6 +711,7 @@ Deno.serve(async (req: Request) => {
       const BATCH = 20
       let classified = 0
       let unmapped = 0
+      let capped = 0
       let batchesFailed = 0
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
@@ -725,8 +744,15 @@ Deno.serve(async (req: Request) => {
         }
 
         const writes: Record<string, unknown>[] = []
+        // Market cap rides along on the SAME response. It was recorded as blocked on a paid
+        // provider for weeks; only deep fundamentals are. Capturing it costs nothing here.
+        const caps: { security_id: string; market_cap: number }[] = []
         for (const r of rows) {
           const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+          const cap = Number(r.market_cap)
+          if (securityId && Number.isFinite(cap) && cap > 0) {
+            caps.push({ security_id: securityId, market_cap: cap })
+          }
           const code = FINVIZ_SECTOR_IDS[String(r.sector ?? '')]
           // An unrecognised provider label is COUNTED, not silently dropped: a vocabulary change
           // upstream would otherwise look like a provider with no sectors.
@@ -747,6 +773,16 @@ Deno.serve(async (req: Request) => {
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
           classified += writes.length
         }
+        // Written per security rather than in one upsert: `security` rows already exist, so this
+        // is an UPDATE, and PostgREST has no bulk update by differing values.
+        for (const c of caps) {
+          const { error } = await market
+            .from('security')
+            .update({ market_cap: c.market_cap, market_cap_at: new Date().toISOString() })
+            .eq('security_id', c.security_id)
+          if (error) throw new Error(`market_cap update failed: ${error.message}`)
+        }
+        capped += caps.length
 
         // Everything in the batch the provider DID answer for, but not about — a ticker it does
         // not carry, or a sector label outside the map. Recorded so it stops being re-asked; the
@@ -770,6 +806,7 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         classified,
+        capped,
         unmapped,
         batchesFailed,
         remaining: Math.max(0, wanted.length - classified - unmapped),

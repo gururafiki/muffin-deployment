@@ -80,7 +80,10 @@ end $$;
 
 -- One row per security with its primary ticker and preferred sector. `data_source.priority` picks
 -- between disagreeing sources rather than an arbitrary one winning.
-create or replace view market.security_current as
+-- DROP before CREATE, same as the two views below it: migration 26 redefines this with
+-- `market_cap`, and `create or replace` cannot add a column in the middle or drop one.
+drop view if exists market.security_current;
+create view market.security_current as
 select
   s.security_id,
   s.name,
