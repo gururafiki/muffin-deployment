@@ -95,6 +95,12 @@ export function openbbFetcher(baseUrl: string, timeoutMs = 20_000): Fetcher {
     if (!res.ok) {
       throw new Error(`openbb ${res.status} on ${path}: ${(await res.text()).slice(0, 300)}`)
     }
+    // 204 NO CONTENT is OpenBB saying "the provider has nothing for these symbols" — a legitimate
+    // answer, not a failure. Measured against `.SR`, `.TA` and `.NS` listings, which yfinance
+    // simply does not carry. Treating it as an error failed the whole batch and lost the symbols
+    // in it that WOULD have returned data.
+    if (res.status === 204) return []
+
     // OpenBB answers an unknown symbol with 200 and an EMPTY body, so res.json()
     // throws a bare SyntaxError that says nothing about which call failed.
     const text = await res.text()
@@ -107,8 +113,11 @@ export function openbbFetcher(baseUrl: string, timeoutMs = 20_000): Fetcher {
       )
     }
     const results = body?.results
-    if (!Array.isArray(results) || results.length === 0) {
-      throw new Error(`openbb returned no results for ${path}`)
+    // An empty `results` is also "no data" rather than a fault. Callers that REQUIRE rows say so
+    // themselves (`no profiles returned`, `no country returns computed`); making the fetcher throw
+    // meant a batch of unlisted symbols was indistinguishable from a provider outage.
+    if (!Array.isArray(results)) {
+      throw new Error(`openbb returned a non-array \`results\` for ${path}`)
     }
     return results as Record<string, unknown>[]
   }

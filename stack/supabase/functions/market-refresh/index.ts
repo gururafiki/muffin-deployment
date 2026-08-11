@@ -543,15 +543,17 @@ Deno.serve(async (req: Request) => {
     if (resource === SEC_PERF_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_performance')
-        .select('symbol,fetch_symbol')
+        .select('security_id,symbol,fetch_symbol')
         .order('best_weight', { ascending: false })
         .limit(1000)
       if (pendErr) throw new Error(`pending_performance read failed: ${pendErr.message}`)
       // FETCH by the provider's address (`005930.KS`), STORE under the display ticker — the app
       // looks a stock up by the symbol it shows, not by the one yfinance wants.
       const fetchToDisplay = new Map<string, string>()
+      const fetchToSecurity = new Map<string, string>()
       for (const r of pending ?? []) {
         fetchToDisplay.set(r.fetch_symbol as string, r.symbol as string)
+        fetchToSecurity.set(r.fetch_symbol as string, r.security_id as string)
       }
       const symbols = [...fetchToDisplay.keys()]
       if (symbols.length === 0) {
@@ -586,6 +588,21 @@ Deno.serve(async (req: Request) => {
           continue
         }
         const rows = fetched.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id }))
+        // Symbols the provider answered ABOUT but had no series for. Recorded so they stop being
+        // re-asked: yfinance carries no history for many local listings, and without this they are
+        // re-sent every run and crowd out the ones that would resolve.
+        const got = new Set(fetched.map((r) => r.scope_id))
+        const missedIds = batch
+          .filter((sym) => !got.has(sym))
+          .map((sym) => fetchToSecurity.get(sym))
+          .filter((id): id is string => !!id)
+        if (missedIds.length > 0) {
+          const { error } = await market
+            .from('security')
+            .update({ performance_missing_at: new Date().toISOString() })
+            .in('security_id', missedIds)
+          if (error) throw new Error(`performance_missing_at update failed: ${error.message}`)
+        }
         if (rows.length === 0) { emptyBatches++; continue }
         const { error } = await market
           .from('performance')
