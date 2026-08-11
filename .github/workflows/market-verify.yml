@@ -150,6 +150,18 @@ jobs:
             fi
           fi
 
+          # 7c. NO FABRICATED TOTAL LOSS. `returnsFor` guards a zero DENOMINATOR but not the
+          #     numerator, and `Number.isFinite(0)` is true — so a provider bar with `close: 0`
+          #     as the latest point made every period compute `(0 / from - 1)` = exactly -100%.
+          #     Measured 2026-08-11: 1,078 of 20,399 rows, i.e. 154 securities each showing -100%
+          #     on ALL SEVEN periods including `1d`. A security cannot fall 100% in a day and also
+          #     100% over a year. They cluster in late timezones (India 50, Taiwan 36, mainland
+          #     China 34, Hong Kong 8) — an untraded session, not 154 bankruptcies.
+          #     Zero bars are now dropped at parse, so exactly -100% is unreachable rather than
+          #     merely unlikely: producing it requires a latest close of 0, which no longer enters.
+          check_zero "instrument returns at exactly -100%" \
+            "$(count 'performance?select=scope_id&scope=eq.instrument&change_pct=eq.-100')"
+
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
           #    because OpenFIGI returns `exchCode` bare for some venues and labelled for others
           #    ("KS" vs "TT (Taiwan Stock Exchange)"), so an exact match resolved Korea and dropped
