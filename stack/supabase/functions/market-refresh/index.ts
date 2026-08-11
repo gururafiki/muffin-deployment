@@ -503,6 +503,20 @@ Deno.serve(async (req: Request) => {
             .upsert(writes, { onConflict: 'security_id' })
           if (error) throw new Error(`fundamentals upsert failed: ${error.message}`)
           written += writes.length
+
+          // The metrics response names the currency and the statement endpoints do not, so this is
+          // where a security learns what its figures are denominated in. Without it a KRW income
+          // statement renders with a dollar sign.
+          for (const w of writes) {
+            const cur = (w.raw as Record<string, unknown> | undefined)?.currency
+            if (typeof cur !== 'string' || cur.length !== 3) continue
+            const { error: cErr } = await market
+              .from('security')
+              .update({ currency_code: cur })
+              .eq('security_id', w.security_id as string)
+              .is('currency_code', null)
+            if (cErr) throw new Error(`currency_code update failed: ${cErr.message}`)
+          }
         }
         const missed = batch.map((b) => b.securityId).filter((id) => !answered.has(id))
         if (missed.length > 0) {
