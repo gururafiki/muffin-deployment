@@ -336,7 +336,22 @@ Deno.serve(async (req: Request) => {
         .eq('symbol', wanted)
         .limit(1)
       if (findErr) throw new Error(`security lookup failed: ${findErr.message}`)
-      const target = (rows ?? [])[0]
+      let target = (rows ?? [])[0]
+
+      // Fall back to the PROVIDER symbol. A non-US security often has no `ticker` identifier at
+      // all — only `005930.KS` in security_provider_symbol — so a display-symbol lookup alone
+      // reports "unknown symbol" for a security we hold.
+      if (!target) {
+        const { data: viaProvider } = await market
+          .from('security_provider_symbol')
+          .select('security_id')
+          .eq('provider_code', 'yfinance')
+          .eq('symbol', wanted)
+          .maybeSingle()
+        if (viaProvider?.security_id) {
+          target = { security_id: viaProvider.security_id, symbol: wanted, name: null }
+        }
+      }
       if (!target) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
         return json({ resource, symbol: wanted, refreshed: false, reason: 'unknown symbol' })
