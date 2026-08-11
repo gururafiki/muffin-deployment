@@ -24,6 +24,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
 import { listExchange, mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
+import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange } from './exchanges.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
@@ -102,6 +103,7 @@ Deno.serve(async (req: Request) => {
   let resource = 'sector-performance'
   let fundScope: string | undefined
   let figiScope: string | undefined
+  let symbolScope: string | undefined
   let force = false
   // Caps how much a backlog resource attempts in one run. Added as a BISECT tool: when
   // `security-industries` died in 3.8s with a bare 502, nothing distinguished "too much work"
@@ -125,6 +127,7 @@ Deno.serve(async (req: Request) => {
     if (body?.resource) resource = String(body.resource)
     if (body?.fund) fundScope = String(body.fund).toUpperCase()
     if (body?.figi) figiScope = String(body.figi).trim()
+    if (body?.symbol) symbolScope = String(body.symbol).trim()
     if (Number.isFinite(body?.limit)) scopeLimit = Math.max(1, Math.min(1000, Number(body.limit)))
     // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
     // refreshes must still collapse into one upstream fetch. Requires the
@@ -146,10 +149,11 @@ Deno.serve(async (req: Request) => {
   const LOCAL_SYM_RESOURCE = 'security-local-symbols'
   const LISTINGS_RESOURCE = 'exchange-listings'
   const PROMOTE_RESOURCE = 'promote-listing'
+  const ONE_SECURITY_RESOURCE = 'security-refresh'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
-    INDUSTRY_RESOURCE, PROMOTE_RESOURCE,
+    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -164,7 +168,8 @@ Deno.serve(async (req: Request) => {
       // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
       // that the NEXT run is allowed to continue the backlog.
       : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
-        resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE
+        resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE ||
+        resource === ONE_SECURITY_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -317,6 +322,111 @@ Deno.serve(async (req: Request) => {
     // Pull one directory listing into the universe. Deliberately creates ONLY identity — the
     // existing backlogs then classify and price it with no new code, which is the whole reason
     // they select on "has a symbol, lacks X" rather than on a fixed list.
+    // Everything for ONE security, from the stock page. Scoped rather than universe-wide because
+    // the resources it wraps are budgeted for a backlog and would refuse on their TTL, and because
+    // fundamentals cost one of 25 daily calls — spending those on what someone is looking at is
+    // the only shape that provider supports.
+    if (resource === ONE_SECURITY_RESOURCE) {
+      const wanted = String(symbolScope ?? '').trim().toUpperCase()
+      if (!wanted) return json({ error: 'security-refresh needs a `symbol`' }, 400)
+
+      const { data: rows, error: findErr } = await market
+        .from('security_current')
+        .select('security_id,symbol,name')
+        .eq('symbol', wanted)
+        .limit(1)
+      if (findErr) throw new Error(`security lookup failed: ${findErr.message}`)
+      const target = (rows ?? [])[0]
+      if (!target) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, symbol: wanted, refreshed: false, reason: 'unknown symbol' })
+      }
+      const securityId = target.security_id as string
+
+      // The address the price provider knows, which is not always the display ticker.
+      const { data: ps } = await market
+        .from('security_provider_symbol')
+        .select('symbol')
+        .eq('security_id', securityId)
+        .eq('provider_code', 'yfinance')
+        .maybeSingle()
+      const fetchSymbol = (ps?.symbol as string | undefined) ?? wanted
+
+      const out: Record<string, unknown> = { resource, symbol: wanted }
+
+      // 1. Returns.
+      try {
+        const perf = await loadEquityReturns(fetcher, [fetchSymbol], new Date(), SEC_PERF_TTL_MINUTES, 15_000)
+        const rowsOut = perf.map((r) => ({ ...r, scope_id: wanted }))
+        if (rowsOut.length > 0) {
+          const { error } = await market
+            .from('performance')
+            .upsert(rowsOut, { onConflict: 'scope,scope_id,period' })
+          if (error) throw new Error(`performance upsert failed: ${error.message}`)
+        }
+        out.returns = rowsOut.length
+      } catch (e) {
+        out.returnsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
+      }
+
+      // 2. Profile: market cap, and the sector if it is still missing.
+      try {
+        const prof = await fetcher(
+          `/api/v1/equity/profile?symbol=${encodeURIComponent(fetchSymbol)}&provider=yfinance`,
+          15_000,
+        )
+        const cap = Number(prof[0]?.market_cap)
+        if (Number.isFinite(cap) && cap > 0) {
+          const { error } = await market
+            .from('security')
+            .update({ market_cap: cap, market_cap_at: new Date().toISOString() })
+            .eq('security_id', securityId)
+          if (error) throw new Error(`market_cap update failed: ${error.message}`)
+          out.marketCap = cap
+        }
+      } catch (e) {
+        out.profileError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
+      }
+
+      // 3. Fundamentals — keyless, and it covers the non-US listings that defeated every provider
+      //    we hold a key for. Fetched by the PROVIDER symbol, like prices.
+      try {
+        const f = await fetchFundamentals(fetcher, fetchSymbol, 15_000)
+        if (!f) out.fundamentals = 'not covered'
+        else {
+          const { error } = await market.from('security_fundamentals').upsert(
+            {
+              security_id: securityId,
+              source_code: 'yfinance',
+              as_of: new Date().toISOString(),
+              pe_ratio: f.peRatio ?? null,
+              forward_pe: f.forwardPe ?? null,
+              peg_ratio: f.pegRatio ?? null,
+              price_to_book: f.priceToBook ?? null,
+              profit_margin: f.profitMargin ?? null,
+              gross_margin: f.grossMargin ?? null,
+              operating_margin: f.operatingMargin ?? null,
+              return_on_equity: f.returnOnEquity ?? null,
+              revenue_growth: f.revenueGrowth ?? null,
+              debt_to_equity: f.debtToEquity ?? null,
+              dividend_yield: f.dividendYield ?? null,
+              beta: f.beta ?? null,
+              enterprise_value: f.enterpriseValue ?? null,
+              raw: f.raw,
+            },
+            { onConflict: 'security_id' },
+          )
+          if (error) throw new Error(`fundamentals upsert failed: ${error.message}`)
+          out.fundamentals = 'updated'
+        }
+      } catch (e) {
+        out.fundamentalsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ ...out, refreshed: true })
+    }
+
     if (resource === PROMOTE_RESOURCE) {
       const figi = String(figiScope ?? '').trim()
       if (!figi) return json({ error: 'promote-listing needs a `figi`' }, 400)
