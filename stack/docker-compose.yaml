@@ -634,14 +634,14 @@ services:
       SUPABASE_PUBLIC_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
       SUPABASE_ANON_KEY: "{{ supabase_anon_key }}"
       SUPABASE_SERVICE_KEY: "{{ supabase_service_role_key }}"
+      AUTH_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      ENABLED_FEATURES_LOGS_ALL: "false"
     volumes:
       # Studio's Functions page reads them off disk, and nothing was mounted — hence "Edge
       # functions could not be read from disk". READ-ONLY on purpose: self-hosted Studio cannot
       # deploy a function anyway (Ansible copies them and edge-runtime serves them), so this makes
       # the page work without implying it can write.
       - /home/ubuntu/supabase/functions:/home/deno/functions:ro
-      AUTH_JWT_SECRET: "{{ supabase_jwt_secret }}"
-      ENABLED_FEATURES_LOGS_ALL: "false"
     networks:
       - muffin-net
     deploy:

@@ -23,6 +23,47 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # PARSE the Swarm stack template, don't eyeball it.
+  #
+  # A one-line volume mount was inserted mid-`environment:` because the anchor it was placed after
+  # was unique but not the END of its block — which orphaned two env keys under `volumes:` and
+  # failed the deploy with `yaml: line 603: did not find expected '-' indicator`. Nothing in CI
+  # looked at this file, so a syntax error in the thing that defines every service reached the node.
+  #
+  # Jinja is stripped rather than rendered: the values do not matter, the STRUCTURE does.
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Parse the stack template
+        run: |
+          python - <<'PY'
+          import re, sys, yaml
+          raw = open('stack/docker-compose.yaml').read()
+          rendered = re.sub(r'\{%.*?%\}', '', re.sub(r'\{\{.*?\}\}', 'x', raw, flags=re.S), flags=re.S)
+          try:
+              doc = yaml.safe_load(rendered)
+          except yaml.YAMLError as e:
+              print(f"::error::stack/docker-compose.yaml is not valid YAML: {e}")
+              sys.exit(1)
+          services = doc.get('services') or {}
+          if not services:
+              print("::error::no services parsed — the template rendered to something unexpected")
+              sys.exit(1)
+          # A service whose `environment` came back as anything but a mapping means a block was
+          # split, which is the exact failure above and is otherwise invisible.
+          bad = [n for n, s in services.items()
+                 if 'environment' in s and not isinstance(s['environment'], (dict, list))]
+          if bad:
+              print(f"::error::malformed `environment` in: {', '.join(bad)}")
+              sys.exit(1)
+          print(f"ok  {len(services)} services parsed")
+          PY
+
   # Apply every migration against a throwaway Postgres, TWICE.
   #
   # This exists because three separate migration defects reached production, and each failed the
