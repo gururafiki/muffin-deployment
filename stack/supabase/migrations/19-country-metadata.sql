@@ -39,6 +39,15 @@ update market.countries c
   ) m
  where m.iso2 = c.iso2 and m.region is not null and c.region_id is null;
 
+-- ── frontier is a real tier, so allow it ─────────────────────────────────────
+-- The original CHECK allowed only developed/emerging, which was true of the 19 modelled countries
+-- and stopped being true the moment frontier-market ETFs were added (Vietnam, Nigeria). MSCI
+-- models three tiers and `classification_members` already stores all three; the column was the
+-- only thing disagreeing. Without this the migration aborts on Oman.
+alter table market.countries drop constraint if exists countries_market_check;
+alter table market.countries
+  add constraint countries_market_check check (market in ('developed', 'emerging', 'frontier'));
+
 -- ── tier: from MSCI, the scheme the app defaults to ──────────────────────────
 update market.countries c
    set market = cm.group_id
