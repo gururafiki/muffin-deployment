@@ -102,15 +102,21 @@ jobs:
           #    the sector list and was counted twice in the donut. The views now pick by source
           #    priority; this asserts they still do, by comparing one sector's row count against
           #    its DISTINCT security count.
-          tot=$(count 'sector_constituents?select=security_id&sector_id=eq.information-technology')
-          uniq=$(curl -sS --max-time 60 "$BASE/rest/v1/sector_constituents?select=security_id&sector_id=eq.information-technology" \
+          # Compared within a BOUNDED WINDOW, deliberately. The first version of this check
+          # counted all rows with `Prefer: count=exact` and compared that against the ids in the
+          # response body — but PostgREST caps a response at PGRST_DB_MAX_ROWS (1000 here), so it
+          # was comparing 1,052 against a truncated page of 1,000 and reporting duplicates that did
+          # not exist. Ordering by security_id puts any real duplicate adjacent, so a window under
+          # the cap still finds one.
+          dupes=$(curl -sS --max-time 60 \
+            "$BASE/rest/v1/sector_constituents?select=security_id&sector_id=eq.information-technology&order=security_id&limit=900" \
             -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' \
-            | tr ',' '\n' | grep -c security_id || true)
-          if [ "${tot:-0}" -ne "${uniq:-1}" ]; then
-            echo "::error::sector_constituents has duplicates — $tot rows vs $uniq distinct securities"
+            | tr ',' '\n' | grep -oE '"security_id":"[^"]+"' | sort | uniq -d | wc -l | tr -d ' ')
+          if [ "${dupes:-1}" -ne 0 ]; then
+            echo "::error::sector_constituents has $dupes duplicated securities in a 900-row window"
             fail=1
           else
-            echo "  ok   sector_constituents has no duplicates ($tot)"
+            echo "  ok   sector_constituents has no duplicates (900-row window)"
           fi
 
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
