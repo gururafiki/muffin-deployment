@@ -431,6 +431,8 @@ Deno.serve(async (req: Request) => {
       let written = 0
       let missing = 0
       let batchesFailed = 0
+      let emptyBatches = 0
+      let lastError: string | null = null
 
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
@@ -442,11 +444,27 @@ Deno.serve(async (req: Request) => {
             `/api/v1/equity/fundamental/metrics?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
             Math.min(20_000, remaining),
           )
-        } catch (_e) {
+        } catch (e) {
+          // The reason was being DISCARDED here, which is why this took four wrong guesses to
+          // narrow: the log only ever said "returned nothing for all N batches", and the same
+          // message covers a timeout, a refused connection and a malformed URL.
           batchesFailed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           continue
         }
-        if (rows.length === 0) { batchesFailed++; continue }
+        // An empty answer is NOT a failure — it means the provider has nothing for these symbols.
+        // Counting it as one meant they were never negative-cached, so they were re-asked every
+        // run and the guard below eventually failed the whole resource on them.
+        if (rows.length === 0) {
+          emptyBatches++
+          const { error } = await market
+            .from('security')
+            .update({ fundamentals_missing_at: new Date().toISOString() })
+            .in('security_id', batch.map((b) => b.securityId))
+          if (error) throw new Error(`fundamentals_missing_at update failed: ${error.message}`)
+          missing += batch.length
+          continue
+        }
 
         // Mapped BY SYMBOL, never by index: the provider returns the rows out of order (asking for
         // AAPL,MSFT,SAP came back MSFT,AAPL,SAP), so positional pairing would attach one company's
@@ -497,11 +515,14 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      if (batchesFailed > 0 && written === 0) {
-        throw new Error(`fundamentals provider returned nothing for all ${batchesFailed} batches`)
-      }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, written, missing, batchesFailed, remaining: Math.max(0, wanted.length - written - missing) })
+      // No longer THROWS when nothing was written. A run that legitimately finds only
+      // unanswerable securities is not a failure, and failing the resource on it is what stopped
+      // the backlog dead once the answerable ones were done. The counters say what happened.
+      return json({
+        resource, written, missing, emptyBatches, batchesFailed, lastError,
+        remaining: Math.max(0, wanted.length - written - missing),
+      })
     }
 
     if (resource === ONE_SECURITY_RESOURCE) {
@@ -861,6 +882,7 @@ Deno.serve(async (req: Request) => {
       let noIndustry = 0
       let capped = 0
       let batchesFailed = 0
+      let lastError: string | null = null
 
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
@@ -872,11 +894,21 @@ Deno.serve(async (req: Request) => {
             `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
             Math.min(15_000, remaining),
           )
-        } catch (_e) {
+        } catch (e) {
           batchesFailed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           continue
         }
-        if (rows.length === 0) { batchesFailed++; continue }
+        if (rows.length === 0) {
+          // Empty is "no data for these", not a fault — record it so they stop being re-asked.
+          const { error } = await market
+            .from('security')
+            .update({ industry_missing_at: new Date().toISOString() })
+            .in('security_id', batch.map((b) => b.securityId))
+          if (error) throw new Error(`industry_missing_at update failed: ${error.message}`)
+          noIndustry += batch.length
+          continue
+        }
 
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
         const answered = new Set<string>()
@@ -969,9 +1001,6 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      if (batchesFailed > 0 && classified === 0) {
-        throw new Error(`profile provider returned nothing for all ${batchesFailed} batches`)
-      }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
@@ -979,6 +1008,7 @@ Deno.serve(async (req: Request) => {
         capped,
         noIndustry,
         batchesFailed,
+        lastError,
         remaining: Math.max(0, wanted.length - classified - noIndustry),
       })
     }
@@ -1016,6 +1046,7 @@ Deno.serve(async (req: Request) => {
       let unmapped = 0
       let capped = 0
       let batchesFailed = 0
+      let lastError: string | null = null
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
