@@ -73,7 +73,7 @@ export const FINVIZ_PERIODS: Record<string, string> = {
 export const toPercent = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 1_000_000) / 10_000 : null
 
-export type Fetcher = (path: string) => Promise<Record<string, unknown>[]>
+export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */
 /**
@@ -87,10 +87,10 @@ export type Fetcher = (path: string) => Promise<Record<string, unknown>[]>
  *   A timeout turns that into a skipped batch, which the caller already knows how to report.
  */
 export function openbbFetcher(baseUrl: string, timeoutMs = 20_000): Fetcher {
-  return async (path) => {
+  return async (path, overrideTimeoutMs) => {
     const res = await fetch(`${baseUrl}${path}`, {
       headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(overrideTimeoutMs ?? timeoutMs),
     })
     if (!res.ok) {
       throw new Error(`openbb ${res.status} on ${path}: ${(await res.text()).slice(0, 300)}`)
@@ -329,12 +329,14 @@ export async function loadEquityReturns(
   symbols: string[],
   now: Date,
   ttlMinutes: number,
+  timeoutMs?: number,
 ): Promise<PerfRow[]> {
   if (symbols.length === 0) return []
   const start = daysBefore(now, 400)
   const results = await fetcher(
     `/api/v1/equity/price/historical?symbol=${symbols.join(',')}` +
       `&provider=yfinance&start_date=${start}&interval=1d`,
+    timeoutMs,
   )
 
   // A single-symbol response carries NO `symbol` column — the provider only adds it when several
