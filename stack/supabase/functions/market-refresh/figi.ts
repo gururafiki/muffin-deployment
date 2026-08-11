@@ -92,7 +92,7 @@ export async function mapIsinsToTickers(
    * the resource is incremental, stopping early costs nothing — the remainder is the next run's
    * work — while overrunning loses the entire batch including what was already resolved.
    */
-  const deadline = Date.now() + (opts.budgetMs ?? 35_000);
+  const deadline = Date.now() + (opts.budgetMs ?? 60_000);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['X-OPENFIGI-APIKEY'] = apiKey;
@@ -189,7 +189,7 @@ export async function mapIsinsToLocalSymbols(
   const apiKey = opts.apiKey?.trim() || undefined;
   const perRequest = apiKey ? KEYED_JOBS_PER_REQUEST : ANON_JOBS_PER_REQUEST;
   const maxRequests = opts.maxRequests ?? (apiKey ? 25 : 15);
-  const deadline = Date.now() + (opts.budgetMs ?? 35_000);
+  const deadline = Date.now() + (opts.budgetMs ?? 60_000);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['X-OPENFIGI-APIKEY'] = apiKey;
@@ -272,7 +272,7 @@ export async function listExchange(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
 
-  const deadline = Date.now() + (opts.budgetMs ?? 30_000);
+  const deadline = Date.now() + (opts.budgetMs ?? 60_000);
   const maxPages = opts.maxPages ?? 20;
   const listings: ExchangeListing[] = [];
   let next = cursor;

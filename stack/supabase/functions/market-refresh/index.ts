@@ -448,7 +448,7 @@ Deno.serve(async (req: Request) => {
       if (nodeErr) throw new Error(`taxonomy_node read failed: ${nodeErr.message}`)
       const nodeByCode = new Map((nodes ?? []).map((n) => [n.code as string, n.node_id as string]))
 
-      const deadline = Date.now() + 30_000
+      const deadline = Date.now() + 60_000
       // 20, not 50: a profile lookup is one upstream fetch PER SYMBOL inside yfinance, and foreign
       // listings are markedly slower than US ones. A smaller batch keeps each call inside the
       // fetcher's timeout instead of relying on it.
@@ -562,7 +562,7 @@ Deno.serve(async (req: Request) => {
       // 40 symbols x ~400 bars is ~1 MB. The country refresh proves 19 symbols x 1900 bars (~4 MB)
       // is safe, so this stays well inside the worker while still covering a page per batch.
       const BATCH = 40
-      const deadline = Date.now() + 30_000
+      const deadline = Date.now() + 60_000
       const now = new Date()
       let written = 0
       let batchesFailed = 0
