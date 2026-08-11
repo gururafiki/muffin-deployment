@@ -23,7 +23,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
-import { mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
+import { listExchange, mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
 import { hasLocalExchange } from './exchanges.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
@@ -119,9 +119,10 @@ Deno.serve(async (req: Request) => {
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const SEC_PERF_RESOURCE = 'security-performance'
   const LOCAL_SYM_RESOURCE = 'security-local-symbols'
+  const LISTINGS_RESOURCE = 'exchange-listings'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
-    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE,
+    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -135,7 +136,7 @@ Deno.serve(async (req: Request) => {
       // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
       // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
       // that the NEXT run is allowed to continue the backlog.
-      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE
+      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -282,6 +283,68 @@ Deno.serve(async (req: Request) => {
     // Address non-US securities the way the price provider does. This is the root of the whole
     // non-US gap: without a local symbol there is no ticker, so no profile, so no sector and no
     // price — Korea had 10 tickers across 467 securities.
+    // Enumerate one exchange per run, resuming from its cursor. A venue is thousands of rows at
+    // 100 per request, so this is the same slice-per-run shape as every other backlog — the
+    // difference is that the slice boundary is OpenFIGI's own cursor rather than our ordering.
+    if (resource === LISTINGS_RESOURCE) {
+      const { data: cursors, error: curErr } = await market
+        .from('exchange_cursor')
+        .select('exch_code,country_iso2,suffix,next_cursor,last_run_at')
+        .eq('enabled', true)
+        // Least recently run first, so no venue is starved by the ones before it. A venue
+        // mid-enumeration (next_cursor set) is finished before a fresh one is started.
+        .order('next_cursor', { ascending: false, nullsFirst: false })
+        .order('last_run_at', { ascending: true, nullsFirst: true })
+        .limit(1)
+      if (curErr) throw new Error(`exchange_cursor read failed: ${curErr.message}`)
+      const target = (cursors ?? [])[0]
+      if (!target) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, note: 'no enabled exchanges' })
+      }
+
+      const exch = target.exch_code as string
+      const suffix = (target.suffix as string | null) ?? ''
+      const { listings, next, pages, total } = await listExchange(
+        exch,
+        (target.next_cursor as string | null) ?? undefined,
+        { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined },
+      )
+
+      let written = 0
+      for (let i = 0; i < listings.length; i += 500) {
+        const chunk = listings.slice(i, i + 500).map((l) => ({
+          figi: l.figi,
+          composite_figi: l.compositeFigi ?? null,
+          exch_code: exch,
+          ticker: l.ticker,
+          name: l.name ?? null,
+          security_type: l.securityType ?? null,
+          country_iso2: target.country_iso2 ?? null,
+          provider_symbol: `${l.ticker}${suffix}`,
+          last_seen_at: new Date().toISOString(),
+        }))
+        const { error } = await market.from('exchange_listing').upsert(chunk, { onConflict: 'figi' })
+        if (error) throw new Error(`exchange_listing upsert failed: ${error.message}`)
+        written += chunk.length
+      }
+
+      const { error: updErr } = await market
+        .from('exchange_cursor')
+        .update({
+          // A null cursor means the venue is exhausted, so the next run starts it over rather than
+          // resuming a page that no longer exists.
+          next_cursor: next ?? null,
+          last_run_at: new Date().toISOString(),
+          listings: written,
+        })
+        .eq('exch_code', exch)
+      if (updErr) throw new Error(`exchange_cursor update failed: ${updErr.message}`)
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, exchange: exch, written, pages, total, complete: !next })
+    }
+
     if (resource === LOCAL_SYM_RESOURCE) {
       const wanted: { securityId: string; isin: string; countryIso2: string }[] = []
       for (let page = 0; page < 3; page++) {
@@ -320,6 +383,24 @@ Deno.serve(async (req: Request) => {
               { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
             )
             if (error) throw new Error(`provider symbol upsert failed: ${error.message}`)
+
+            // Store the composite FIGI as an identifier. It is the ONLY key that joins a security
+            // to `exchange_listing` (the directory endpoint returns no ISIN), so capturing it as
+            // we resolve is what makes the directory usable later.
+            const figis = found
+              .filter((f) => f.compositeFigi)
+              .map((f) => ({
+                kind_code: 'figi',
+                value: f.compositeFigi as string,
+                security_id: f.securityId,
+                source_code: 'openfigi',
+              }))
+            if (figis.length > 0) {
+              const { error: figiErr } = await market
+                .from('security_identifier')
+                .upsert(figis, { onConflict: 'kind_code,value', ignoreDuplicates: true })
+              if (figiErr) throw new Error(`figi identifier upsert failed: ${figiErr.message}`)
+            }
           }
           // A negative result is a result: without this the same unaddressable securities are
           // re-sent on every run and crowd out the ones that would resolve.
@@ -367,7 +448,10 @@ Deno.serve(async (req: Request) => {
       const nodeByCode = new Map((nodes ?? []).map((n) => [n.code as string, n.node_id as string]))
 
       const deadline = Date.now() + 35_000
-      const BATCH = 50
+      // 20, not 50: a profile lookup is one upstream fetch PER SYMBOL inside yfinance, and foreign
+      // listings are markedly slower than US ones. A smaller batch keeps each call inside the
+      // fetcher's timeout instead of relying on it.
+      const BATCH = 20
       let classified = 0
       let unmapped = 0
       let batchesFailed = 0
