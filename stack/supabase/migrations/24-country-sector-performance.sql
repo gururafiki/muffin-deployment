@@ -17,7 +17,8 @@
 -- unrepresentative, and only the caller can decide whether to show it. It is reported rather than
 -- hidden behind a threshold chosen here.
 
-create or replace view market.country_sector_performance as
+drop view if exists market.country_sector_performance;
+create view market.country_sector_performance as
 with constituent as (
   -- One sector per security, by source priority — the same rule the other serving views use, and
   -- applied BEFORE aggregating so a security classified twice cannot be counted twice.
@@ -25,7 +26,11 @@ with constituent as (
     s.security_id,
     s.country_iso2,
     tn.code as sector_id,
-    t.value as symbol,
+    -- The key performance is STORED under, which is not always a ticker: `security-local-symbols`
+    -- writes `005930.KS` into security_provider_symbol and most non-US securities never get a
+    -- `ticker` identifier at all. Joining on ticker alone found ONE Korean sector out of 248
+    -- classified securities. Same coalesce as `pending_performance`, which decides the key.
+    coalesce(t.value, ps.symbol) as symbol,
     h.weight
   from market.security s
   join market.security_taxonomy st on st.security_id = s.security_id
@@ -34,8 +39,10 @@ with constituent as (
   join market.data_source ds on ds.code = st.source_code
   -- The security's weight in ITS OWN country's fund. Without the represents_code match a Korean
   -- name would pick up whatever weight any tracked fund happened to give it.
-  join market.security_identifier t
+  left join market.security_identifier t
     on t.security_id = s.security_id and t.kind_code = 'ticker'
+  left join market.security_provider_symbol ps
+    on ps.security_id = s.security_id and ps.provider_code = 'yfinance'
   join market.fund_holding_current h on h.security_id = s.security_id
   join market.security_identifier fi
     on fi.security_id = h.fund_id and fi.kind_code = 'ticker'
@@ -44,6 +51,7 @@ with constituent as (
   where s.country_iso2 is not null
     and s.security_type_code = 'equity'
     and h.weight > 0
+    and coalesce(t.value, ps.symbol) is not null
   order by s.security_id, ds.priority desc, st.as_of desc
 )
 select
