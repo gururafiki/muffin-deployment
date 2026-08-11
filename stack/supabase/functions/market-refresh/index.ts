@@ -23,7 +23,8 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
-import { mapIsinsToTickers } from './figi.ts'
+import { mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
+import { hasLocalExchange } from './exchanges.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
   loadPricesBatched,
@@ -117,9 +118,10 @@ Deno.serve(async (req: Request) => {
   const DERIVE_RESOURCE = 'derive-classifications'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const SEC_PERF_RESOURCE = 'security-performance'
+  const LOCAL_SYM_RESOURCE = 'security-local-symbols'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
-    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE,
+    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -133,7 +135,7 @@ Deno.serve(async (req: Request) => {
       // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
       // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
       // that the NEXT run is allowed to continue the backlog.
-      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE
+      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -277,6 +279,69 @@ Deno.serve(async (req: Request) => {
     // Sector for securities NO sector SPDR holds — i.e. everything non-US. Written as a SECOND
     // source (`yfinance`, priority 100) beside the filing-derived one (`sec-nport`, 300), so a
     // security XLK holds keeps its filing sector and everything else gains a provider opinion.
+    // Address non-US securities the way the price provider does. This is the root of the whole
+    // non-US gap: without a local symbol there is no ticker, so no profile, so no sector and no
+    // price — Korea had 10 tickers across 467 securities.
+    if (resource === LOCAL_SYM_RESOURCE) {
+      const wanted: { securityId: string; isin: string; countryIso2: string }[] = []
+      for (let page = 0; page < 3; page++) {
+        const { data, error } = await market
+          .from('pending_local_symbol')
+          .select('security_id,isin,country_iso2')
+          .order('best_weight', { ascending: false })
+          .range(page * 1000, (page + 1) * 1000 - 1)
+        if (error) throw new Error(`pending_local_symbol read failed: ${error.message}`)
+        const rows = data ?? []
+        wanted.push(...rows.map((r) => ({
+          securityId: r.security_id as string,
+          isin: r.isin as string,
+          countryIso2: r.country_iso2 as string,
+        })))
+        if (rows.length < 1000) break
+      }
+      // Only countries we know how to address; the rest would resolve to a symbol yfinance does
+      // not recognise, which yields an empty series that looks like an outage.
+      const addressable = wanted.filter((w) => hasLocalExchange(w.countryIso2))
+      if (addressable.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, resolved: 0, remaining: 0, note: 'no addressable securities pending' })
+      }
+
+      const { resolvedCount, requestsUsed, unresolved } = await mapIsinsToLocalSymbols(addressable, {
+        apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
+        onBatch: async (found, missed) => {
+          if (found.length > 0) {
+            const { error } = await market.from('security_provider_symbol').upsert(
+              found.map((f) => ({
+                security_id: f.securityId,
+                provider_code: 'yfinance',
+                symbol: f.symbol,
+              })),
+              { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
+            )
+            if (error) throw new Error(`provider symbol upsert failed: ${error.message}`)
+          }
+          // A negative result is a result: without this the same unaddressable securities are
+          // re-sent on every run and crowd out the ones that would resolve.
+          if (missed.length > 0) {
+            const { error } = await market
+              .from('security')
+              .update({ local_symbol_missing_at: new Date().toISOString() })
+              .in('security_id', missed)
+            if (error) throw new Error(`local_symbol_missing_at update failed: ${error.message}`)
+          }
+        },
+      })
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        resolved: resolvedCount,
+        unresolved,
+        requestsUsed,
+        remaining: Math.max(0, addressable.length - resolvedCount - unresolved),
+      })
+    }
+
     if (resource === SEC_PROFILE_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_profile')
@@ -386,11 +451,17 @@ Deno.serve(async (req: Request) => {
     if (resource === SEC_PERF_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_performance')
-        .select('symbol')
+        .select('symbol,fetch_symbol')
         .order('best_weight', { ascending: false })
         .limit(1000)
       if (pendErr) throw new Error(`pending_performance read failed: ${pendErr.message}`)
-      const symbols = [...new Set((pending ?? []).map((r) => r.symbol as string))]
+      // FETCH by the provider's address (`005930.KS`), STORE under the display ticker — the app
+      // looks a stock up by the symbol it shows, not by the one yfinance wants.
+      const fetchToDisplay = new Map<string, string>()
+      for (const r of pending ?? []) {
+        fetchToDisplay.set(r.fetch_symbol as string, r.symbol as string)
+      }
+      const symbols = [...fetchToDisplay.keys()]
       if (symbols.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
         return json({ resource, refreshed: 0, remaining: 0, note: 'every security has fresh returns' })
@@ -404,7 +475,8 @@ Deno.serve(async (req: Request) => {
       let written = 0
       for (let i = 0; i < symbols.length && Date.now() < deadline; i += BATCH) {
         const batch = symbols.slice(i, i + BATCH)
-        const rows = await loadEquityReturns(fetcher, batch, now, SEC_PERF_TTL_MINUTES).catch(() => [])
+        const fetched = await loadEquityReturns(fetcher, batch, now, SEC_PERF_TTL_MINUTES).catch(() => [])
+        const rows = fetched.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id }))
         if (rows.length === 0) continue
         const { error } = await market
           .from('performance')
