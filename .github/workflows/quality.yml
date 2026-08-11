@@ -128,7 +128,9 @@ jobs:
               cat /tmp/t.out
               exit 1
             fi
-            grep -E '^(NOTICE:)? *ok ' /tmp/t.out || true
+            # psql prefixes notices with `psql:<file>:<line>: NOTICE:`, so anchoring on the line
+            # start silently prints nothing on success and the step looks like it did no work.
+            sed -n 's/.*NOTICE: *//p' /tmp/t.out
           done
 
   terraform:
