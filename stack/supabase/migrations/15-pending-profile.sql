@@ -13,7 +13,11 @@
 -- Ordered by fund weight so the names a page actually renders are classified first, and bounded by
 -- the same slice-per-run shape as `pending_ticker` — 9,786 profile lookups do not fit one worker.
 
-create or replace view market.pending_profile as
+-- DROP first: migration 20 redefines this with a different column list, and migrations re-run in
+-- order on EVERY deploy — so a plain `create or replace` here tries to shrink 20's version back
+-- and fails with "cannot drop columns from view". The later file is the one that wins.
+drop view if exists market.pending_profile;
+create view market.pending_profile as
 select
   s.security_id,
   t.value as symbol,
@@ -36,7 +40,8 @@ grant select on market.pending_profile to service_role;
 -- Same shape for per-security returns: a ticker but no recent performance row. This is why most
 -- constituents render no % change — market.performance scope='instrument' only ever covered the
 -- 35 curated symbols.
-create or replace view market.pending_performance as
+drop view if exists market.pending_performance;
+create view market.pending_performance as
 select
   s.security_id,
   t.value as symbol,
