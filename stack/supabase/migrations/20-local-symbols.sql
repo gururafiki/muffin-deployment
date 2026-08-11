@@ -40,7 +40,12 @@ grant select on market.pending_local_symbol to service_role;
 -- A security's yfinance address is `005930.KS`, not `005930`, and not the thin US OTC line. Both
 -- resources fetch by whatever these views hand them, so this is the single place that decides.
 
-create or replace view market.pending_profile as
+-- DROP, not CREATE OR REPLACE: Postgres refuses to rename or reorder a view's columns
+-- ("cannot change name of view column"), and `pending_performance` gains a `fetch_symbol` column
+-- ahead of `best_weight`. Replace-in-place only ever appends. Nothing depends on these two, so a
+-- drop is safe; a view that something else selects from would need CASCADE and a rebuild.
+drop view if exists market.pending_profile;
+create view market.pending_profile as
 select
   s.security_id,
   coalesce(ps.symbol, t.value) as symbol,
@@ -66,7 +71,8 @@ grant select on market.pending_profile to service_role;
 
 -- Performance is keyed on the DISPLAY ticker, not the provider one: the app looks a stock up by
 -- the symbol it shows. So this returns both — what to fetch, and what to store it under.
-create or replace view market.pending_performance as
+drop view if exists market.pending_performance;
+create view market.pending_performance as
 select
   s.security_id,
   coalesce(t.value, ps.symbol) as symbol,
