@@ -495,8 +495,13 @@ Deno.serve(async (req: Request) => {
         if (rows.length === 0) { batchesFailed++; continue }
 
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
-        const writes: Record<string, unknown>[] = []
         const answered = new Set<string>()
+
+        // Collected FIRST, then written in two calls. Creating a node inside the per-security loop
+        // meant an upsert plus a read-back for every new industry — ~40 extra round trips a batch
+        // while the vocabulary was still filling, which killed the worker (a bare 502).
+        const wantNode = new Map<string, { label: string; parent: string }>()
+        const pairs: { securityId: string; code: string }[] = []
         for (const r of rows) {
           const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
           if (!securityId) continue
@@ -507,34 +512,40 @@ Deno.serve(async (req: Request) => {
           const sectorCode = sectorOf.get(securityId)
           const parent = sectorCode ? sectorNode.get(sectorCode) : undefined
           if (!label || !parent) continue
-
           const code = `${sectorCode}--${slug(label)}`
-          let nodeId = industryNode.get(code)
-          if (!nodeId) {
-            nodeId = crypto.randomUUID()
-            const { error } = await market.from('taxonomy_node').upsert(
-              { node_id: nodeId, taxonomy_id: 'muffin', code, name: label, parent_id: parent, level: 2 },
-              { onConflict: 'taxonomy_id,code', ignoreDuplicates: true },
-            )
-            if (error) throw new Error(`taxonomy_node insert failed: ${error.message}`)
-            // Read back: `ignoreDuplicates` means a concurrent run may have won, and using our
-            // generated id would then reference a row that was never inserted.
-            const { data: got } = await market
-              .from('taxonomy_node')
-              .select('node_id')
-              .eq('taxonomy_id', 'muffin')
-              .eq('code', code)
-              .maybeSingle()
-            nodeId = (got?.node_id as string | undefined) ?? nodeId
-            industryNode.set(code, nodeId)
-          }
-          writes.push({
-            security_id: securityId,
-            node_id: nodeId,
+          if (!industryNode.has(code)) wantNode.set(code, { label, parent })
+          pairs.push({ securityId, code })
+        }
+
+        // One upsert for every new node in the batch...
+        if (wantNode.size > 0) {
+          const { error } = await market.from('taxonomy_node').upsert(
+            [...wantNode].map(([code, v]) => ({
+              taxonomy_id: 'muffin', code, name: v.label, parent_id: v.parent, level: 2,
+            })),
+            { onConflict: 'taxonomy_id,code', ignoreDuplicates: true },
+          )
+          if (error) throw new Error(`taxonomy_node insert failed: ${error.message}`)
+          // ...and ONE read-back. Necessary rather than trusting generated ids: `ignoreDuplicates`
+          // means a concurrent run may have won the insert, and referencing an id that was never
+          // written would fail the foreign key.
+          const { data: got, error: readErr } = await market
+            .from('taxonomy_node')
+            .select('node_id,code')
+            .eq('taxonomy_id', 'muffin')
+            .in('code', [...wantNode.keys()])
+          if (readErr) throw new Error(`taxonomy_node read-back failed: ${readErr.message}`)
+          for (const n of got ?? []) industryNode.set(n.code as string, n.node_id as string)
+        }
+
+        const writes = pairs
+          .filter((p) => industryNode.has(p.code))
+          .map((p) => ({
+            security_id: p.securityId,
+            node_id: industryNode.get(p.code) as string,
             source_code: 'yfinance',
             as_of: new Date().toISOString(),
-          })
-        }
+          }))
 
         if (writes.length > 0) {
           const { error } = await market
