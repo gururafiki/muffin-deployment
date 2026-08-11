@@ -48,6 +48,9 @@ const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
+/** See the note on `scopeLimit` — 300 is measured, not chosen. */
+const PROFILE_BACKLOG_PAGE = 300
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS })
 
@@ -104,6 +107,18 @@ Deno.serve(async (req: Request) => {
   // from "broken regardless of size", and there was no way to ask. It stays because it is also
   // how you drain a backlog gently after an outage.
   let scopeLimit: number | undefined
+
+  /**
+   * Default rows per run for the PROFILE-shaped backlogs.
+   *
+   * 300, measured rather than chosen: at 1,000 the run is flaky (one success, two bare 502s), at
+   * 300 and below it is reliable — which is what the `limit` knob was added to find out. The
+   * profile endpoint is one upstream fetch PER SYMBOL inside yfinance, so a thousand of them is
+   * simply more than one worker should be asked to shepherd, especially while the provider is
+   * rate-limiting (40 of ~50 batches failed on the run that did complete).
+   *
+   * Four warm-ups a day still moves 1,200, and `{"limit": N}` overrides it either way.
+   */
   try {
     const body = await req.json()
     if (body?.resource) resource = String(body.resource)
@@ -444,7 +459,7 @@ Deno.serve(async (req: Request) => {
         .from('pending_industry')
         .select('security_id,symbol,sector_id')
         .order('best_weight', { ascending: false })
-        .limit(scopeLimit ?? 1000)
+        .limit(scopeLimit ?? PROFILE_BACKLOG_PAGE)
       if (pendErr) throw new Error(`pending_industry read failed: ${pendErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
@@ -590,7 +605,7 @@ Deno.serve(async (req: Request) => {
         .from('pending_profile')
         .select('security_id,symbol')
         .order('best_weight', { ascending: false })
-        .limit(scopeLimit ?? 1000)
+        .limit(scopeLimit ?? PROFILE_BACKLOG_PAGE)
       if (pendErr) throw new Error(`pending_profile read failed: ${pendErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
