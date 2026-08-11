@@ -39,6 +39,8 @@ export interface LocalSymbolResult {
   securityId: string;
   /** yfinance-addressable, suffix included. */
   symbol: string;
+  /** Joins the security to `market.exchange_listing`, which carries no ISIN. */
+  compositeFigi?: string;
 }
 
 interface FigiJob {
@@ -208,15 +210,25 @@ export async function mapIsinsToLocalSymbols(
     if (res.status === 429) break;
     if (!res.ok) throw new Error(`openfigi ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
-    const body = (await res.json()) as ({ data?: { ticker?: string; exchCode?: string }[] })[];
+    const body = (await res.json()) as ({ data?: Record<string, unknown>[] })[];
     const found: LocalSymbolResult[] = [];
     const missed: string[] = [];
     for (let j = 0; j < batch.length; j++) {
       // POSITIONAL: entry j answers job j. Reordering here would attach one company's listing to
       // another, which is worse than resolving nothing.
-      const matches = body[j]?.data ?? [];
-      const symbol = pickLocalSymbol(batch[j].countryIso2 ?? '', matches);
-      if (symbol) found.push({ securityId: batch[j].securityId, symbol });
+      const matches = (body[j]?.data ?? []) as {
+        ticker?: string
+        exchCode?: string
+        compositeFIGI?: string
+      }[];
+      const picked = pickLocalSymbol(batch[j].countryIso2 ?? '', matches);
+      if (picked) {
+        found.push({
+          securityId: batch[j].securityId,
+          symbol: picked.symbol,
+          compositeFigi: picked.compositeFigi,
+        });
+      }
       else {
         unresolved++;
         missed.push(batch[j].securityId);
@@ -232,4 +244,81 @@ export async function mapIsinsToLocalSymbols(
   }
 
   return { resolvedCount, requestsUsed, unresolved };
+}
+
+export interface ExchangeListing {
+  figi: string;
+  compositeFigi?: string;
+  ticker: string;
+  name?: string;
+  securityType?: string;
+}
+
+/**
+ * Enumerate one exchange's common stocks, a page at a time.
+ *
+ * `/v3/filter` is a DIFFERENT endpoint from `/v3/mapping`: it lists a venue rather than resolving
+ * an identifier, returns 100 rows with a `next` cursor, and — importantly — carries NO ISIN. Only
+ * tickers, names and FIGIs, which is why the listing table joins on FIGI.
+ *
+ * `securityType2: 'Common Stock'` is not optional: an unfiltered query returns derivatives too
+ * (searching "Samsung Electronics" gives 8,725 hits, nearly all options on it).
+ */
+export async function listExchange(
+  exchCode: string,
+  cursor: string | undefined,
+  opts: { apiKey?: string; maxPages?: number; budgetMs?: number } = {},
+): Promise<{ listings: ExchangeListing[]; next?: string; pages: number; total?: number }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
+
+  const deadline = Date.now() + (opts.budgetMs ?? 30_000);
+  const maxPages = opts.maxPages ?? 20;
+  const listings: ExchangeListing[] = [];
+  let next = cursor;
+  let pages = 0;
+  let total: number | undefined;
+
+  for (; pages < maxPages; pages++) {
+    if (Date.now() > deadline) break;
+    const res = await fetch('https://api.openfigi.com/v3/filter', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        exchCode,
+        securityType2: 'Common Stock',
+        ...(next ? { start: next } : {}),
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    // Out of budget for this minute — stop and resume from the cursor next run.
+    if (res.status === 429) break;
+    if (!res.ok) throw new Error(`openfigi filter ${res.status}: ${(await res.text()).slice(0, 200)}`);
+
+    const body = (await res.json()) as {
+      data?: Record<string, unknown>[];
+      next?: string;
+      total?: number;
+    };
+    total ??= body.total;
+    for (const r of body.data ?? []) {
+      const figi = String(r.figi ?? '');
+      const ticker = String(r.ticker ?? '');
+      if (!figi || !ticker) continue;
+      listings.push({
+        figi,
+        compositeFigi: r.compositeFIGI ? String(r.compositeFIGI) : undefined,
+        ticker,
+        name: r.name ? String(r.name) : undefined,
+        securityType: r.securityType2 ? String(r.securityType2) : undefined,
+      });
+    }
+    next = body.next;
+    // No cursor means the venue is exhausted; returning undefined is what tells the caller to
+    // start again from the top next time rather than resuming a stale page.
+    if (!next) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  return { listings, next, pages, total };
 }

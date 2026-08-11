@@ -76,9 +76,22 @@ export const toPercent = (v: unknown): number | null =>
 export type Fetcher = (path: string) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */
-export function openbbFetcher(baseUrl: string): Fetcher {
+/**
+ * @param timeoutMs Per-request ceiling. WITHOUT ONE, a slow upstream call does not fail — it runs
+ *   past the worker's 60s limit and the worker is killed, which surfaces as a bare 502 with no
+ *   error body and nothing naming the call. That is exactly how `security-profiles` broke the
+ *   moment its symbols became foreign listings: yfinance answers `equity/profile` for 50 non-US
+ *   tickers far more slowly than for 50 US ones, and a resource that catches provider errors per
+ *   batch never got the chance to catch anything.
+ *
+ *   A timeout turns that into a skipped batch, which the caller already knows how to report.
+ */
+export function openbbFetcher(baseUrl: string, timeoutMs = 20_000): Fetcher {
   return async (path) => {
-    const res = await fetch(`${baseUrl}${path}`, { headers: { accept: 'application/json' } })
+    const res = await fetch(`${baseUrl}${path}`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
     if (!res.ok) {
       throw new Error(`openbb ${res.status} on ${path}: ${(await res.text()).slice(0, 300)}`)
     }

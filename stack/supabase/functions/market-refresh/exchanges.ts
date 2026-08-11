@@ -87,13 +87,16 @@ export const hasLocalExchange = (iso2: string | null | undefined): boolean =>
  */
 export function pickLocalSymbol(
   iso2: string,
-  matches: { ticker?: string; exchCode?: string }[],
-): string | null {
+  matches: { ticker?: string; exchCode?: string; compositeFIGI?: string }[],
+): { symbol: string; compositeFigi?: string } | null {
   const venues = LOCAL_EXCHANGES[iso2];
   if (!venues) return null;
   for (const venue of venues) {
     const hit = matches.find((m) => m.exchCode === venue.figi && m.ticker);
-    if (hit) return `${hit.ticker}${venue.suffix}`;
+    // The composite FIGI comes back with the match and is the ONLY key that joins a security to
+    // `exchange_listing` — the directory endpoint returns no ISIN. Capturing it here is what makes
+    // that table joinable at all, so it is carried even though nothing needs it in this call.
+    if (hit) return { symbol: `${hit.ticker}${venue.suffix}`, compositeFigi: hit.compositeFIGI };
   }
   return null;
 }
