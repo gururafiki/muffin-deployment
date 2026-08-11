@@ -173,6 +173,36 @@ interface Bar {
   close: number
 }
 
+/**
+ * One provider row -> a usable bar, or null.
+ *
+ * A CLOSE OF ZERO IS NOT A PRICE, and rejecting it is the whole point of this helper.
+ * `Number.isFinite(0)` is true, so a zero bar used to be accepted like any other — and because
+ * `returnsFor` guards only the DENOMINATOR (`from === 0`), a zero as the LATEST close makes every
+ * period compute `(0 / from - 1)` = exactly -100%.
+ *
+ * Measured 2026-08-11: 1,078 of 20,399 `performance` rows sat at exactly -100% — 154 securities,
+ * each with -100% on ALL SEVEN periods including `1d`. A security cannot fall 100% in a day and
+ * also 100% over a year; that is a computation, not a market. They are concentrated in late
+ * timezones (India 50, Taiwan 36, mainland China 34, Hong Kong 8, Korea 3) plus 22 US listings —
+ * i.e. an empty or not-yet-traded session, not 154 simultaneous bankruptcies.
+ *
+ * `check.ts` has asserted `every close is positive` against the live provider all along; it only
+ * ever ran over the curated instruments, which are liquid US names that never produce a zero bar.
+ * The invariant was stated but never enforced where the data actually enters.
+ *
+ * Dropping the bar (rather than zeroing the return) means the series simply ends at the last real
+ * close, so the reported move is stale-but-true instead of fabricated. A security whose every bar
+ * is zero yields a series shorter than 2 and is skipped, which is the honest answer: no data.
+ */
+function barFrom(r: Record<string, unknown>, fallbackSymbol: string): { symbol: string; bar: Bar } | null {
+  const symbol = String(r.symbol ?? fallbackSymbol)
+  const close = typeof r.close === 'number' ? r.close : Number(r.close)
+  const date = String(r.date ?? '').slice(0, 10)
+  if (!date || !Number.isFinite(close) || close <= 0) return null
+  return { symbol, bar: { date, close } }
+}
+
 /** Last bar at or before `iso`; null when the series does not reach back that far. */
 function closeAtOrBefore(series: Bar[], iso: string): number | null {
   for (let i = series.length - 1; i >= 0; i--) {
@@ -263,13 +293,11 @@ async function etfReturns(
     // A single-symbol response carries NO `symbol` column — the provider only adds it when several
     // are requested. Fall back to the one symbol asked for.
     for (const r of results) {
-      const symbol = String(r.symbol ?? chunk[0])
-      const close = typeof r.close === 'number' ? r.close : Number(r.close)
-      const date = String(r.date ?? '').slice(0, 10)
-      if (!date || !Number.isFinite(close)) continue
-      const list = bySymbol.get(symbol) ?? []
-      list.push({ date, close })
-      bySymbol.set(symbol, list)
+      const parsed = barFrom(r, chunk[0])
+      if (!parsed) continue
+      const list = bySymbol.get(parsed.symbol) ?? []
+      list.push(parsed.bar)
+      bySymbol.set(parsed.symbol, list)
     }
   }
   if (failedBatches.length > 0) {
@@ -352,13 +380,12 @@ export async function loadEquityReturns(
   // are requested.
   const bySymbol = new Map<string, Bar[]>()
   for (const r of results) {
-    const symbol = String(r.symbol ?? symbols[0]).toUpperCase()
-    const close = typeof r.close === 'number' ? r.close : Number(r.close)
-    const date = String(r.date ?? '').slice(0, 10)
-    if (!date || !Number.isFinite(close)) continue
-    const list = bySymbol.get(symbol) ?? []
-    list.push({ date, close })
-    bySymbol.set(symbol, list)
+    const parsed = barFrom(r, symbols[0])
+    if (!parsed) continue
+    const key = parsed.symbol.toUpperCase()
+    const list = bySymbol.get(key) ?? []
+    list.push(parsed.bar)
+    bySymbol.set(key, list)
   }
   for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
 
@@ -480,13 +507,11 @@ export const RESOURCES: Record<string, Resource> = {
 
       const bySymbol = new Map<string, Bar[]>()
       for (const r of results) {
-        const symbol = String(r.symbol ?? symbols[0])
-        const close = typeof r.close === 'number' ? r.close : Number(r.close)
-        const date = String(r.date ?? '').slice(0, 10)
-        if (!date || !Number.isFinite(close)) continue
-        const list = bySymbol.get(symbol) ?? []
-        list.push({ date, close })
-        bySymbol.set(symbol, list)
+        const parsed = barFrom(r, symbols[0])
+        if (!parsed) continue
+        const list = bySymbol.get(parsed.symbol) ?? []
+        list.push(parsed.bar)
+        bySymbol.set(parsed.symbol, list)
       }
       for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
 
@@ -536,13 +561,11 @@ export async function loadSeries(
   // when several are requested.
   const bySymbol = new Map<string, Bar[]>()
   for (const r of results) {
-    const symbol = String(r.symbol ?? symbols[0])
-    const close = typeof r.close === 'number' ? r.close : Number(r.close)
-    const date = String(r.date ?? '').slice(0, 10)
-    if (!date || !Number.isFinite(close)) continue
-    const list = bySymbol.get(symbol) ?? []
-    list.push({ date, close })
-    bySymbol.set(symbol, list)
+    const parsed = barFrom(r, symbols[0])
+    if (!parsed) continue
+    const list = bySymbol.get(parsed.symbol) ?? []
+    list.push(parsed.bar)
+    bySymbol.set(parsed.symbol, list)
   }
   for (const list of bySymbol.values()) list.sort((a, b) => a.date.localeCompare(b.date))
   return bySymbol
