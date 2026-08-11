@@ -73,6 +73,30 @@ export const FINVIZ_PERIODS: Record<string, string> = {
 export const toPercent = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 1_000_000) / 10_000 : null
 
+/**
+ * Symbols for a batched `?symbol=` parameter — each ENCODED, joined by a literal comma.
+ *
+ * The comma stays raw because it is OpenBB's list separator; everything else must not be.
+ * Single-symbol calls already used `encodeURIComponent`; the eight batched ones interpolated
+ * `join(',')` straight into the URL, and real tickers are not URL-safe:
+ *
+ *   `&`  `PE&OLES*.MX` (Industrias Peñoles) — the WORST case, and silent. Unencoded it ENDS the
+ *        `symbol` parameter and starts a new one, so the provider sees a truncated list, answers
+ *        200 for it, and every symbol after the `&` in that batch vanishes with no error.
+ *   `/`  `BRK/B`, and the UK convention `BP/.L` `RR/.L` `AV/.L` `NG/.L` — a 400 that fails the
+ *        WHOLE batch of 20 (measured 2026-08-11: `openbb 400 on /api/v1/equity/profile?
+ *        symbol=NDA.HE,388.HK,PBK.KL,MAY.KL,BRK/B`). One dead symbol killing a batched call is a
+ *        recurring shape here; see `group-performance` and FM.
+ *   `*`  `WALMEX*.MX` `AC*.MX` — legal in a URL and left alone by `encodeURIComponent`, so this
+ *        does not fix them. That is a SYMBOL-FORMAT problem, not a URL one: these are Bloomberg
+ *        tickers from OpenFIGI and yfinance spells them differently. Tracked separately rather
+ *        than guessed at — authoring a translation table from memory is the `exchanges.ts` mistake.
+ *
+ * Measured in a 1,000-symbol sample of `pending_industry`: 10 with `*`, 8 with `/`, 1 with `&`.
+ */
+export const symbolList = (symbols: string[]): string =>
+  symbols.map((s) => encodeURIComponent(s)).join(',')
+
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */
@@ -283,7 +307,7 @@ async function etfReturns(
     let results: Record<string, unknown>[] = []
     try {
       results = await fetcher(
-        `/api/v1/etf/historical?symbol=${chunk.join(',')}` +
+        `/api/v1/etf/historical?symbol=${symbolList(chunk)}` +
           `&provider=yfinance&start_date=${start}&interval=1d`,
       )
     } catch (e) {
@@ -371,7 +395,7 @@ export async function loadEquityReturns(
   if (symbols.length === 0) return []
   const start = daysBefore(now, 400)
   const results = await fetcher(
-    `/api/v1/equity/price/historical?symbol=${symbols.join(',')}` +
+    `/api/v1/equity/price/historical?symbol=${symbolList(symbols)}` +
       `&provider=yfinance&start_date=${start}&interval=1d`,
     timeoutMs,
   )
@@ -501,7 +525,7 @@ export const RESOURCES: Record<string, Resource> = {
       // neither finviz nor fmp can serve per-symbol performance here.
       const symbols = [...new Set(entries.map((e) => e.symbol))]
       const results = await fetcher(
-        `/api/v1/equity/price/historical?symbol=${symbols.join(',')}` +
+        `/api/v1/equity/price/historical?symbol=${symbolList(symbols)}` +
           `&provider=yfinance&start_date=${daysBefore(now, 1900)}&interval=1d`,
       )
 
@@ -554,7 +578,7 @@ export async function loadSeries(
 ): Promise<Map<string, Bar[]>> {
   const symbols = [...new Set(entries.map((e) => e.symbol))]
   const results = await fetcher(
-    `/api/v1/${route}?symbol=${symbols.join(',')}` +
+    `/api/v1/${route}?symbol=${symbolList(symbols)}` +
       `&provider=yfinance&start_date=${daysBefore(now, days)}&interval=1d`,
   )
   // A single-symbol response carries NO `symbol` column — the provider only adds it
@@ -748,7 +772,7 @@ export async function loadProfiles(
   // key that does not exist.
   const toScopeId = new Map(entries.map((e) => [e.symbol.toUpperCase(), e.scopeId]))
   const results = await fetcher(
-    `/api/v1/equity/profile?symbol=${[...new Set(entries.map((e) => e.symbol))].join(',')}` +
+    `/api/v1/equity/profile?symbol=${symbolList([...new Set(entries.map((e) => e.symbol))])}` +
       `&provider=yfinance`,
   )
   const updatedAt = now.toISOString()

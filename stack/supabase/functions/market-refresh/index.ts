@@ -41,6 +41,7 @@ import {
   loadEquityReturns,
   SEC_PERF_TTL_MINUTES,
   BACKLOG_TTL_MINUTES,
+  symbolList,
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
@@ -441,7 +442,7 @@ Deno.serve(async (req: Request) => {
         let rows: Record<string, unknown>[] = []
         try {
           rows = await fetcher(
-            `/api/v1/equity/fundamental/metrics?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+            `/api/v1/equity/fundamental/metrics?symbol=${symbolList(batch.map((b) => b.symbol))}&provider=yfinance`,
             Math.min(20_000, remaining),
           )
         } catch (e) {
@@ -905,7 +906,7 @@ Deno.serve(async (req: Request) => {
         let rows: Record<string, unknown>[] = []
         try {
           rows = await fetcher(
-            `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+            `/api/v1/equity/profile?symbol=${symbolList(batch.map((b) => b.symbol))}&provider=yfinance`,
             Math.min(15_000, remaining),
           )
         } catch (e) {
@@ -1077,7 +1078,7 @@ Deno.serve(async (req: Request) => {
           const remaining = deadline - Date.now()
           if (remaining < 3_000) break
           rows = await fetcher(
-            `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+            `/api/v1/equity/profile?symbol=${symbolList(batch.map((b) => b.symbol))}&provider=yfinance`,
             Math.min(15_000, remaining),
           )
         } catch (_e) {
