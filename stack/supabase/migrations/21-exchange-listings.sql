@@ -45,9 +45,21 @@ create table if not exists market.exchange_cursor (
   listings     integer not null default 0
 );
 
+-- Singapore was missing from the 221-row country seed entirely — found because the FK below
+-- rejected it and failed the deploy. It is a real country and an MSCI developed market.
+insert into market.countries (iso2, name, flag, region_id, market, etf_symbol, drillable) values
+  ('SG', 'Singapore', '🇸🇬', 'asia-pacific', 'developed', 'EWS', true)
+on conflict (iso2) do nothing;
+
 -- Seeded from the venues the app already addresses, so this covers exactly the countries it can
 -- price. Adding one is a row, like every other control surface here.
-insert into market.exchange_cursor (exch_code, country_iso2, suffix) values
+--
+-- LEFT JOINed against `countries` rather than inserted literally: a country the table does not
+-- know yet lands with a NULL rather than tripping the foreign key and aborting every migration
+-- after it. One missing ISO code should cost that venue's country label, not the deploy.
+insert into market.exchange_cursor (exch_code, country_iso2, suffix)
+select v.exch, c.iso2, v.suffix
+from (values
   ('US','US',''),    ('KS','KR','.KS'), ('KQ','KR','.KQ'), ('JT','JP','.T'),
   ('GY','DE','.DE'), ('LN','GB','.L'),  ('FP','FR','.PA'), ('SW','CH','.SW'),
   ('NA','NL','.AS'), ('IM','IT','.MI'), ('SM','ES','.MC'), ('SS','SE','.ST'),
@@ -58,6 +70,8 @@ insert into market.exchange_cursor (exch_code, country_iso2, suffix) values
   ('TB','TH','.BK'), ('IJ','ID','.JK'), ('MK','MY','.KL'), ('PM','PH','.PS'),
   ('AT','AU','.AX'), ('NZ','NZ','.NZ'), ('CT','CA','.TO'), ('BZ','BR','.SA'),
   ('MM','MX','.MX'), ('CI','CL','.SN')
+) as v(exch, iso, suffix)
+left join market.countries c on c.iso2 = v.iso
 on conflict (exch_code) do nothing;
 
 alter table market.exchange_listing enable row level security;
