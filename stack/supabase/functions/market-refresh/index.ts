@@ -36,6 +36,7 @@ import {
   TICKERS_TTL_MINUTES,
   RESOURCES,
   FINVIZ_SECTOR_IDS,
+  type PerfRow,
   loadEquityReturns,
   SEC_PERF_TTL_MINUTES,
   BACKLOG_TTL_MINUTES,
@@ -447,7 +448,7 @@ Deno.serve(async (req: Request) => {
       if (nodeErr) throw new Error(`taxonomy_node read failed: ${nodeErr.message}`)
       const nodeByCode = new Map((nodes ?? []).map((n) => [n.code as string, n.node_id as string]))
 
-      const deadline = Date.now() + 35_000
+      const deadline = Date.now() + 30_000
       // 20, not 50: a profile lookup is one upstream fetch PER SYMBOL inside yfinance, and foreign
       // listings are markedly slower than US ones. A smaller batch keeps each call inside the
       // fetcher's timeout instead of relying on it.
@@ -464,8 +465,15 @@ Deno.serve(async (req: Request) => {
         let rows: Record<string, unknown>[] = []
         let providerFailed = false
         try {
+          // Bounded by what is LEFT of the budget, not a fixed 20s. A fixed timeout lets a batch
+          // start at 34.9s and run to 55s, and the writes after it push the worker past its 60s
+          // limit — which is a bare 502, not a caught error. The deadline has to bound the call,
+          // not just the decision to start one.
+          const remaining = deadline - Date.now()
+          if (remaining < 3_000) break
           rows = await fetcher(
             `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+            Math.min(15_000, remaining),
           )
         } catch (_e) {
           providerFailed = true
@@ -554,14 +562,31 @@ Deno.serve(async (req: Request) => {
       // 40 symbols x ~400 bars is ~1 MB. The country refresh proves 19 symbols x 1900 bars (~4 MB)
       // is safe, so this stays well inside the worker while still covering a page per batch.
       const BATCH = 40
-      const deadline = Date.now() + 35_000
+      const deadline = Date.now() + 30_000
       const now = new Date()
       let written = 0
+      let batchesFailed = 0
+      let emptyBatches = 0
+      let lastError: string | null = null
       for (let i = 0; i < symbols.length && Date.now() < deadline; i += BATCH) {
         const batch = symbols.slice(i, i + BATCH)
-        const fetched = await loadEquityReturns(fetcher, batch, now, SEC_PERF_TTL_MINUTES).catch(() => [])
+        const remaining = deadline - Date.now()
+        if (remaining < 3_000) break
+        // A throw and an empty answer are DIFFERENT FACTS. Collapsing them with `.catch(() => [])`
+        // is why this reported `refreshed: 0, remaining: 1000` run after run with nothing to say
+        // whether the provider was refusing the symbols or simply had no data for them.
+        let fetched: PerfRow[] = []
+        try {
+          fetched = await loadEquityReturns(
+            fetcher, batch, now, SEC_PERF_TTL_MINUTES, Math.min(15_000, remaining),
+          )
+        } catch (e) {
+          batchesFailed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          continue
+        }
         const rows = fetched.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id }))
-        if (rows.length === 0) continue
+        if (rows.length === 0) { emptyBatches++; continue }
         const { error } = await market
           .from('performance')
           .upsert(rows, { onConflict: 'scope,scope_id,period' })
@@ -569,7 +594,14 @@ Deno.serve(async (req: Request) => {
         written += rows.length
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, refreshed: written, remaining: Math.max(0, symbols.length - written) })
+      return json({
+        resource,
+        refreshed: written,
+        batchesFailed,
+        emptyBatches,
+        lastError,
+        remaining: Math.max(0, symbols.length - written),
+      })
     }
 
     if (resource === TICKERS_RESOURCE) {
