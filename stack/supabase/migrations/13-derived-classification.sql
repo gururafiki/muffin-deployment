@@ -105,7 +105,11 @@ left join market.issuer i                 on i.issuer_id = s.issuer_id;
 
 -- The sector page. `weight` is the security's weight in the sector fund, which is the closest thing
 -- to a size ranking available without fundamentals — and it is a fact from a filing, not an estimate.
-create or replace view market.sector_constituents as
+-- DROP before CREATE: migrations 18 and 23 redefine this with different columns, and every
+-- migration re-runs in order on every deploy — so without the drop, whichever runs first keeps
+-- trying to impose its column list on the others.
+drop view if exists market.sector_constituents;
+create view market.sector_constituents as
 select
   tn.code        as sector_id,
   s.security_id,
@@ -131,7 +135,8 @@ left join lateral (
 -- What finally makes the Markets donut real. NOTE the weights are renormalised: a fund's own
 -- reported weights do NOT sum to 100 (EWT's filing sums to 110.38), so a donut drawn from the raw
 -- numbers would be wrong.
-create or replace view market.fund_sector_weight as
+drop view if exists market.fund_sector_weight;
+create view market.fund_sector_weight as
 select
   fi.value as fund_symbol,
   coalesce(tn.code, 'unclassified') as sector_id,

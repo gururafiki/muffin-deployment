@@ -118,12 +118,14 @@ Deno.serve(async (req: Request) => {
   const TICKERS_RESOURCE = 'security-tickers'
   const DERIVE_RESOURCE = 'derive-classifications'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
+  const INDUSTRY_RESOURCE = 'security-industries'
   const SEC_PERF_RESOURCE = 'security-performance'
   const LOCAL_SYM_RESOURCE = 'security-local-symbols'
   const LISTINGS_RESOURCE = 'exchange-listings'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
+    INDUSTRY_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -137,7 +139,8 @@ Deno.serve(async (req: Request) => {
       // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
       // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
       // that the NEXT run is allowed to continue the backlog.
-      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE
+      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
+        resource === INDUSTRY_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -421,6 +424,150 @@ Deno.serve(async (req: Request) => {
         unresolved,
         requestsUsed,
         remaining: Math.max(0, addressable.length - resolvedCount - unresolved),
+      })
+    }
+
+    // Level 2 of the taxonomy: the sub-sector a sector page shows as chips. The data was already
+    // arriving and being discarded — yfinance returns `industry_category` in the SAME response
+    // `security-profiles` reads for the sector.
+    //
+    // Nodes are created ON DEMAND under the security's sector, so the vocabulary is whatever the
+    // provider actually uses rather than a list authored ahead of time and guessed at.
+    if (resource === INDUSTRY_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_industry')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(1000)
+      if (pendErr) throw new Error(`pending_industry read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: r.symbol as string,
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, classified: 0, remaining: 0, note: 'every security has an industry' })
+      }
+
+      // The security's SECTOR node, needed as the parent of any industry node created below.
+      const { data: secRows, error: secErr } = await market
+        .from('sector_constituents')
+        .select('security_id,sector_id')
+        .in('security_id', wanted.map((w) => w.securityId).slice(0, 500))
+      if (secErr) throw new Error(`sector lookup failed: ${secErr.message}`)
+      const sectorOf = new Map((secRows ?? []).map((r) => [r.security_id as string, r.sector_id as string]))
+
+      const { data: nodes, error: nodeErr } = await market
+        .from('taxonomy_node')
+        .select('node_id,code,name,level,parent_id')
+        .eq('taxonomy_id', 'muffin')
+      if (nodeErr) throw new Error(`taxonomy_node read failed: ${nodeErr.message}`)
+      const sectorNode = new Map(
+        (nodes ?? []).filter((n) => n.level === 1).map((n) => [n.code as string, n.node_id as string]),
+      )
+      // Level-2 nodes are keyed on `(taxonomy, code)`; the code is the slugged industry name.
+      const industryNode = new Map(
+        (nodes ?? []).filter((n) => n.level === 2).map((n) => [n.code as string, n.node_id as string]),
+      )
+      const slug = (name: string) =>
+        name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 60)
+
+      const deadline = Date.now() + 60_000
+      const BATCH = 20
+      let classified = 0
+      let noIndustry = 0
+      let batchesFailed = 0
+
+      for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
+        const batch = wanted.slice(i, i + BATCH)
+        const remaining = deadline - Date.now()
+        if (remaining < 3_000) break
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/profile?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+            Math.min(15_000, remaining),
+          )
+        } catch (_e) {
+          batchesFailed++
+          continue
+        }
+        if (rows.length === 0) { batchesFailed++; continue }
+
+        const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
+        const writes: Record<string, unknown>[] = []
+        const answered = new Set<string>()
+        for (const r of rows) {
+          const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+          if (!securityId) continue
+          answered.add(securityId)
+          // `industry_category`, NOT `industry` — the latter is present on the yfinance response
+          // and is always null, which is how the old sub-sectors silently came back empty.
+          const label = String(r.industry_category ?? '').trim()
+          const sectorCode = sectorOf.get(securityId)
+          const parent = sectorCode ? sectorNode.get(sectorCode) : undefined
+          if (!label || !parent) continue
+
+          const code = `${sectorCode}--${slug(label)}`
+          let nodeId = industryNode.get(code)
+          if (!nodeId) {
+            nodeId = crypto.randomUUID()
+            const { error } = await market.from('taxonomy_node').upsert(
+              { node_id: nodeId, taxonomy_id: 'muffin', code, name: label, parent_id: parent, level: 2 },
+              { onConflict: 'taxonomy_id,code', ignoreDuplicates: true },
+            )
+            if (error) throw new Error(`taxonomy_node insert failed: ${error.message}`)
+            // Read back: `ignoreDuplicates` means a concurrent run may have won, and using our
+            // generated id would then reference a row that was never inserted.
+            const { data: got } = await market
+              .from('taxonomy_node')
+              .select('node_id')
+              .eq('taxonomy_id', 'muffin')
+              .eq('code', code)
+              .maybeSingle()
+            nodeId = (got?.node_id as string | undefined) ?? nodeId
+            industryNode.set(code, nodeId)
+          }
+          writes.push({
+            security_id: securityId,
+            node_id: nodeId,
+            source_code: 'yfinance',
+            as_of: new Date().toISOString(),
+          })
+        }
+
+        if (writes.length > 0) {
+          const { error } = await market
+            .from('security_taxonomy')
+            .upsert(writes, { onConflict: 'security_id,node_id,source_code' })
+          if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
+          classified += writes.length
+        }
+        // Answered about but with no industry, or no sector to hang it under. Recorded so they
+        // stop being re-asked — the fifth time this has been needed here.
+        const missed = batch
+          .map((b) => b.securityId)
+          .filter((id) => answered.has(id) && !writes.some((w) => w.security_id === id))
+        if (missed.length > 0) {
+          noIndustry += missed.length
+          const { error } = await market
+            .from('security')
+            .update({ industry_missing_at: new Date().toISOString() })
+            .in('security_id', missed)
+          if (error) throw new Error(`industry_missing_at update failed: ${error.message}`)
+        }
+      }
+
+      if (batchesFailed > 0 && classified === 0) {
+        throw new Error(`profile provider returned nothing for all ${batchesFailed} batches`)
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        classified,
+        noIndustry,
+        batchesFailed,
+        remaining: Math.max(0, wanted.length - classified - noIndustry),
       })
     }
 
