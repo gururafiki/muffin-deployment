@@ -150,10 +150,11 @@ Deno.serve(async (req: Request) => {
   const LISTINGS_RESOURCE = 'exchange-listings'
   const PROMOTE_RESOURCE = 'promote-listing'
   const ONE_SECURITY_RESOURCE = 'security-refresh'
+  const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
-    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE,
+    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -169,7 +170,7 @@ Deno.serve(async (req: Request) => {
       // that the NEXT run is allowed to continue the backlog.
       : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
         resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE ||
-        resource === ONE_SECURITY_RESOURCE
+        resource === ONE_SECURITY_RESOURCE || resource === FUNDAMENTALS_RESOURCE
         ? BACKLOG_TTL_MINUTES
       : resource === TICKERS_RESOURCE
         ? TICKERS_TTL_MINUTES
@@ -326,6 +327,100 @@ Deno.serve(async (req: Request) => {
     // the resources it wraps are budgeted for a backlog and would refuse on their TTL, and because
     // fundamentals cost one of 25 daily calls — spending those on what someone is looking at is
     // the only shape that provider supports.
+    if (resource === FUNDAMENTALS_RESOURCE) {
+      const { data: pending, error: pErr } = await market
+        .from('pending_fundamentals')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? PROFILE_BACKLOG_PAGE)
+      if (pErr) throw new Error(`pending_fundamentals read failed: ${pErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: r.symbol as string,
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every security has fundamentals' })
+      }
+
+      const deadline = Date.now() + 60_000
+      const BATCH = 10
+      let written = 0
+      let missing = 0
+      let batchesFailed = 0
+
+      for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
+        const batch = wanted.slice(i, i + BATCH)
+        const remaining = deadline - Date.now()
+        if (remaining < 3_000) break
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/fundamental/metrics?symbol=${batch.map((b) => b.symbol).join(',')}&provider=yfinance`,
+            Math.min(20_000, remaining),
+          )
+        } catch (_e) {
+          batchesFailed++
+          continue
+        }
+        if (rows.length === 0) { batchesFailed++; continue }
+
+        // Mapped BY SYMBOL, never by index: the provider returns the rows out of order (asking for
+        // AAPL,MSFT,SAP came back MSFT,AAPL,SAP), so positional pairing would attach one company's
+        // fundamentals to another.
+        const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
+        const writes: Record<string, unknown>[] = []
+        const answered = new Set<string>()
+        for (const r of rows) {
+          const id = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+          if (!id) continue
+          answered.add(id)
+          const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : null)
+          writes.push({
+            security_id: id,
+            source_code: 'yfinance',
+            as_of: new Date().toISOString(),
+            pe_ratio: n(r.pe_ratio),
+            forward_pe: n(r.forward_pe),
+            peg_ratio: n(r.peg_ratio),
+            price_to_book: n(r.price_to_book),
+            profit_margin: n(r.profit_margin),
+            gross_margin: n(r.gross_margin),
+            operating_margin: n(r.operating_margin),
+            return_on_equity: n(r.return_on_equity),
+            revenue_growth: n(r.revenue_growth),
+            debt_to_equity: n(r.debt_to_equity),
+            dividend_yield: n(r.dividend_yield),
+            beta: n(r.beta),
+            enterprise_value: n(r.enterprise_value),
+            raw: r,
+          })
+        }
+        if (writes.length > 0) {
+          const { error } = await market
+            .from('security_fundamentals')
+            .upsert(writes, { onConflict: 'security_id' })
+          if (error) throw new Error(`fundamentals upsert failed: ${error.message}`)
+          written += writes.length
+        }
+        const missed = batch.map((b) => b.securityId).filter((id) => !answered.has(id))
+        if (missed.length > 0) {
+          missing += missed.length
+          const { error } = await market
+            .from('security')
+            .update({ fundamentals_missing_at: new Date().toISOString() })
+            .in('security_id', missed)
+          if (error) throw new Error(`fundamentals_missing_at update failed: ${error.message}`)
+        }
+      }
+
+      if (batchesFailed > 0 && written === 0) {
+        throw new Error(`fundamentals provider returned nothing for all ${batchesFailed} batches`)
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, written, missing, batchesFailed, remaining: Math.max(0, wanted.length - written - missing) })
+    }
+
     if (resource === ONE_SECURITY_RESOURCE) {
       const wanted = String(symbolScope ?? '').trim().toUpperCase()
       if (!wanted) return json({ error: 'security-refresh needs a `symbol`' }, 400)
