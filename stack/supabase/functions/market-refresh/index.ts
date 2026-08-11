@@ -99,10 +99,16 @@ Deno.serve(async (req: Request) => {
   let resource = 'sector-performance'
   let fundScope: string | undefined
   let force = false
+  // Caps how much a backlog resource attempts in one run. Added as a BISECT tool: when
+  // `security-industries` died in 3.8s with a bare 502, nothing distinguished "too much work"
+  // from "broken regardless of size", and there was no way to ask. It stays because it is also
+  // how you drain a backlog gently after an outage.
+  let scopeLimit: number | undefined
   try {
     const body = await req.json()
     if (body?.resource) resource = String(body.resource)
     if (body?.fund) fundScope = String(body.fund).toUpperCase()
+    if (Number.isFinite(body?.limit)) scopeLimit = Math.max(1, Math.min(1000, Number(body.limit)))
     // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
     // refreshes must still collapse into one upstream fetch. Requires the
     // service-role key: the anon key is public, and a public cache-buster is a
@@ -438,7 +444,7 @@ Deno.serve(async (req: Request) => {
         .from('pending_industry')
         .select('security_id,symbol,sector_id')
         .order('best_weight', { ascending: false })
-        .limit(1000)
+        .limit(scopeLimit ?? 1000)
       if (pendErr) throw new Error(`pending_industry read failed: ${pendErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
@@ -584,7 +590,7 @@ Deno.serve(async (req: Request) => {
         .from('pending_profile')
         .select('security_id,symbol')
         .order('best_weight', { ascending: false })
-        .limit(1000)
+        .limit(scopeLimit ?? 1000)
       if (pendErr) throw new Error(`pending_profile read failed: ${pendErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
