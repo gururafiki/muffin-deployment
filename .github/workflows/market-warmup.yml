@@ -72,6 +72,7 @@ jobs:
               instrument-performance \
               instrument-profile \
               instrument-prices \
+              security-local-symbols \
               security-tickers \
               security-profiles \
               security-performance \

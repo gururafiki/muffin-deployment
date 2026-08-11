@@ -14,6 +14,8 @@
 // resolves the most visible securities first and leaves the rest for the next run, rather than
 // trying to do 9,786 in one worker.
 
+import { pickLocalSymbol } from './exchanges.ts';
+
 const ENDPOINT = 'https://api.openfigi.com/v3/mapping';
 
 /** Anonymous limits. A key lifts both, which is why they are read at call time, not baked in. */
@@ -23,12 +25,20 @@ const KEYED_JOBS_PER_REQUEST = 100;
 export interface FigiRequest {
   securityId: string;
   isin: string;
+  /** Set for a LOCAL lookup: the country whose venue we want, e.g. 'KR' -> `005930.KS`. */
+  countryIso2?: string;
 }
 export interface FigiResult {
   securityId: string;
   ticker: string;
   exchCode?: string;
   securityType?: string;
+}
+
+export interface LocalSymbolResult {
+  securityId: string;
+  /** yfinance-addressable, suffix included. */
+  symbol: string;
 }
 
 interface FigiJob {
@@ -151,4 +161,75 @@ export async function mapIsinsToTickers(
   }
 
   return { results, requestsUsed, unresolved, resolvedCount };
+}
+
+
+/**
+ * Resolve ISINs to their LOCAL listing, as the price provider addresses it.
+ *
+ * Deliberately asks OpenFIGI with NO `exchCode` filter, because the point is to see every venue and
+ * then choose — Samsung returns 49 matches across KS, KP, US, PQ and more, and picking the first
+ * would price a Korean bank off a thin foreign line. `pickLocalSymbol` chooses by the security's
+ * own country.
+ *
+ * Shares the batching, pacing and wall-clock budget of `mapIsinsToTickers` for the same reasons:
+ * the rate limit is the design constraint, and the worker dies at 60s.
+ */
+export async function mapIsinsToLocalSymbols(
+  requests: FigiRequest[],
+  opts: {
+    apiKey?: string
+    maxRequests?: number
+    budgetMs?: number
+    onBatch?: (found: LocalSymbolResult[], missed: string[]) => Promise<void>
+  } = {},
+): Promise<{ resolvedCount: number; requestsUsed: number; unresolved: number }> {
+  const apiKey = opts.apiKey?.trim() || undefined;
+  const perRequest = apiKey ? KEYED_JOBS_PER_REQUEST : ANON_JOBS_PER_REQUEST;
+  const maxRequests = opts.maxRequests ?? (apiKey ? 25 : 15);
+  const deadline = Date.now() + (opts.budgetMs ?? 35_000);
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['X-OPENFIGI-APIKEY'] = apiKey;
+
+  let requestsUsed = 0;
+  let unresolved = 0;
+  let resolvedCount = 0;
+
+  for (let i = 0; i < requests.length && requestsUsed < maxRequests; i += perRequest) {
+    if (Date.now() > deadline) break;
+    const batch = requests.slice(i, i + perRequest);
+    const res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(batch.map((r) => ({ idType: 'ID_ISIN', idValue: r.isin }))),
+    });
+    requestsUsed++;
+    if (res.status === 429) break;
+    if (!res.ok) throw new Error(`openfigi ${res.status}: ${(await res.text()).slice(0, 200)}`);
+
+    const body = (await res.json()) as ({ data?: { ticker?: string; exchCode?: string }[] })[];
+    const found: LocalSymbolResult[] = [];
+    const missed: string[] = [];
+    for (let j = 0; j < batch.length; j++) {
+      // POSITIONAL: entry j answers job j. Reordering here would attach one company's listing to
+      // another, which is worse than resolving nothing.
+      const matches = body[j]?.data ?? [];
+      const symbol = pickLocalSymbol(batch[j].countryIso2 ?? '', matches);
+      if (symbol) found.push({ securityId: batch[j].securityId, symbol });
+      else {
+        unresolved++;
+        missed.push(batch[j].securityId);
+      }
+    }
+    if (opts.onBatch) await opts.onBatch(found, missed);
+    resolvedCount += found.length;
+
+    const gap = apiKey ? 250 : 2500;
+    if (requestsUsed < maxRequests && Date.now() + gap < deadline) {
+      await new Promise((r) => setTimeout(r, gap));
+    }
+  }
+
+  return { resolvedCount, requestsUsed, unresolved };
 }
