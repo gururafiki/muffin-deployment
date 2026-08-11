@@ -141,8 +141,24 @@ Deno.serve(async (req: Request) => {
   const servicePath = `/home/deno/functions/${service_name}`
   console.error(`serving the request with ${servicePath}`)
 
-  const memoryLimitMb = 150
-  const workerTimeoutMs = 1 * 60 * 1000
+  // These are OURS, not a platform limit — self-hosted edge-runtime takes whatever we pass. Both
+  // were the defaults copied from Supabase's example router and were never sized for this node.
+  //
+  // MEMORY 150 -> 256 MB. The container's own limit is 512 MB, so this still fits two concurrent
+  // workers. 150 MB is what made the price refresh and the FIGI resolver die with a BARE 502 (a
+  // killed worker answers nothing), and it is why several resources batch more aggressively than
+  // the provider requires.
+  //
+  // TIMEOUT 60 -> 90 s. The real ceiling is NOT this number: supabase.<domain> is proxied by
+  // Cloudflare, which cuts a request at ~100 s, so 90 leaves margin to return an answer rather
+  // than have one truncated in flight. Raising it further would only move where the failure
+  // happens.
+  //
+  // This does NOT remove the need for incremental, wall-clock-bounded resources — a 9,786-security
+  // backlog does not fit in 90 s either — it just stops the limit from being the thing that shapes
+  // every batch size.
+  const memoryLimitMb = 256
+  const workerTimeoutMs = 90 * 1000
   const noModuleCache = false
   const importMapPath = null
   const envVarsObj = Deno.env.toObject()
