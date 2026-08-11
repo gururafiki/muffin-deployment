@@ -114,6 +114,25 @@ jobs:
             echo "  ok  $(echo "$files" | wc -l | tr -d ' ') migrations"
           done
 
+      # Applying cleanly is only half the contract — a view can be valid SQL and still express an
+      # invariant that can never be satisfied. `pending_industry` did exactly that: it reported work
+      # forever while the same 300 securities were re-fetched on every run, with no error anywhere.
+      - name: Behaviour — every backlog is satisfiable
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          for t in stack/supabase/tests/*.sql; do
+            if ! psql -h localhost -U postgres -q -v ON_ERROR_STOP=1 -f "$t" > /tmp/t.out 2>&1; then
+              echo "::error::$(basename "$t") failed: $(grep -m1 -E 'ERROR|EXCEPTION' /tmp/t.out)"
+              cat /tmp/t.out
+              exit 1
+            fi
+            # psql prefixes notices with `psql:<file>:<line>: NOTICE:`, so anchoring on the line
+            # start silently prints nothing on success and the step looks like it did no work.
+            sed -n 's/.*NOTICE: *//p' /tmp/t.out
+          done
+
   terraform:
     runs-on: ubuntu-latest
     steps:
