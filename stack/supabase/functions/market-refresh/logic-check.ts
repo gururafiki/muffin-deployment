@@ -196,6 +196,19 @@ console.log('\nfetchWithIsolation — a bad symbol costs only itself')
     'only the failing symbol is marked dead', JSON.stringify(isolated.dead))
   check(isolated.error !== null, 'the original batch error is still reported')
 
+  // EVERY symbol failing is an OUTAGE, not twenty bad symbols. Draining aggressively tripped
+  // yfinance's rate limit and this negative-cached 1,369 securities for 30 days — including HTHT
+  // and LEGN, ordinary Nasdaq tickers — while reporting `classified: 0, noIndustry: 200`, which
+  // reads as healthy progress.
+  const outage = await fetchWithIsolation(
+    async () => { throw new Error('openbb 400') },
+    path, ['A', 'B', 'C'], 5_000, far,
+  )
+  check(outage.dead.length === 0,
+    'when NOTHING answers, no symbol is blamed', JSON.stringify(outage.dead))
+  check((outage.error ?? '').includes('provider outage'),
+    'and the reason says so, so the tally is not read as progress')
+
   // Out of budget: untried symbols must NOT be recorded as unanswerable. Negative-caching a symbol
   // we never asked about is how a backlog loses work permanently.
   const expired = await fetchWithIsolation(
