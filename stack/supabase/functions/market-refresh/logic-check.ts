@@ -20,7 +20,7 @@ import {
   type Bar,
 } from './resources.ts'
 import { pickHomeListing } from './yahoo.ts'
-import { venuesFromRows, hasLocalExchange, pickLocalSymbol } from './exchanges.ts'
+import { venuesFromRows, hasLocalExchange, pickLocalSymbol, venueForSymbol } from './exchanges.ts'
 
 let failures = 0
 const check = (ok: boolean, label: string, detail = '') => {
@@ -243,6 +243,15 @@ check(hasLocalExchange('KR', VENUES) && !hasLocalExchange('US', VENUES),
   'US is not a LOCAL exchange — it is the fallback the whole mechanism exists to avoid')
 check(pickLocalSymbol('KR', [{ ticker: '000660', exchCode: 'KQ' }, { ticker: '005930', exchCode: 'KS' }], VENUES)?.symbol === '005930.KS',
   'the preferred board wins even when the other is listed first')
+
+console.log('\nvenueForSymbol — the suffix names the venue')
+check(venueForSymbol('005930.KS', VENUES) === 'KS', 'a local suffix resolves')
+check(venueForSymbol('AAPL', VENUES) === 'US', 'no suffix means US')
+check(venueForSymbol('BRK-B', VENUES) === 'US', 'a hyphenated US class share is still US')
+check(venueForSymbol('FOO.XYZ', VENUES) === null, 'an unknown suffix resolves to nothing, not a guess')
+// Mirrors migration 38's `order by length(suffix) desc, preference`. Stated in two languages, so
+// both get asserted rather than trusted to agree.
+check(venueForSymbol('SOME.KQ', VENUES) === 'KQ', 'the secondary board is distinguishable from the primary')
 
 console.log('\npickHomeListing — the home market or nothing')
 check(pickHomeListing([{ symbol: 'TLEVISACPO.MX', quoteType: 'EQUITY' }], 'MX', VENUES) === 'TLEVISACPO.MX',
