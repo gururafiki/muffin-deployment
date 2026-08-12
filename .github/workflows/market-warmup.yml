@@ -25,7 +25,10 @@ on:
   schedule:
     # 02:10, 08:10, 14:10, 20:10 UTC. Offset off the hour so it does not land with
     # every other cron on the runner fleet.
-    - cron: "10 2,8,14,20 * * *"
+    # Every three hours, raised from every six on 2026-08-12. The backlogs are large (38,000 items
+    # across seven resources) and every resource self-skips on its TTL, so an extra pass over
+    # already-fresh data costs one cheap 200 per resource rather than provider quota.
+    - cron: "10 2,5,8,11,14,17,20,23 * * *"
   workflow_dispatch:
     inputs:
       resource:

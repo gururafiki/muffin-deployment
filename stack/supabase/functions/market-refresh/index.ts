@@ -57,7 +57,16 @@ const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
 /** See the note on `scopeLimit` — 300 is measured, not chosen. */
-const PROFILE_BACKLOG_PAGE = 300
+/**
+ * Rows of a backlog to claim per run.
+ *
+ * 600, raised from 300 on 2026-08-12 after measuring: `security-industries` used 22s of its 55s
+ * budget at 300 and `security-fundamentals` 27s, so both were bounded by this number rather than by
+ * time. The deadline is the intended bound — it is what makes a run safe — and a page that finishes
+ * in half the budget only slows the drain. Claiming more than a run can finish is harmless: the
+ * remainder stays in the backlog and costs one larger read.
+ */
+const PROFILE_BACKLOG_PAGE = 600
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS })
@@ -913,7 +922,11 @@ Deno.serve(async (req: Request) => {
         .from('pending_prices')
         .select('security_id,symbol,fetch_symbol,last_date')
         .order('best_weight', { ascending: false })
-        .limit(scopeLimit ?? 120)
+        // 400, measured: 52s of the 55s budget, 73,542 rows, no failures. The DEADLINE is meant to
+        // be what stops a run — a page small enough to finish in 5s just wastes 50 of them, and at
+        // 120 this backlog would have taken 20 days to drain against a 4x/day cron.
+        // Overshooting is safe: unprocessed rows stay in the backlog and cost one bigger read.
+        .limit(scopeLimit ?? 400)
       if (pendErr) throw new Error(`pending_prices read failed: ${pendErr.message}`)
 
       const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id))
