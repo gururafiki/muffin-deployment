@@ -405,8 +405,36 @@ WHERE NOT metadata ? 'owner';
 
 The stock universe is built from **fund holdings**, not a screener. The tracked ETFs are
 US-registered, so they file SEC **N-PORT** quarterly — public, keyless, and carrying
-name/LEI/CUSIP/ISIN/country/weight per holding. Current state: **38 funds → 9,786 securities,
-16,424 holdings, 514 sector constituents**, replacing 35 hand-authored tickers.
+name/LEI/CUSIP/ISIN/country/weight per holding. Current state (2026-08-12): **60 funds → 10,060
+securities, 17,474 holdings, 7,940 sector constituents**, replacing 35 hand-authored tickers.
+
+### What identifies a security, and where it trades
+
+Identity is a catalog, not runtime state: `security_identifier` is `PRIMARY KEY (kind, value)` and
+holds 9,865 ISINs, 4,350 tickers and 1,495 CUSIPs, while the LEI lives on `issuer` because **an LEI
+identifies the ISSUER, not the security** (GOOG and GOOGL share one).
+
+Three tables added 2026-08-12 finish the picture:
+
+| Table | What it is |
+|---|---|
+| `exchange` | The venue catalog — exchange code → country → the suffix the price provider uses. **The single source**; it previously existed both here and hardcoded in `exchanges.ts`, and the two had drifted to 54 rows against 38. |
+| `listing` | Where a tracked security trades: `(security_id, exch_code)`, with `is_primary` naming the real quote. `exchange_listing` remains the raw OpenFIGI *directory* including companies no fund holds; this is the linked subset. |
+| `security_price` | Daily closes for the whole universe, keyed on `security_id`. |
+
+**A symbol is not a stable key.** The display symbol was `coalesce(ticker, provider_symbol)`, and
+that ticker is OpenFIGI's *US* lookup — a thin OTC foreign-ordinary line for a foreign company. 41%
+of non-US securities were labelled `SAABF`/`HXGBF` while being priced off `SAAB-B.ST`/`HEXA-B.ST`.
+`listing.is_primary` now decides it per security, and re-keying what was already stored took a
+hand-written migration. Anything keyed on `security_id` needed none, which is why `security_price`
+is.
+
+**`market.instruments` is a curated OVERLAY, not a duplicate universe.** Of its 47 rows, 8 are
+editorial listing picks (`TSM`, `SAP`, `RIO` — the liquid ADR, where the fund-derived universe knows
+only `TSMWF`, `SAPGF`) and 12 are not securities at all (`USD`, `US10Y`, `BTC`, `WTI`, `GLD`).
+`priced = false` is what makes cash and a bond yield render **no number** rather than "+0.0%". It
+carries a nullable `security_id`, and `instrument_current` merges the two: curated columns win for
+editorial fields, the linked security supplies provider-refreshed ones.
 
 ### The refresh model — who calls what, and when
 
@@ -418,7 +446,7 @@ which is why a page renders instantly even while a refresh is in flight.
 
 | Trigger | Who | When | Credential |
 |---|---|---|---|
-| `market-warmup.yml` | GitHub Actions cron | 02:10 / 08:10 / 14:10 / 20:10 UTC | anon key |
+| `market-warmup.yml` | GitHub Actions cron | every 3 hours, from 02:10 UTC | anon key |
 | stale-while-revalidate | the app itself | a reader touches a row past `stale_after` | anon key |
 | manual | you | on demand | anon, or service-role for `force` |
 
@@ -438,6 +466,32 @@ fresh. `market-verify.yml` runs separately at 03:00 UTC and asserts the result a
 | `fund-holdings` | `security`, `issuer`, `fund_holding` | **SEC EDGAR** | 1 month |
 | `derive-classifications` | `security_taxonomy`, country | none — a SQL join | 1 month |
 | `security-tickers` | ticker identifiers | **OpenFIGI** | 1 day |
+| `security-local-symbols` | `security_provider_symbol` (local lines) | **OpenFIGI** | 1 day |
+| `security-yahoo-symbols` | `security_provider_symbol`, `listing` | **Yahoo search, by ISIN** | 1 day |
+| `security-profiles` | `security_taxonomy` (sector) | yfinance | 1 day |
+| `security-industries` | `taxonomy_node` level 2, `security.market_cap` | yfinance | 1 day |
+| `security-performance` | `performance` (whole universe) | yfinance | 1 day |
+| `security-prices` | `security_price` (~400-day daily window) | yfinance, **incremental** | 1 day |
+| `security-fundamentals` | `security_fundamentals` | yfinance | 1 week |
+| `security-statements` | `security_statement` | yfinance | 1 week |
+| `exchange-listings` | `exchange_listing` (venue sweep) | **OpenFIGI** | 1 month |
+| `security-refresh` | one security, on demand | yfinance | none |
+| `promote-listing` | promotes an untracked listing | none | none |
+
+**Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
+by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both
+learned the hard way:
+
+- **A negative cache is mandatory.** Each has a `*_missing_at` column so a security the provider
+  cannot answer for stops being re-asked for 30 days. Without one, unanswerable rows crowd out
+  answerable ones forever — rediscovered four times, which is why there are four such columns.
+- **A whole batch failing is an OUTAGE, not a batch of bad symbols.** If every symbol also fails
+  alone, nothing is negative-cached. Draining aggressively once tripped a rate limit and marked
+  1,369 perfectly good securities unanswerable for 30 days.
+
+`security-prices` is incremental in a second sense: it fetches from the newest bar already stored
+rather than a fixed window, so a daily refresh asks for one day (20 rows, ~1s) where a first pass
+asks for four hundred (73,542 rows, ~52s).
 
 **TTLs are pre-launch values — deliberately long.** Nobody is watching these numbers yet and every
 refresh spends someone's free-tier quota. Tightening them at launch is tracked in `todos.md`.
