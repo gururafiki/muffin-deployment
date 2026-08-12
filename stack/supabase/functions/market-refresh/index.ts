@@ -26,6 +26,7 @@ import { ingestFund } from './ingest.ts'
 import { listExchange, mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange } from './exchanges.ts'
+import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
   loadPricesBatched,
@@ -155,6 +156,7 @@ Deno.serve(async (req: Request) => {
   const ONE_SECURITY_RESOURCE = 'security-refresh'
   const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
   const STATEMENTS_RESOURCE = 'security-statements'
+  const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
@@ -850,6 +852,113 @@ Deno.serve(async (req: Request) => {
         unresolved,
         requestsUsed,
         remaining: Math.max(0, addressable.length - resolvedCount - unresolved),
+      })
+    }
+
+    // Ask the price provider what IT calls this security, instead of sending Bloomberg's spelling.
+    //
+    // OpenFIGI's `ticker` is the Bloomberg form and the provider rejects it: `BRK/B` and `RR/.L`
+    // 400, while `6.HK` and `ESSITYB.ST` return "no data" because Hong Kong pads to four digits and
+    // Stockholm share classes take a hyphen. The last two carry no unusual character at all, which
+    // is why this resolves from a SOURCE rather than applying rules written from memory — the
+    // mistake `exchanges.ts` records, where a hand-written table silently dropped 534 securities.
+    if (resource === YAHOO_SYMBOL_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_yahoo_symbol')
+        .select('security_id,isin,country_iso2,current_symbol')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 60)
+      if (pendErr) throw new Error(`pending_yahoo_symbol read failed: ${pendErr.message}`)
+
+      const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, resolved: 0, remaining: 0, note: 'nothing to re-address' })
+      }
+
+      // BOUNDED BY WALL CLOCK, not by request count. Yahoo's search is rate-limited and one call
+      // per security is not batchable, so a count-based bound is a bound on nothing: 15 anonymous
+      // OpenFIGI requests once took ~40s on a laptop and blew the worker on this node. On an
+      // incremental resource, stopping early is free.
+      const deadline = Date.now() + 55_000
+      let resolved = 0
+      let unresolved = 0
+      let failed = 0
+      let lastError: string | null = null
+      const changed: string[] = []
+
+      for (const row of wanted) {
+        const remaining = deadline - Date.now()
+        if (remaining < 4_000) break
+        let hits
+        try {
+          hits = await searchByIsin(String(row.isin), Math.min(8_000, remaining))
+        } catch (e) {
+          // A refusal is about the ENDPOINT, not this security — do not negative-cache it, or a
+          // rate limit becomes 60 securities marked unresolvable for a month. This is the same
+          // rule `fetchWithIsolation` learned the hard way after mismarking 1,369 of them.
+          failed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          continue
+        }
+
+        const symbol = pickHomeListing(hits, String(row.country_iso2))
+        if (!symbol) {
+          // Answered, and nothing on this security's home market. That IS about the security.
+          const { error } = await market
+            .from('security')
+            .update({ yahoo_symbol_missing_at: new Date().toISOString() })
+            .eq('security_id', row.security_id)
+          if (error) throw new Error(`yahoo_symbol_missing_at update failed: ${error.message}`)
+          unresolved++
+          continue
+        }
+        if (symbol === row.current_symbol) {
+          // The spelling was never the problem for this one; stop re-asking about it.
+          const { error } = await market
+            .from('security')
+            .update({ yahoo_symbol_missing_at: new Date().toISOString() })
+            .eq('security_id', row.security_id)
+          if (error) throw new Error(`yahoo_symbol_missing_at update failed: ${error.message}`)
+          unresolved++
+          continue
+        }
+
+        const { error: psErr } = await market.from('security_provider_symbol').upsert(
+          { security_id: row.security_id, provider_code: 'yfinance', symbol },
+          { onConflict: 'security_id,provider_code' },
+        )
+        if (psErr) throw new Error(`provider symbol upsert failed: ${psErr.message}`)
+
+        // A NEW SYMBOL INVALIDATES EVERY NEGATIVE CACHE. Those flags record "we asked and got
+        // nothing" — but we asked under the WRONG NAME, so leaving them set would fix the spelling
+        // and still exclude the security from every backlog for 30 days. This clearing is the
+        // difference between resolving a symbol and actually recovering the security.
+        const { error: clrErr } = await market
+          .from('security')
+          .update({
+            industry_missing_at: null,
+            profile_missing_at: null,
+            performance_missing_at: null,
+            fundamentals_missing_at: null,
+            statements_missing_at: null,
+          })
+          .eq('security_id', row.security_id)
+        if (clrErr) throw new Error(`clearing negative caches failed: ${clrErr.message}`)
+
+        resolved++
+        if (changed.length < 12) changed.push(`${row.current_symbol ?? '?'} -> ${symbol}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        resolved,
+        unresolved,
+        failed,
+        lastError,
+        examples: changed,
+        remaining: wanted.length - resolved - unresolved - failed,
       })
     }
 
