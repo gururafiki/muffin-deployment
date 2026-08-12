@@ -471,11 +471,24 @@ Deno.serve(async (req: Request) => {
         const remaining = deadline - Date.now()
         if (remaining < 3_000) break
         let rows: Record<string, unknown>[] = []
+        let deadSymbols: string[] = []
         try {
-          rows = await fetcher(
-            `/api/v1/equity/fundamental/metrics?symbol=${symbolList(batch.map((b) => b.symbol))}&provider=yfinance`,
+          // ISOLATE. Measured 2026-08-12: ALL 60 batches of a 600-row page failed with
+          //   openbb 400 ... {"detail":"Error getting data for 2689.HK -> YFR..."}
+          // One symbol the provider cannot answer for 400s the whole batch, so nothing was written
+          // and nothing negative-cached — the backlog sat at 6,075 through repeated runs while
+          // every count stayed plausible. `security-industries` got this fix in the morning and
+          // this call site did not; a rule at one call site is not a rule.
+          const got = await fetchWithIsolation(
+            fetcher,
+            (syms) => `/api/v1/equity/fundamental/metrics?symbol=${symbolList(syms)}&provider=yfinance`,
+            batch.map((b) => b.symbol),
             Math.min(20_000, remaining),
+            deadline,
           )
+          rows = got.rows
+          deadSymbols = got.dead
+          if (got.error) { batchesFailed++; lastError = got.error }
         } catch (e) {
           // The reason was being DISCARDED here, which is why this took four wrong guesses to
           // narrow: the log only ever said "returned nothing for all N batches", and the same
@@ -484,17 +497,34 @@ Deno.serve(async (req: Request) => {
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           continue
         }
+        // A symbol the provider refuses ON ITS OWN is unanswerable, so stop asking. Without this
+        // the isolation pass would rescue the batch and the poison symbol would return next run,
+        // costing an extra request per run forever.
+        if (deadSymbols.length > 0) {
+          const deadIds = batch
+            .filter((b) => deadSymbols.includes(b.symbol))
+            .map((b) => b.securityId)
+          const { error } = await market
+            .from('security')
+            .update({ fundamentals_missing_at: new Date().toISOString() })
+            .in('security_id', deadIds)
+          if (error) throw new Error(`fundamentals_missing_at update failed: ${error.message}`)
+          missing += deadIds.length
+        }
+
         // An empty answer is NOT a failure — it means the provider has nothing for these symbols.
         // Counting it as one meant they were never negative-cached, so they were re-asked every
         // run and the guard below eventually failed the whole resource on them.
+        // Excludes anything the isolation pass just recorded, so one batch cannot be counted twice
+        // (the `noIndustry: 23 for a batch of 20` tally bug, in a second place).
         if (rows.length === 0) {
           emptyBatches++
           const { error } = await market
             .from('security')
             .update({ fundamentals_missing_at: new Date().toISOString() })
-            .in('security_id', batch.map((b) => b.securityId))
+            .in('security_id', batch.filter((b) => !deadSymbols.includes(b.symbol)).map((b) => b.securityId))
           if (error) throw new Error(`fundamentals_missing_at update failed: ${error.message}`)
-          missing += batch.length
+          missing += batch.filter((b) => !deadSymbols.includes(b.symbol)).length
           continue
         }
 
@@ -1447,10 +1477,15 @@ Deno.serve(async (req: Request) => {
           // not just the decision to start one.
           const remaining = deadline - Date.now()
           if (remaining < 3_000) break
-          rows = await fetcher(
-            `/api/v1/equity/profile?symbol=${symbolList(batch.map((b) => b.symbol))}&provider=yfinance`,
+          // Same isolation: one unanswerable symbol must not cost the other forty-nine.
+          const got = await fetchWithIsolation(
+            fetcher,
+            (syms) => `/api/v1/equity/profile?symbol=${symbolList(syms)}&provider=yfinance`,
+            batch.map((b) => b.symbol),
             Math.min(15_000, remaining),
+            deadline,
           )
+          rows = got.rows
         } catch (_e) {
           providerFailed = true
         }
