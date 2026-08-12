@@ -176,6 +176,25 @@ export async function fetchWithIsolation(
         dead.push(symbol)
       }
     }
+    // IF NOTHING ANSWERED, BLAME THE PROVIDER, NOT THE UNIVERSE.
+    //
+    // A bad symbol is rare and isolated — a handful of Bloomberg spellings in a batch of twenty.
+    // When EVERY symbol fails alone, the far likelier explanation is that the provider is down or
+    // rate-limiting, and calling twenty securities permanently unanswerable on that evidence is how
+    // a backlog destroys itself.
+    //
+    // MEASURED THE HARD WAY, 2026-08-12: draining aggressively tripped yfinance's rate limit, every
+    // batch then failed, and this function negative-cached **1,369 securities for 30 days** —
+    // including `HTHT` (H World, Nasdaq) and `LEGN` (Legend Biotech, Nasdaq), which are perfectly
+    // ordinary tickers. The runs reported `classified: 0, noIndustry: 200` and looked like healthy
+    // progress. Cleared by hand; this is what stops a repeat.
+    //
+    // `security-performance` already carried exactly this rule in a comment — "if the whole batch
+    // fails, the provider is down or rate-limiting, mark nothing" — and it did not travel to the
+    // helper that generalised the batching. A rule written at one call site is not a rule.
+    if (rows.length === 0 && dead.length > 0) {
+      return { rows, dead: [], error: `${error} (all ${dead.length} failed individually — treated as a provider outage, not bad symbols)` }
+    }
     return { rows, dead, error }
   }
 }

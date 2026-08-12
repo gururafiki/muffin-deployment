@@ -912,6 +912,9 @@ Deno.serve(async (req: Request) => {
         const batch = wanted.slice(i, i + BATCH)
         const remaining = deadline - Date.now()
         if (remaining < 3_000) break
+        // Securities the isolation pass has already negative-cached in this batch, so the empty-answer
+        // branch below does not count them a second time.
+        const alreadyMissing = new Set<string>()
         let rows: Record<string, unknown>[] = []
         try {
           // ISOLATE rather than lose the batch. The highest-weight page permanently contains
@@ -943,6 +946,7 @@ Deno.serve(async (req: Request) => {
               .in('security_id', deadIds)
             if (error) throw new Error(`industry_missing_at update failed: ${error.message}`)
             noIndustry += deadIds.length
+            for (const id of deadIds) alreadyMissing.add(id)
           }
         } catch (e) {
           batchesFailed++
@@ -951,12 +955,22 @@ Deno.serve(async (req: Request) => {
         }
         if (rows.length === 0) {
           // Empty is "no data for these", not a fault — record it so they stop being re-asked.
-          const { error } = await market
-            .from('security')
-            .update({ industry_missing_at: new Date().toISOString() })
-            .in('security_id', batch.map((b) => b.securityId))
-          if (error) throw new Error(`industry_missing_at update failed: ${error.message}`)
-          noIndustry += batch.length
+          // EXCLUDING anything the isolation pass already marked, or a batch where some symbols
+          // failed individually and the rest answered empty counts both groups and reports more
+          // securities than the batch contains (measured: `noIndustry: 23` for a batch of 20 —
+          // 3 dead plus all 20 again). The write is idempotent, so this was a lying TALLY rather
+          // than bad data; a tally is what the next person diagnoses from, so it has to be true.
+          const stillUnrecorded = batch
+            .filter((b) => !alreadyMissing.has(b.securityId))
+            .map((b) => b.securityId)
+          if (stillUnrecorded.length > 0) {
+            const { error } = await market
+              .from('security')
+              .update({ industry_missing_at: new Date().toISOString() })
+              .in('security_id', stillUnrecorded)
+            if (error) throw new Error(`industry_missing_at update failed: ${error.message}`)
+            noIndustry += stillUnrecorded.length
+          }
           continue
         }
 
