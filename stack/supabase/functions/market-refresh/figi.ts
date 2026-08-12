@@ -14,7 +14,7 @@
 // resolves the most visible securities first and leaves the rest for the next run, rather than
 // trying to do 9,786 in one worker.
 
-import { pickLocalSymbol } from './exchanges.ts';
+import { pickLocalSymbol, type VenueMap } from './exchanges.ts';
 
 const ENDPOINT = 'https://api.openfigi.com/v3/mapping';
 
@@ -184,7 +184,9 @@ export async function mapIsinsToLocalSymbols(
     maxRequests?: number
     budgetMs?: number
     onBatch?: (found: LocalSymbolResult[], missed: string[]) => Promise<void>
-  } = {},
+    /** The venue catalog from `market.exchange`. Passed in so this file holds no copy of it. */
+    venues: VenueMap
+  },
 ): Promise<{ resolvedCount: number; requestsUsed: number; unresolved: number }> {
   const apiKey = opts.apiKey?.trim() || undefined;
   const perRequest = apiKey ? KEYED_JOBS_PER_REQUEST : ANON_JOBS_PER_REQUEST;
@@ -221,7 +223,7 @@ export async function mapIsinsToLocalSymbols(
         exchCode?: string
         compositeFIGI?: string
       }[];
-      const picked = pickLocalSymbol(batch[j].countryIso2 ?? '', matches);
+      const picked = pickLocalSymbol(batch[j].countryIso2 ?? '', matches, opts.venues);
       if (picked) {
         found.push({
           securityId: batch[j].securityId,
