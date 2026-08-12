@@ -150,7 +150,9 @@ jobs:
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
       - name: Logic checks
-        run: deno run stack/supabase/functions/market-refresh/logic-check.ts
+        # --allow-read: the registry check reads the workflow and the handler as TEXT, because the
+        # resource names live in files that cannot import each other.
+        run: deno run --allow-read stack/supabase/functions/market-refresh/logic-check.ts
 
   terraform:
     runs-on: ubuntu-latest

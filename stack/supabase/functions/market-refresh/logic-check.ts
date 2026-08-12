@@ -245,5 +245,48 @@ check(pickHomeListing([], 'GB') === null, 'no hits means no symbol')
 check(pickHomeListing([{ symbol: 'AAA.XX', quoteType: 'EQUITY' }], 'ZZ') === null,
   'a country with no known venue resolves to nothing rather than guessing')
 
+// ── every resource the cron calls must be one the function ACCEPTS ───────────
+// Adding a resource means touching TWO places: the handler block, and the `EXTRA` allow-list the
+// request is validated against. Shipped 2026-08-12 with only the first — the handler was there, the
+// migration was there, the warm-up cron called it, and the function answered
+// `unknown resource 'security-yahoo-symbols'` with a 400. Nothing caught it: the constant IS
+// referenced (by the guard), so `deno check` is happy, and no test connects the two lists.
+//
+// Read as TEXT on purpose. The names live in three files that cannot import each other — a YAML
+// workflow, a Deno handler and a shell loop — so the only thing they share is the string.
+console.log('\nresource registry — the cron and the function agree')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const warmup = await Deno.readTextFile(
+    new URL('../../../../.github/workflows/market-warmup.yml', import.meta.url),
+  )
+
+  // The names the cron POSTs, from the `RESOURCES=$(printf ...)` block.
+  const block = warmup.match(/RESOURCES=\$\(printf[\s\S]*?\)\n/)?.[0] ?? ''
+  const cronResources = [...block.matchAll(/^\s{10,}([a-z][a-z-]+)\s*\\?$/gm)].map((m) => m[1])
+  check(cronResources.length > 10, 'found the cron resource list', `${cronResources.length} names`)
+
+  // What the function will accept: `RESOURCES` keys in resources.ts plus the EXTRA allow-list.
+  const resourcesFile = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
+  const declared = new Set<string>([
+    ...[...resourcesFile.matchAll(/^\s{2}'([a-z][a-z-]+)':\s*\{/gm)].map((m) => m[1]),
+    ...[...index.matchAll(/_RESOURCE = '([a-z][a-z-]+)'/g)].map((m) => m[1]),
+  ])
+  const extraBlock = index.match(/const EXTRA = \[[\s\S]*?\]/)?.[0] ?? ''
+  const accepted = new Set<string>(
+    [...declared].filter((name) => {
+      const constName = [...index.matchAll(/(\w+_RESOURCE) = '([a-z][a-z-]+)'/g)]
+        .find((m) => m[2] === name)?.[1]
+      // A resource is reachable if it is a declared RESOURCES entry, or its constant is in EXTRA.
+      return !constName || extraBlock.includes(constName)
+    }),
+  )
+
+  const unreachable = cronResources.filter((r) => !accepted.has(r))
+  check(unreachable.length === 0,
+    'every resource the warm-up calls is accepted by the function',
+    unreachable.length ? `unreachable: ${unreachable.join(', ')}` : '')
+}
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
