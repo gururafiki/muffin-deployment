@@ -12,6 +12,7 @@
 import {
   barFrom,
   dedupeBy,
+  fetchWithIsolation,
   firstComparableIndex,
   returnsFor,
   symbolList,
@@ -160,6 +161,48 @@ console.log('\ndedupeBy — one row per conflict key')
   check(dedupeBy([], (x: { id: string }) => x.id).length === 0, 'an empty list stays empty')
   const keys = out.map((w) => `${w.security_id}|${w.node_id}|${w.source_code}`)
   check(new Set(keys).size === keys.length, 'no duplicate key survives — the actual DB constraint')
+}
+
+// ── one dead symbol must not kill nineteen good ones ─────────────────────────
+// The most repeated failure in this pipeline: group-performance on FM, security-profiles on foreign
+// listings, and security-industries on the Bloomberg spellings that 400 even once encoded. Because
+// the backlog is ordered by fund weight, that batch sat at the head of EVERY run.
+console.log('\nfetchWithIsolation — a bad symbol costs only itself')
+{
+  const far = Date.now() + 60_000
+  const path = (syms: string[]) => `/p?symbol=${syms.join(',')}`
+
+  // The healthy case must cost exactly ONE call — isolation is for failures only.
+  let calls = 0
+  const ok = await fetchWithIsolation(
+    async (_p) => { calls++; return [{ symbol: 'A' }, { symbol: 'B' }] },
+    path, ['A', 'B'], 5_000, far,
+  )
+  check(calls === 1, 'a healthy batch makes exactly one request', `made ${calls}`)
+  check(ok.rows.length === 2 && ok.dead.length === 0 && ok.error === null, 'and reports no failure')
+
+  // One poison symbol: the other nineteen must still come back, and only the bad one is blamed.
+  const bad = 'BRK/B'
+  const isolated = await fetchWithIsolation(
+    async (p: string) => {
+      if (p.includes(encodeURIComponent(bad)) || p.includes(bad)) throw new Error('openbb 400')
+      return [{ symbol: p.split('=')[1] }]
+    },
+    (syms) => `/p?symbol=${symbolList(syms)}`,
+    ['GOOD1', bad, 'GOOD2'], 5_000, far,
+  )
+  check(isolated.rows.length === 2, 'the good symbols still return', `got ${isolated.rows.length}`)
+  check(isolated.dead.length === 1 && isolated.dead[0] === bad,
+    'only the failing symbol is marked dead', JSON.stringify(isolated.dead))
+  check(isolated.error !== null, 'the original batch error is still reported')
+
+  // Out of budget: untried symbols must NOT be recorded as unanswerable. Negative-caching a symbol
+  // we never asked about is how a backlog loses work permanently.
+  const expired = await fetchWithIsolation(
+    async () => { throw new Error('openbb 400') },
+    path, ['A', 'B', 'C'], 5_000, Date.now() - 1,
+  )
+  check(expired.dead.length === 0, 'a blown deadline blames nobody', JSON.stringify(expired.dead))
 }
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
