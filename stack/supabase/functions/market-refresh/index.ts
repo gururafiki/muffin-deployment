@@ -42,6 +42,7 @@ import {
   SEC_PERF_TTL_MINUTES,
   BACKLOG_TTL_MINUTES,
   symbolList,
+  dedupeBy,
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
@@ -244,7 +245,7 @@ Deno.serve(async (req: Request) => {
       if (updates.length === 0) throw new Error('no profiles returned')
       // upsert, not update: `symbol` is the PK and every row already exists, but
       // upsert keeps this correct if the universe gains a ticker mid-flight.
-      const { error } = await market.from('instruments').upsert(updates, { onConflict: 'symbol' })
+      const { error } = await market.from('instruments').upsert(dedupeBy(updates, (u) => String(u.symbol)), { onConflict: 'symbol' })
       if (error) throw new Error(`instruments upsert failed: ${error.message}`)
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ resource, refreshed: updates.length })
@@ -391,7 +392,8 @@ Deno.serve(async (req: Request) => {
         if (rows.length > 0) {
           const { error } = await market
             .from('security_statement')
-            .upsert(rows, { onConflict: 'security_id,statement,period_ending' })
+            .upsert(dedupeBy(rows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}`),
+              { onConflict: 'security_id,statement,period_ending' })
           if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
           written += rows.length
         } else if (anyAnswer || failed === 0) {
@@ -501,7 +503,7 @@ Deno.serve(async (req: Request) => {
         if (writes.length > 0) {
           const { error } = await market
             .from('security_fundamentals')
-            .upsert(writes, { onConflict: 'security_id' })
+            .upsert(dedupeBy(writes, (w) => String(w.security_id)), { onConflict: 'security_id' })
           if (error) throw new Error(`fundamentals upsert failed: ${error.message}`)
           written += writes.length
 
@@ -590,7 +592,8 @@ Deno.serve(async (req: Request) => {
         if (rowsOut.length > 0) {
           const { error } = await market
             .from('performance')
-            .upsert(rowsOut, { onConflict: 'scope,scope_id,period' })
+            .upsert(dedupeBy(rowsOut, (r) => `${r.scope}|${r.scope_id}|${r.period}`),
+            { onConflict: 'scope,scope_id,period' })
           if (error) throw new Error(`performance upsert failed: ${error.message}`)
         }
         out.returns = rowsOut.length
@@ -750,7 +753,7 @@ Deno.serve(async (req: Request) => {
           provider_symbol: `${l.ticker}${suffix}`,
           last_seen_at: new Date().toISOString(),
         }))
-        const { error } = await market.from('exchange_listing').upsert(chunk, { onConflict: 'figi' })
+        const { error } = await market.from('exchange_listing').upsert(dedupeBy(chunk, (c) => String(c.figi)), { onConflict: 'figi' })
         if (error) throw new Error(`exchange_listing upsert failed: ${error.message}`)
         written += chunk.length
       }
@@ -862,7 +865,12 @@ Deno.serve(async (req: Request) => {
         .order('best_weight', { ascending: false })
         .limit(scopeLimit ?? PROFILE_BACKLOG_PAGE)
       if (pendErr) throw new Error(`pending_industry read failed: ${pendErr.message}`)
-      const wanted = (pending ?? []).map((r) => ({
+      // ONE ROW PER SECURITY. `pending_industry` yields one row per (security, level-1 sector), so
+      // a security classified into two sectors arrives twice — which spent its symbol twice at the
+      // provider and produced two identical `security_taxonomy` writes in one statement, the
+      // `ON CONFLICT DO UPDATE ... a second time` failure. `dedupeBy` at the upsert is the
+      // backstop; this stops it at the source and saves the duplicate fetch.
+      const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id)).map((r) => ({
         securityId: r.security_id as string,
         symbol: r.symbol as string,
         sectorId: r.sector_id as string,
@@ -997,7 +1005,8 @@ Deno.serve(async (req: Request) => {
         if (writes.length > 0) {
           const { error } = await market
             .from('security_taxonomy')
-            .upsert(writes, { onConflict: 'security_id,node_id,source_code' })
+            .upsert(dedupeBy(writes, (w) => `${w.security_id}|${w.node_id}|${w.source_code}`),
+              { onConflict: 'security_id,node_id,source_code' })
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
           classified += writes.length
         }
@@ -1118,7 +1127,8 @@ Deno.serve(async (req: Request) => {
         if (writes.length > 0) {
           const { error } = await market
             .from('security_taxonomy')
-            .upsert(writes, { onConflict: 'security_id,node_id,source_code' })
+            .upsert(dedupeBy(writes, (w) => `${w.security_id}|${w.node_id}|${w.source_code}`),
+              { onConflict: 'security_id,node_id,source_code' })
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
           classified += writes.length
         }
@@ -1230,8 +1240,43 @@ Deno.serve(async (req: Request) => {
         if (rows.length === 0) { emptyBatches++; continue }
         const { error } = await market
           .from('performance')
-          .upsert(rows, { onConflict: 'scope,scope_id,period' })
+          .upsert(dedupeBy(rows, (r) => `${r.scope}|${r.scope_id}|${r.period}`),
+            { onConflict: 'scope,scope_id,period' })
         if (error) throw new Error(`performance upsert failed: ${error.message}`)
+
+        // AN UPSERT CANNOT RETRACT. A period we no longer produce keeps whatever was written last
+        // time, forever — so the moment `returnsFor` starts omitting a period (a series that
+        // shortened, or one broken by a unit change), the OLD wrong number survives every future
+        // refresh and looks freshly written. That is the shape of every silent defect in this
+        // pipeline, so the write is made authoritative: for each symbol answered, delete the
+        // periods this run deliberately did not produce.
+        // Grouped by the period-set signature rather than done per symbol — in practice almost
+        // every symbol yields the same full set, so this is one delete, not one per security.
+        const producedBySymbol = new Map<string, Set<string>>()
+        for (const r of rows) {
+          const set = producedBySymbol.get(r.scope_id) ?? new Set<string>()
+          set.add(r.period)
+          producedBySymbol.set(r.scope_id, set)
+        }
+        const bySignature = new Map<string, { periods: string[]; symbols: string[] }>()
+        for (const [sym, periods] of producedBySymbol) {
+          const sig = [...periods].sort().join(',')
+          const entry = bySignature.get(sig) ?? { periods: [...periods], symbols: [] }
+          entry.symbols.push(sym)
+          bySignature.set(sig, entry)
+        }
+        for (const { periods, symbols } of bySignature.values()) {
+          // `in.()` is a URL, so chunk the symbol list — 6.5 KB earns a bare 502.
+          for (let j = 0; j < symbols.length; j += 100) {
+            const { error: delErr } = await market
+              .from('performance')
+              .delete()
+              .eq('scope', 'instrument')
+              .in('scope_id', symbols.slice(j, j + 100))
+              .not('period', 'in', `(${periods.join(',')})`)
+            if (delErr) throw new Error(`stale period delete failed: ${delErr.message}`)
+          }
+        }
         written += rows.length
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
@@ -1390,7 +1435,8 @@ Deno.serve(async (req: Request) => {
 
     const { error } = await market
       .from('performance')
-      .upsert(rows, { onConflict: 'scope,scope_id,period' })
+      .upsert(dedupeBy(rows, (r) => `${r.scope}|${r.scope_id}|${r.period}`),
+            { onConflict: 'scope,scope_id,period' })
     if (error) throw new Error(`upsert failed: ${error.message}`)
 
     await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })

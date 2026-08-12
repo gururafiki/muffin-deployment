@@ -133,6 +133,25 @@ jobs:
             sed -n 's/.*NOTICE: *//p' /tmp/t.out
           done
 
+  # The edge functions were NEVER typechecked or tested by CI — they are Deno, and every job here
+  # was Postgres, Terraform or Ansible. That is how a batched URL built by string interpolation, a
+  # zero close accepted as a price and a series broken by a unit change all reached production and
+  # returned 200 while doing so.
+  functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Typecheck
+        run: deno check stack/supabase/functions/market-refresh/index.ts
+      # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
+      # same ground against a live openbb-api, but it needs one, so it only runs when someone
+      # remembers. That is the difference between a rule that holds and a rule that held once.
+      - name: Logic checks
+        run: deno run stack/supabase/functions/market-refresh/logic-check.ts
+
   terraform:
     runs-on: ubuntu-latest
     steps:
