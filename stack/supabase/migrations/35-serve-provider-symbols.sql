@@ -26,6 +26,10 @@
 drop view if exists market.security_fundamentals_current;
 drop view if exists market.security_statement_current;
 drop view if exists market.sector_constituents;
+-- `instrument_current` (migration 40) is built on `security_current`, so it must go first or this
+-- drop fails with "cannot drop view ... because other objects depend on it" on every re-run after
+-- 40 has landed. `if exists` keeps it a no-op on a fresh database.
+drop view if exists market.instrument_current;
 drop view if exists market.security_current;
 drop view if exists market.security_symbol;
 
