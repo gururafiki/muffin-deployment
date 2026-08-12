@@ -44,6 +44,9 @@ import {
   BACKLOG_TTL_MINUTES,
   symbolList,
   dedupeBy,
+  planPriceFetches,
+  PRICE_WINDOW_DAYS,
+  barFrom,
   fetchWithIsolation,
 } from './resources.ts'
 
@@ -157,11 +160,12 @@ Deno.serve(async (req: Request) => {
   const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
   const STATEMENTS_RESOURCE = 'security-statements'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
+  const SEC_PRICES_RESOURCE = 'security-prices'
   const EXTRA = [
     PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
     INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE, STATEMENTS_RESOURCE,
-    YAHOO_SYMBOL_RESOURCE,
+    YAHOO_SYMBOL_RESOURCE, SEC_PRICES_RESOURCE,
   ]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -893,6 +897,122 @@ Deno.serve(async (req: Request) => {
         unresolved,
         requestsUsed,
         remaining: Math.max(0, addressable.length - resolvedCount - unresolved),
+      })
+    }
+
+
+    // Keep the daily bars we already download. `security-performance` fetches ~400 days per
+    // security to compute seven numbers and discards the series, so a chart is possible for the 47
+    // curated instruments and nobody else.
+    //
+    // INCREMENTAL: the backlog carries each security's newest stored bar and the fetch starts
+    // there, so a daily refresh asks for a day rather than four hundred. Batches are grouped by how
+    // far back their members need, because the provider takes one start_date per request.
+    if (resource === SEC_PRICES_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_prices')
+        .select('security_id,symbol,fetch_symbol,last_date')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 120)
+      if (pendErr) throw new Error(`pending_prices read failed: ${pendErr.message}`)
+
+      const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every series is current' })
+      }
+
+      const bySymbolId = new Map(wanted.map((r) => [String(r.symbol), String(r.security_id)]))
+      const plans = planPriceFetches(
+        wanted.map((r) => ({
+          symbol: String(r.symbol),
+          fetchSymbol: String(r.fetch_symbol ?? r.symbol),
+          lastDate: (r.last_date as string | null) ?? null,
+        })),
+        new Date(),
+        20,
+      )
+
+      const deadline = Date.now() + 55_000
+      let written = 0
+      let emptySeries = 0
+      let batchesFailed = 0
+      let lastError: string | null = null
+      const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
+
+      for (const plan of plans) {
+        const remaining = deadline - Date.now()
+        if (remaining < 5_000) break
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/price/historical?symbol=${symbolList(plan.symbols.map((s) => s.fetchSymbol))}` +
+              `&provider=yfinance&start_date=${plan.startDate}&interval=1d`,
+            Math.min(20_000, remaining),
+          )
+        } catch (e) {
+          batchesFailed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          continue
+        }
+
+        // Map the provider's answer back onto OUR display symbol: it replies under the fetch symbol
+        // (`HEXA-B.ST`), and the series is stored under the display symbol, which since #79 is the
+        // primary listing. They are usually the same now — usually is not always.
+        const toDisplay = new Map(plan.symbols.map((s) => [s.fetchSymbol.toUpperCase(), s.symbol]))
+        const priceRows: { symbol: string; date: string; close: number }[] = []
+        for (const r of rows) {
+          const parsed = barFrom(r, plan.symbols[0].fetchSymbol)
+          if (!parsed) continue
+          const display = toDisplay.get(parsed.symbol.toUpperCase())
+          if (!display || parsed.bar.date < cutoff) continue
+          priceRows.push({ symbol: display, date: parsed.bar.date, close: parsed.bar.close })
+        }
+
+        if (priceRows.length === 0) {
+          // The provider answered and had nothing for these. Negative-cache so they stop being
+          // re-asked — but only when the batch itself did not fail, or a rate limit would mark the
+          // whole universe unpriceable (the 1,369 mistake).
+          const ids = plan.symbols
+            .map((s) => bySymbolId.get(s.symbol))
+            .filter((id): id is string => !!id)
+          if (ids.length > 0) {
+            const { error } = await market
+              .from('security')
+              .update({ prices_missing_at: new Date().toISOString() })
+              .in('security_id', ids)
+            if (error) throw new Error(`prices_missing_at update failed: ${error.message}`)
+          }
+          emptySeries += plan.symbols.length
+          continue
+        }
+
+        for (let i = 0; i < priceRows.length; i += 500) {
+          const { error } = await market
+            .from('prices')
+            .upsert(dedupeBy(priceRows.slice(i, i + 500), (r) => `${r.symbol}|${r.date}`),
+              { onConflict: 'symbol,date' })
+          if (error) throw new Error(`prices upsert failed: ${error.message}`)
+        }
+        written += priceRows.length
+
+        // Keep the window bounded. Without this the table grows forever and the "~400 bars per
+        // security" sizing that justified storing this at all stops being true.
+        const touched = [...new Set(priceRows.map((r) => r.symbol))]
+        for (let i = 0; i < touched.length; i += 100) {
+          const { error } = await market
+            .from('prices')
+            .delete()
+            .in('symbol', touched.slice(i, i + 100))
+            .lt('date', cutoff)
+          if (error) throw new Error(`price window prune failed: ${error.message}`)
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, emptySeries, batchesFailed, lastError,
+        plans: plans.length, remaining: wanted.length,
       })
     }
 

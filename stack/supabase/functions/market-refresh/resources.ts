@@ -952,3 +952,52 @@ export async function loadProfiles(
   }
   return out
 }
+
+/**
+ * Group a price backlog into batches that can share ONE `start_date`.
+ *
+ * The provider takes a single `start_date` per request, so a batch is only as cheap as its
+ * furthest-behind member: mixing a security we have never priced (needs 400 days) with one that is
+ * a day stale (needs 1) makes the whole batch fetch 400. Grouping by how far back each needs keeps
+ * the daily case a daily fetch, which is the entire point of storing the series.
+ *
+ * Two buckets, not per-symbol precision: `full` for anything with no history or a gap wider than
+ * the window, `incremental` for the rest, whose start is the OLDEST last-date in the batch. A
+ * security a few days fresher than its batch-mate over-fetches by those few days and the upsert
+ * discards the overlap — cheaper than one request per symbol against a rate-limited provider.
+ */
+export function planPriceFetches(
+  rows: { symbol: string; fetchSymbol: string; lastDate: string | null }[],
+  now: Date,
+  batchSize: number,
+  windowDays = PRICE_WINDOW_DAYS,
+): { symbols: { symbol: string; fetchSymbol: string }[]; startDate: string }[] {
+  const windowStart = daysBefore(now, windowDays)
+  const full: typeof rows = []
+  const incremental: typeof rows = []
+  for (const r of rows) {
+    // A gap wider than the window cannot be closed by appending — refetch the whole thing.
+    if (!r.lastDate || r.lastDate < windowStart) full.push(r)
+    else incremental.push(r)
+  }
+  const out: { symbols: { symbol: string; fetchSymbol: string }[]; startDate: string }[] = []
+
+  for (let i = 0; i < full.length; i += batchSize) {
+    out.push({
+      symbols: full.slice(i, i + batchSize).map((r) => ({ symbol: r.symbol, fetchSymbol: r.fetchSymbol })),
+      startDate: windowStart,
+    })
+  }
+  // Oldest first, so a batch's shared start date is as recent as its members allow.
+  incremental.sort((a, b) => (a.lastDate ?? '').localeCompare(b.lastDate ?? ''))
+  for (let i = 0; i < incremental.length; i += batchSize) {
+    const chunk = incremental.slice(i, i + batchSize)
+    out.push({
+      symbols: chunk.map((r) => ({ symbol: r.symbol, fetchSymbol: r.fetchSymbol })),
+      // The oldest member's last date. Not +1 day: the provider's range is inclusive and re-reading
+      // one known bar is how a revised close (a late correction) actually reaches us.
+      startDate: chunk[0].lastDate as string,
+    })
+  }
+  return out
+}

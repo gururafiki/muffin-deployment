@@ -17,6 +17,7 @@ import {
   returnsFor,
   symbolList,
   toPercent,
+  planPriceFetches,
   type Bar,
 } from './resources.ts'
 import { pickHomeListing } from './yahoo.ts'
@@ -316,6 +317,38 @@ console.log('\nresource registry — the cron and the function agree')
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',
     unreachable.length ? `unreachable: ${unreachable.join(', ')}` : '')
+}
+
+// ── incremental price fetching ───────────────────────────────────────────────
+// The provider takes ONE start_date per request, so a batch costs whatever its furthest-behind
+// member needs. Mixing a never-priced security with a day-stale one makes the whole batch fetch 400
+// days — which would defeat the point of storing the series at all.
+console.log('\nplanPriceFetches — a daily refresh should ask for a day')
+{
+  const now = new Date('2026-08-12T00:00:00Z')
+  const plans = planPriceFetches([
+    { symbol: 'NEW1', fetchSymbol: 'NEW1', lastDate: null },
+    { symbol: 'FRESH', fetchSymbol: 'FRESH.ST', lastDate: '2026-08-11' },
+    { symbol: 'STALE', fetchSymbol: 'STALE', lastDate: '2026-08-01' },
+  ], now, 10)
+  const fullPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'NEW1'))
+  const incPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'FRESH'))
+  check(fullPlan?.startDate.startsWith('2025-'), 'a never-priced security gets the full window',
+    fullPlan?.startDate)
+  check(incPlan !== undefined && incPlan !== fullPlan,
+    'it does NOT drag the incremental ones into a 400-day fetch')
+  check(incPlan?.startDate === '2026-08-01',
+    'an incremental batch starts at its OLDEST member, not the newest', incPlan?.startDate)
+  check(incPlan?.symbols.find((s) => s.symbol === 'FRESH')?.fetchSymbol === 'FRESH.ST',
+    'the FETCH symbol is carried separately from the display symbol')
+
+  // A gap wider than the window cannot be closed by appending.
+  const ancient = planPriceFetches(
+    [{ symbol: 'OLD', fetchSymbol: 'OLD', lastDate: '2019-01-01' }], now, 10)
+  check(ancient[0].startDate.startsWith('2025-'),
+    'a gap wider than the window refetches the whole window rather than leaving a hole')
+
+  check(planPriceFetches([], now, 10).length === 0, 'an empty backlog plans nothing')
 }
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
