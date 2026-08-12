@@ -87,3 +87,29 @@ export function venuesFromRows(
   }
   return out;
 }
+
+/**
+ * Which venue does a provider symbol belong to? `005930.KS` -> `KS`, `AAPL` -> `US`.
+ *
+ * LONGEST SUFFIX FIRST, then preference. Two venues can share a suffix (Canada's CT and CN are both
+ * `.TO`, the UAE's DU and DH both `.AE`), and a shorter suffix can be the tail of a longer one — so
+ * matching in table order would resolve by whichever row came first, which is not a decision.
+ *
+ * Mirrors the SQL backfill in migration 38 deliberately: the same rule stated twice in two
+ * languages is a drift risk, so both are asserted — the SQL against fixtures in the migration test,
+ * this against `logic-check.ts`.
+ */
+export function venueForSymbol(symbol: string, venues: VenueMap): string | null {
+  const all: ExchangeChoice[] = [];
+  for (const list of Object.values(venues)) all.push(...list);
+  const suffixed = all
+    .filter((v) => v.suffix !== '')
+    .sort((a, b) => b.suffix.length - a.suffix.length);
+  const upper = symbol.toUpperCase();
+  for (const v of suffixed) {
+    if (upper.endsWith(v.suffix.toUpperCase())) return v.figi;
+  }
+  // No suffix at all is a US listing — the same reason the backfill handles it as a separate case
+  // rather than matching an empty suffix, which would match every symbol on every venue.
+  return symbol.includes('.') ? null : 'US';
+}

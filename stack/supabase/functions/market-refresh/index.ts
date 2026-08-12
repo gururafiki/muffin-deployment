@@ -25,7 +25,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
 import { listExchange, mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
-import { hasLocalExchange, venuesFromRows } from './exchanges.ts'
+import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
@@ -970,6 +970,39 @@ Deno.serve(async (req: Request) => {
           { onConflict: 'security_id,provider_code' },
         )
         if (psErr) throw new Error(`provider symbol upsert failed: ${psErr.message}`)
+
+        // KEEP EVERY VENUE THE SEARCH REVEALED, not just the one we priced on. The ISIN search
+        // returns the security's other listings — the ADR, the cross-listing — and until now they
+        // were discarded, which is exactly why "local line vs ADR" had no answer. `is_primary` is
+        // reserved for the home-market pick; a partial unique index enforces one per security.
+        const listings = hits
+          .filter((h) => !h.quoteType || h.quoteType === 'EQUITY')
+          .map((h) => ({ sym: (h.symbol ?? '').trim(), exch: venueForSymbol((h.symbol ?? '').trim(), venues) }))
+          .filter((h) => h.sym && h.exch)
+        const seenExch = new Set<string>()
+        const listingRows = []
+        for (const l of listings) {
+          // One row per venue: an ISIN search can return the same exchange twice (share classes).
+          if (seenExch.has(l.exch as string)) continue
+          seenExch.add(l.exch as string)
+          listingRows.push({
+            security_id: row.security_id,
+            exch_code: l.exch as string,
+            provider_symbol: l.sym,
+            is_primary: l.sym === symbol,
+            source_code: 'yfinance',
+            last_seen_at: new Date().toISOString(),
+          })
+        }
+        if (listingRows.length > 0) {
+          // NOT touching `is_primary` on conflict: the backfill and the home-market pick already
+          // decided it, and a later cross-listing must never quietly steal the primary flag.
+          const { error: lErr } = await market.from('listing').upsert(listingRows, {
+            onConflict: 'security_id,exch_code',
+            ignoreDuplicates: true,
+          })
+          if (lErr) throw new Error(`listing upsert failed: ${lErr.message}`)
+        }
 
         // A NEW SYMBOL INVALIDATES EVERY NEGATIVE CACHE. Those flags record "we asked and got
         // nothing" — but we asked under the WRONG NAME, so leaving them set would fix the spelling
