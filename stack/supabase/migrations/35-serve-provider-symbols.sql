@@ -31,6 +31,12 @@ drop view if exists market.sector_constituents;
 -- 40 has landed. `if exists` keeps it a no-op on a fresh database.
 drop view if exists market.instrument_current;
 drop view if exists market.security_current;
+-- Backlog views built on `security_symbol` by LATER migrations (39, 41). They must go before it or
+-- every re-run after those landed fails here. `if exists` keeps this a no-op on a fresh database.
+-- Each new view on `security_symbol` has to be added here — the coupling is the price of a
+-- migration set that re-runs in full on every deploy.
+drop view if exists market.pending_performance;
+drop view if exists market.pending_prices;
 drop view if exists market.security_symbol;
 
 -- ── the addressable symbol, in one place ─────────────────────────────────────
