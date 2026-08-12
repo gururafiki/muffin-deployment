@@ -97,6 +97,37 @@ export const toPercent = (v: unknown): number | null =>
 export const symbolList = (symbols: string[]): string =>
   symbols.map((s) => encodeURIComponent(s)).join(',')
 
+/**
+ * Last-wins dedupe on the CONFLICT KEY, for anything about to be `upsert`ed with `DO UPDATE`.
+ *
+ * Postgres refuses an `INSERT ... ON CONFLICT DO UPDATE` whose statement contains the same conflict
+ * key twice — `ON CONFLICT DO UPDATE command cannot affect row a second time` (SQLSTATE 21000). It
+ * is not a warning and not a partial write: the whole statement fails, which fails the batch, which
+ * fails the resource.
+ *
+ * MEASURED 2026-08-12, from the edge-runtime logs on the node:
+ *   [Error] market-refresh(security-industries) failed:
+ *           security_taxonomy upsert failed: ON CONFLICT DO UPDATE command cannot affect row a second time
+ *
+ * `pending_industry` yields one row per (security, level-1 sector), so a security classified into
+ * two sectors is returned TWICE, fetched twice, and produces two identical
+ * `(security_id, node_id, source_code)` writes. That is why the failure looked like it depended on
+ * page size — the duplicated securities only fall inside the larger slices, so `limit` 10 and 20
+ * succeeded while 40, 100 and 300 returned a bare 502.
+ *
+ * This is the THIRD time this shape has bitten: `ingest.ts` already dedupes fund holdings because
+ * one filing lists a position in several lots, and the sector views had to `distinct on` for the
+ * same reason. A provider list, a backlog view and a filing can all repeat a key; the upsert is
+ * where that stops being harmless.
+ *
+ * `ignoreDuplicates: true` (DO NOTHING) has no such restriction, so those call sites are safe.
+ */
+export function dedupeBy<T>(rows: T[], key: (row: T) => string): T[] {
+  const byKey = new Map<string, T>()
+  for (const row of rows) byKey.set(key(row), row)
+  return [...byKey.values()]
+}
+
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */
@@ -192,7 +223,7 @@ const PERIOD_DAYS: Record<string, number> = {
   '5y': 1826,
 }
 
-interface Bar {
+export interface Bar {
   date: string
   close: number
 }
@@ -219,7 +250,7 @@ interface Bar {
  * close, so the reported move is stale-but-true instead of fabricated. A security whose every bar
  * is zero yields a series shorter than 2 and is skipped, which is the honest answer: no data.
  */
-function barFrom(r: Record<string, unknown>, fallbackSymbol: string): { symbol: string; bar: Bar } | null {
+export function barFrom(r: Record<string, unknown>, fallbackSymbol: string): { symbol: string; bar: Bar } | null {
   const symbol = String(r.symbol ?? fallbackSymbol)
   const close = typeof r.close === 'number' ? r.close : Number(r.close)
   const date = String(r.date ?? '').slice(0, 10)
@@ -227,12 +258,48 @@ function barFrom(r: Record<string, unknown>, fallbackSymbol: string): { symbol: 
   return { symbol, bar: { date, close } }
 }
 
-/** Last bar at or before `iso`; null when the series does not reach back that far. */
-function closeAtOrBefore(series: Bar[], iso: string): number | null {
+/** Index of the last bar at or before `iso`; null when the series does not reach back that far. */
+function indexAtOrBefore(series: Bar[], iso: string): number | null {
   for (let i = series.length - 1; i >= 0; i--) {
-    if (series[i].date <= iso) return series[i].close
+    if (series[i].date <= iso) return i
   }
   return null
+}
+
+/**
+ * A single-bar move this large is a UNIT CHANGE or an unadjusted corporate action, not a market.
+ *
+ * Measured 2026-08-12 over all 40 securities with a 1y return >= +300%, by re-fetching each series
+ * from the provider and taking its largest one-day ratio. The two populations separate cleanly with
+ * nothing in between:
+ *
+ *   discontinuous (6)   AMRM.TA 96.6x   ISHO.TA 101.0x   ARZTF 30.3x
+ *                       PBMRF 28.7x     YZOFF 25.5x      KLTHF 6.0x
+ *   real (34)           ASAAF 2.04x  KXHCF 1.45x  009150.KS 1.30x  SNDK 1.28x  MU 1.19x
+ *
+ * So the largest legitimate move observed is 2.04x and the smallest illegitimate one 6.0x.
+ *
+ * AMRM.TA and ISHO.TA jump ~100x on THE SAME DAY (2026-05-18) and are both quoted in `ILA` — that
+ * is Yahoo switching Tel Aviv quotes from shekels to agorot, which no amount of care at our end
+ * would have made into a real +9,000% return. The USD names are OTC lines where a ratio change went
+ * unadjusted. A reverse split would look identical, and is equally not comparable across the break.
+ *
+ * Deliberately NOT a cap on the reported return: SNDK really is up 2,692% and MU 580%, and
+ * clipping those would be inventing a different wrong number. What is untrustworthy is a return
+ * MEASURED ACROSS the break, so that is exactly what gets dropped.
+ */
+const DISCONTINUITY_RATIO = 5
+
+/** Index of the bar immediately AFTER the most recent discontinuity, or 0 when there is none. */
+export function firstComparableIndex(series: Bar[]): number {
+  for (let i = series.length - 1; i >= 1; i--) {
+    const prev = series[i - 1].close
+    const cur = series[i].close
+    if (prev > 0 && cur > 0 && (cur / prev > DISCONTINUITY_RATIO || prev / cur > DISCONTINUITY_RATIO)) {
+      return i
+    }
+  }
+  return 0
 }
 
 const daysBefore = (now: Date, days: number) =>
@@ -249,23 +316,40 @@ export function returnsFor(series: Bar[], now: Date): Record<string, number> {
   const out: Record<string, number> = {}
   if (series.length < 2) return out
   const latest = series[series.length - 1].close
-  const pct = (from: number | null) =>
-    from === null || from === 0 ? null : Math.round((latest / from - 1) * 1_000_000) / 10_000
+  // DEFENCE IN DEPTH, and it earned that immediately: `barFrom` already drops non-positive closes
+  // at the parse, but this function is exported and computes the number, so the rule has to hold
+  // here too. Without it a zero latest close still yields -100% on EVERY period — which is the
+  // exact 1,078-row defect, reachable through any caller that builds a series another way.
+  // The same mistake in miniature as `check.ts` asserting `close > 0` somewhere the data never
+  // passed through.
+  if (!Number.isFinite(latest) || latest <= 0) return out
+
+  // Anything at or after this index is denominated the same way the latest bar is. A period whose
+  // anchor sits BEFORE it would be measured across a unit change or an unadjusted corporate action,
+  // so it is omitted rather than reported. Per-period, not per-symbol: after a break, the short
+  // windows are still perfectly good and only the long ones have to go.
+  const comparableFrom = firstComparableIndex(series)
+
+  const pctAt = (idx: number | null) => {
+    if (idx === null || idx < comparableFrom) return null
+    const from = series[idx].close
+    return from === 0 ? null : Math.round((latest / from - 1) * 1_000_000) / 10_000
+  }
 
   // 1d is the PREVIOUS BAR, not a date lookback — a weekend or holiday would
   // otherwise resolve "yesterday" to the same bar and report a flat 0.00%.
-  const prev = pct(series[series.length - 2].close)
+  const prev = pctAt(series.length - 2)
   if (prev !== null) out['1d'] = prev
 
   for (const [period, days] of Object.entries(PERIOD_DAYS)) {
-    const v = pct(closeAtOrBefore(series, daysBefore(now, days)))
+    const v = pctAt(indexAtOrBefore(series, daysBefore(now, days)))
     if (v !== null) out[period] = v
   }
 
   // YTD anchors on the last close of LAST year, so early January is measured from
   // the true year-end rather than from the first bar of the new year (which would
   // report ~0% for the first days of trading).
-  const ytd = pct(closeAtOrBefore(series, `${now.getUTCFullYear() - 1}-12-31`))
+  const ytd = pctAt(indexAtOrBefore(series, `${now.getUTCFullYear() - 1}-12-31`))
   if (ytd !== null) out['ytd'] = ytd
 
   return out

@@ -162,6 +162,25 @@ jobs:
           check_zero "instrument returns at exactly -100%" \
             "$(count 'performance?select=scope_id&scope=eq.instrument&change_pct=eq.-100')"
 
+          # 7d. IMPLAUSIBLE RETURNS ARE BOUNDED, not banned. A large return is not by itself wrong:
+          #     of the 40 securities returning >= +300% (measured 2026-08-12), 34 were real — SNDK
+          #     +2,692%, MU +580% — and only 6 were artifacts of a unit change or an unadjusted
+          #     corporate action. So this is a TRIPWIRE on the count, not an assertion that no
+          #     number may be large: `returnsFor` now drops any period spanning a >5x single-day
+          #     move, so the artifact population should stay near zero while the real one persists.
+          #     A jump here means either a new redenomination (Tel Aviv switched ILS->agorot on
+          #     2026-05-18 and took two securities to ~+9,000%) or that the break detection stopped
+          #     working. Both are worth a look; neither is an emergency.
+          extreme=$(count 'performance?select=scope_id&scope=eq.instrument&period=eq.1y&change_pct=gte.1000')
+          if [ -z "${extreme:-}" ]; then
+            echo "::error::extreme returns — could not read a count"; fail=1
+          elif [ "$extreme" -gt 25 ]; then
+            echo "::error::$extreme securities report a 1y return >= +1000% (was 19, of which 6 were unit changes now removed) — check for a new redenomination"
+            fail=1
+          else
+            echo "  ok   extreme 1y returns = $extreme (tripwire at 25)"
+          fi
+
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
           #    because OpenFIGI returns `exchCode` bare for some venues and labelled for others
           #    ("KS" vs "TT (Taiwan Stock Exchange)"), so an exact match resolved Korea and dropped
