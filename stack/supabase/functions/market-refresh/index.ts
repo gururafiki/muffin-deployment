@@ -43,6 +43,7 @@ import {
   BACKLOG_TTL_MINUTES,
   symbolList,
   dedupeBy,
+  fetchWithIsolation,
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
@@ -913,10 +914,36 @@ Deno.serve(async (req: Request) => {
         if (remaining < 3_000) break
         let rows: Record<string, unknown>[] = []
         try {
-          rows = await fetcher(
-            `/api/v1/equity/profile?symbol=${symbolList(batch.map((b) => b.symbol))}&provider=yfinance`,
+          // ISOLATE rather than lose the batch. The highest-weight page permanently contains
+          // Bloomberg spellings (`BRK/B`, `WALMEX*.MX`, `RR/.L`, `PE&OLES*.MX`) that 400 even once
+          // encoded, and because the backlog is ordered by fund weight that batch sat at the head
+          // of EVERY run — twenty securities re-failing forever, nineteen of them innocent.
+          const got = await fetchWithIsolation(
+            fetcher,
+            (syms) => `/api/v1/equity/profile?symbol=${symbolList(syms)}&provider=yfinance`,
+            batch.map((b) => b.symbol),
             Math.min(15_000, remaining),
+            deadline,
           )
+          rows = got.rows
+          if (got.error) {
+            batchesFailed++
+            lastError = got.error
+          }
+          // A symbol the provider refuses ON ITS OWN is genuinely unanswerable, so stop asking.
+          // `industry_missing_at` was never reached for these: it is only written when a batch
+          // comes back EMPTY, and a 400 is not empty.
+          if (got.dead.length > 0) {
+            const deadIds = batch
+              .filter((b) => got.dead.includes(b.symbol))
+              .map((b) => b.securityId)
+            const { error } = await market
+              .from('security')
+              .update({ industry_missing_at: new Date().toISOString() })
+              .in('security_id', deadIds)
+            if (error) throw new Error(`industry_missing_at update failed: ${error.message}`)
+            noIndustry += deadIds.length
+          }
         } catch (e) {
           batchesFailed++
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)

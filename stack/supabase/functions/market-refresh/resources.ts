@@ -128,6 +128,58 @@ export function dedupeBy<T>(rows: T[], key: (row: T) => string): T[] {
   return [...byKey.values()]
 }
 
+/**
+ * Fetch a batch; if the batch fails, ISOLATE the symbols that broke it instead of losing all of it.
+ *
+ * "One dead symbol kills a batched provider call" is the most repeated failure in this pipeline —
+ * `group-performance` on FM (liquidated 2025), `security-profiles` on foreign listings, and now
+ * `security-industries`, whose highest-weight page permanently contains `BRK/B`, `WALMEX*.MX`,
+ * `RR/.L` and `PE&OLES*.MX`. Those are Bloomberg spellings from OpenFIGI; encoding them made the
+ * URL well-formed and the provider still answers 400:
+ *
+ *   openbb 400 on /api/v1/equity/profile?symbol=NDA.HE,...,BRK%2FB,...,PE%26OLES*.MX
+ *
+ * Because the backlog is ordered by fund weight and those names are heavy, that batch sits at the
+ * head of EVERY run — so twenty securities were re-fetched and re-failed forever, and the nineteen
+ * innocent ones never got a chance. `industry_missing_at` could not save them either: it is only
+ * written when a batch comes back EMPTY, and a 400 is not empty.
+ *
+ * The provider knows which symbol is bad, so ask it rather than guessing from the spelling. The
+ * retry only happens on failure, so a healthy run pays nothing, and it is bounded by the caller's
+ * deadline — an isolation pass must never be the thing that kills the worker.
+ *
+ * Returns the rows that DID answer plus the symbols that individually failed, so the caller can
+ * negative-cache exactly those and stop asking.
+ */
+export async function fetchWithIsolation(
+  fetcher: Fetcher,
+  buildPath: (symbols: string[]) => string,
+  symbols: string[],
+  timeoutMs: number,
+  deadline: number,
+): Promise<{ rows: Record<string, unknown>[]; dead: string[]; error: string | null }> {
+  try {
+    return { rows: await fetcher(buildPath(symbols), timeoutMs), dead: [], error: null }
+  } catch (e) {
+    const error = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+    // A single symbol that fails alone is genuinely bad; one that succeeds alone was collateral.
+    const rows: Record<string, unknown>[] = []
+    const dead: string[] = []
+    for (const symbol of symbols) {
+      const remaining = deadline - Date.now()
+      // Out of budget: the untried symbols are NOT marked dead. Recording them as unanswerable
+      // because we ran out of time would be the negative-cache equivalent of blaming the victim.
+      if (remaining < 2_000) break
+      try {
+        rows.push(...(await fetcher(buildPath([symbol]), Math.min(timeoutMs, remaining))))
+      } catch {
+        dead.push(symbol)
+      }
+    }
+    return { rows, dead, error }
+  }
+}
+
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */
