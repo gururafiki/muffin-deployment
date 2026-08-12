@@ -18,7 +18,7 @@
 // Amplified by batching: 2.6% bad symbols poisoned 28% of 20-symbol batches on the real ordering,
 // and it worsens as a backlog drains and the unanswerable ones concentrate.
 
-import { LOCAL_EXCHANGES } from './exchanges.ts'
+import type { VenueMap } from './exchanges.ts'
 
 export interface YahooHit {
   symbol: string
@@ -31,8 +31,8 @@ export interface YahooHit {
  * The suffixes a security in `iso2` may legitimately carry, derived from the venue table that
  * already drives symbol construction rather than from a second, drifting copy.
  */
-export function allowedSuffixes(iso2: string): string[] {
-  const venues = LOCAL_EXCHANGES[iso2]
+export function allowedSuffixes(iso2: string, venueMap: VenueMap): string[] {
+  const venues = venueMap[iso2]
   if (!venues) return []
   return [...new Set(venues.map((v) => v.suffix))]
 }
@@ -56,8 +56,8 @@ export function allowedSuffixes(iso2: string): string[] {
  * a Korean bank off its Frankfurt line"). A wrong symbol is worse than no symbol: it yields a
  * plausible series that is quietly about a different listing.
  */
-export function pickHomeListing(hits: YahooHit[], iso2: string): string | null {
-  const suffixes = allowedSuffixes(iso2)
+export function pickHomeListing(hits: YahooHit[], iso2: string, venueMap: VenueMap): string | null {
+  const suffixes = allowedSuffixes(iso2, venueMap)
   if (suffixes.length === 0) return null
   for (const hit of hits) {
     // Equities only. An ISIN search readily returns ETFs, warrants and futures written on the name.

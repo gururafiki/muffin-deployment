@@ -20,6 +20,7 @@ import {
   type Bar,
 } from './resources.ts'
 import { pickHomeListing } from './yahoo.ts'
+import { venuesFromRows, hasLocalExchange, pickLocalSymbol } from './exchanges.ts'
 
 let failures = 0
 const check = (ok: boolean, label: string, detail = '') => {
@@ -223,26 +224,46 @@ console.log('\nfetchWithIsolation — a bad symbol costs only itself')
 // Yahoo's ISIN index is inconsistent: Televisa's returns the local TLEVISACPO.MX, Walmex's returns
 // ONLY a Frankfurt line. Taking the first hit would price a Mexican retailer off a thin,
 // differently-denominated German listing — the mistake `exchanges.ts` exists to prevent.
+const VENUES = venuesFromRows([
+  { exch_code: 'US', country_iso2: 'US', suffix: '' },
+  { exch_code: 'MM', country_iso2: 'MX', suffix: '.MX' },
+  { exch_code: 'LN', country_iso2: 'GB', suffix: '.L' },
+  { exch_code: 'HK', country_iso2: 'HK', suffix: '.HK' },
+  { exch_code: 'KS', country_iso2: 'KR', suffix: '.KS' },
+  { exch_code: 'KQ', country_iso2: 'KR', suffix: '.KQ' },
+])
+
+console.log('\nvenuesFromRows — the catalog shape')
+check(VENUES.KR?.length === 2, 'a country can have several venues', `${VENUES.KR?.length}`)
+check(VENUES.KR?.[0].figi === 'KS', 'row order is preserved, so `preference` decides the primary board')
+check(VENUES.US?.[0].suffix === '', 'the US suffix is an empty string, not absent')
+check(venuesFromRows([{ exch_code: 'XX', country_iso2: null, suffix: '.XX' }]).XX === undefined,
+  'a venue with no country is skipped rather than keyed on null')
+check(hasLocalExchange('KR', VENUES) && !hasLocalExchange('US', VENUES),
+  'US is not a LOCAL exchange — it is the fallback the whole mechanism exists to avoid')
+check(pickLocalSymbol('KR', [{ ticker: '000660', exchCode: 'KQ' }, { ticker: '005930', exchCode: 'KS' }], VENUES)?.symbol === '005930.KS',
+  'the preferred board wins even when the other is listed first')
+
 console.log('\npickHomeListing — the home market or nothing')
-check(pickHomeListing([{ symbol: 'TLEVISACPO.MX', quoteType: 'EQUITY' }], 'MX') === 'TLEVISACPO.MX',
+check(pickHomeListing([{ symbol: 'TLEVISACPO.MX', quoteType: 'EQUITY' }], 'MX', VENUES) === 'TLEVISACPO.MX',
   'the local listing is accepted')
-check(pickHomeListing([{ symbol: '4GNB.F', quoteType: 'EQUITY' }], 'MX') === null,
+check(pickHomeListing([{ symbol: '4GNB.F', quoteType: 'EQUITY' }], 'MX', VENUES) === null,
   'a FOREIGN cross-listing is refused, not taken as a fallback')
 check(pickHomeListing(
-  [{ symbol: '4GNB.F', quoteType: 'EQUITY' }, { symbol: 'WALMEX.MX', quoteType: 'EQUITY' }], 'MX',
+  [{ symbol: '4GNB.F', quoteType: 'EQUITY' }, { symbol: 'WALMEX.MX', quoteType: 'EQUITY' }], 'MX', VENUES,
 ) === 'WALMEX.MX', 'the home listing wins even when a foreign one comes first')
-check(pickHomeListing([{ symbol: 'BRK-B', quoteType: 'EQUITY' }], 'US') === 'BRK-B',
+check(pickHomeListing([{ symbol: 'BRK-B', quoteType: 'EQUITY' }], 'US', VENUES) === 'BRK-B',
   'a US symbol has no suffix at all')
-check(pickHomeListing([{ symbol: 'BRK-B.MX', quoteType: 'EQUITY' }], 'US') === null,
+check(pickHomeListing([{ symbol: 'BRK-B.MX', quoteType: 'EQUITY' }], 'US', VENUES) === null,
   'and a suffixed symbol is therefore NOT a US listing')
-check(pickHomeListing([{ symbol: 'RR.L', quoteType: 'EQUITY' }], 'GB') === 'RR.L',
+check(pickHomeListing([{ symbol: 'RR.L', quoteType: 'EQUITY' }], 'GB', VENUES) === 'RR.L',
   'the UK suffix is accepted')
-check(pickHomeListing([{ symbol: 'BRKW', quoteType: 'ETF' }], 'US') === null,
+check(pickHomeListing([{ symbol: 'BRKW', quoteType: 'ETF' }], 'US', VENUES) === null,
   'an ETF written on the name is refused — q=BRK/B returns four of them')
-check(pickHomeListing([{ symbol: '0006.HK', quoteType: 'EQUITY' }], 'HK') === '0006.HK',
+check(pickHomeListing([{ symbol: '0006.HK', quoteType: 'EQUITY' }], 'HK', VENUES) === '0006.HK',
   'Hong Kong four-digit padding survives the suffix match')
-check(pickHomeListing([], 'GB') === null, 'no hits means no symbol')
-check(pickHomeListing([{ symbol: 'AAA.XX', quoteType: 'EQUITY' }], 'ZZ') === null,
+check(pickHomeListing([], 'GB', VENUES) === null, 'no hits means no symbol')
+check(pickHomeListing([{ symbol: 'AAA.XX', quoteType: 'EQUITY' }], 'ZZ', VENUES) === null,
   'a country with no known venue resolves to nothing rather than guessing')
 
 // ── every resource the cron calls must be one the function ACCEPTS ───────────

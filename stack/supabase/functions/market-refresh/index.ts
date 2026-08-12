@@ -25,7 +25,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
 import { listExchange, mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
-import { hasLocalExchange } from './exchanges.ts'
+import { hasLocalExchange, venuesFromRows } from './exchanges.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
@@ -212,6 +212,18 @@ Deno.serve(async (req: Request) => {
   })
   if (claimError) return json({ error: `claim failed: ${claimError.message}` }, 500)
   if (claimed !== true) return json({ resource, skipped: true, reason: 'fresh or in flight' })
+
+  // The venue catalog, read ONCE per request after the claim (so a skipped request costs nothing)
+  // and passed down to every consumer. `market.exchange` is the single source of truth for
+  // exchange code -> country -> provider suffix; it used to be a hardcoded map here AND a second
+  // copy in `exchange_cursor`, which had drifted to 54 rows against 38.
+  const { data: venueRows, error: venueErr } = await market
+    .from('exchange')
+    .select('exch_code,country_iso2,suffix')
+    .eq('enabled', true)
+    .order('preference')
+  if (venueErr) return json({ error: `exchange catalog read failed: ${venueErr.message}` }, 500)
+  const venues = venuesFromRows(venueRows ?? [])
 
   const fetcher = openbbFetcher(OPENBB_URL)
   // `price_symbol` is the symbol the provider knows when it differs from the
@@ -824,7 +836,7 @@ Deno.serve(async (req: Request) => {
       }
       // Only countries we know how to address; the rest would resolve to a symbol yfinance does
       // not recognise, which yields an empty series that looks like an outage.
-      const addressable = wanted.filter((w) => hasLocalExchange(w.countryIso2))
+      const addressable = wanted.filter((w) => hasLocalExchange(w.countryIso2, venues))
       if (addressable.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
         return json({ resource, resolved: 0, remaining: 0, note: 'no addressable securities pending' })
@@ -832,6 +844,7 @@ Deno.serve(async (req: Request) => {
 
       const { resolvedCount, requestsUsed, unresolved } = await mapIsinsToLocalSymbols(addressable, {
         apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
+        venues,
         onBatch: async (found, missed) => {
           if (found.length > 0) {
             const { error } = await market.from('security_provider_symbol').upsert(
@@ -930,7 +943,7 @@ Deno.serve(async (req: Request) => {
           continue
         }
 
-        const symbol = pickHomeListing(hits, String(row.country_iso2))
+        const symbol = pickHomeListing(hits, String(row.country_iso2), venues)
         if (!symbol) {
           // Answered, and nothing on this security's home market. That IS about the security.
           const { error } = await market
