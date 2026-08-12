@@ -488,7 +488,20 @@ Deno.serve(async (req: Request) => {
           )
           rows = got.rows
           deadSymbols = got.dead
-          if (got.error) { batchesFailed++; lastError = got.error }
+          if (got.error) {
+            batchesFailed++
+            lastError = got.error
+            // THE BATCH FAILED — that is not the same as the provider having nothing to say. With
+            // nothing returned and nothing individually blamed, `fetchWithIsolation` has already
+            // judged this an outage, and falling through to the empty-answer branch below would
+            // negative-cache the whole page on the strength of a failed request.
+            //
+            // Measured 2026-08-12, immediately after shipping the isolation fix: `written: 0,
+            // missing: 600` — 600 securities marked unanswerable for 30 days because every batch
+            // 400'd. Same defect as the morning's 1,369, in a new place, introduced by the fix for
+            // the old one. `got.dead` was correctly empty; this path ignored that and marked anyway.
+            if (rows.length === 0 && deadSymbols.length === 0) continue
+          }
         } catch (e) {
           // The reason was being DISCARDED here, which is why this took four wrong guesses to
           // narrow: the log only ever said "returned nothing for all N batches", and the same
