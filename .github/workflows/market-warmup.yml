@@ -60,6 +60,11 @@ jobs:
           if [ -n "${ONLY:-}" ]; then
             RESOURCES="$ONLY"
           else
+            # security-yahoo-symbols runs BEFORE the resources that consume symbols, because a
+            # symbol it resolves clears that security's negative caches — so the profile, industry
+            # and performance passes later in this same sweep pick it up immediately instead of
+            # waiting a day. It is incremental and rate-limited (one un-batchable call per
+            # security), so it is bounded by wall clock and does a slice per run.
             # security-tickers is INCREMENTAL: OpenFIGI's anonymous limit means each run
             # resolves ~150 of the backlog, most-visible-first, so it belongs on every pass
             # rather than a slow schedule. fund-holdings has a 7-day TTL and self-skips, so
@@ -74,6 +79,7 @@ jobs:
               instrument-prices \
               security-local-symbols \
               security-tickers \
+              security-yahoo-symbols \
               security-profiles \
               security-industries \
               security-fundamentals \

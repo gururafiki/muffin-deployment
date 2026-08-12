@@ -19,6 +19,7 @@ import {
   toPercent,
   type Bar,
 } from './resources.ts'
+import { pickHomeListing } from './yahoo.ts'
 
 let failures = 0
 const check = (ok: boolean, label: string, detail = '') => {
@@ -217,6 +218,32 @@ console.log('\nfetchWithIsolation — a bad symbol costs only itself')
   )
   check(expired.dead.length === 0, 'a blown deadline blames nobody', JSON.stringify(expired.dead))
 }
+
+// ── an ISIN hit must be on the security's HOME market ────────────────────────
+// Yahoo's ISIN index is inconsistent: Televisa's returns the local TLEVISACPO.MX, Walmex's returns
+// ONLY a Frankfurt line. Taking the first hit would price a Mexican retailer off a thin,
+// differently-denominated German listing — the mistake `exchanges.ts` exists to prevent.
+console.log('\npickHomeListing — the home market or nothing')
+check(pickHomeListing([{ symbol: 'TLEVISACPO.MX', quoteType: 'EQUITY' }], 'MX') === 'TLEVISACPO.MX',
+  'the local listing is accepted')
+check(pickHomeListing([{ symbol: '4GNB.F', quoteType: 'EQUITY' }], 'MX') === null,
+  'a FOREIGN cross-listing is refused, not taken as a fallback')
+check(pickHomeListing(
+  [{ symbol: '4GNB.F', quoteType: 'EQUITY' }, { symbol: 'WALMEX.MX', quoteType: 'EQUITY' }], 'MX',
+) === 'WALMEX.MX', 'the home listing wins even when a foreign one comes first')
+check(pickHomeListing([{ symbol: 'BRK-B', quoteType: 'EQUITY' }], 'US') === 'BRK-B',
+  'a US symbol has no suffix at all')
+check(pickHomeListing([{ symbol: 'BRK-B.MX', quoteType: 'EQUITY' }], 'US') === null,
+  'and a suffixed symbol is therefore NOT a US listing')
+check(pickHomeListing([{ symbol: 'RR.L', quoteType: 'EQUITY' }], 'GB') === 'RR.L',
+  'the UK suffix is accepted')
+check(pickHomeListing([{ symbol: 'BRKW', quoteType: 'ETF' }], 'US') === null,
+  'an ETF written on the name is refused — q=BRK/B returns four of them')
+check(pickHomeListing([{ symbol: '0006.HK', quoteType: 'EQUITY' }], 'HK') === '0006.HK',
+  'Hong Kong four-digit padding survives the suffix match')
+check(pickHomeListing([], 'GB') === null, 'no hits means no symbol')
+check(pickHomeListing([{ symbol: 'AAA.XX', quoteType: 'EQUITY' }], 'ZZ') === null,
+  'a country with no known venue resolves to nothing rather than guessing')
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
