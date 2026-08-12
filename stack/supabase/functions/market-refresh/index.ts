@@ -514,9 +514,36 @@ Deno.serve(async (req: Request) => {
           // The metrics response names the currency and the statement endpoints do not, so this is
           // where a security learns what its figures are denominated in. Without it a KRW income
           // statement renders with a dollar sign.
+          //
+          // LEARN THE CURRENCY BEFORE REFERENCING IT. `security.currency_code` is a foreign key to
+          // `market.currency`, so a code that table has never seen does not fail one row — it fails
+          // the statement, and this handler turns that into a failed resource:
+          //   currency_code update failed: insert or update on table "security" violates foreign
+          //   key constraint "security_currency_code_fkey"
+          // Caught in production 2026-08-12, minutes after symbol resolution began reaching Saudi,
+          // Malaysian and Chilean listings and therefore currencies the filings had never carried.
+          //
+          // `ingest.ts` already does exactly this for N-PORT ("Lookup values are DISCOVERED from
+          // filings, not seeded... an unseen currency would fail the whole insert"). It is the same
+          // rule, at a call site it had not reached — the third time today that a rule living in
+          // one place failed to hold in another.
+          const seen = [...new Set(
+            writes
+              .map((w) => (w.raw as Record<string, unknown> | undefined)?.currency)
+              .filter((c): c is string => typeof c === 'string' && /^[A-Za-z]{3}$/.test(c))
+              .map((c) => c.toUpperCase()),
+          )]
+          if (seen.length > 0) {
+            const { error: curErr } = await market
+              .from('currency')
+              .upsert(seen.map((code) => ({ code })), { onConflict: 'code', ignoreDuplicates: true })
+            if (curErr) throw new Error(`currency learn failed: ${curErr.message}`)
+          }
+
           for (const w of writes) {
-            const cur = (w.raw as Record<string, unknown> | undefined)?.currency
-            if (typeof cur !== 'string' || cur.length !== 3) continue
+            const raw = (w.raw as Record<string, unknown> | undefined)?.currency
+            if (typeof raw !== 'string' || !/^[A-Za-z]{3}$/.test(raw)) continue
+            const cur = raw.toUpperCase()
             const { error: cErr } = await market
               .from('security')
               .update({ currency_code: cur })
