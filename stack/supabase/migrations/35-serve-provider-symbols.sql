@@ -31,12 +31,32 @@ drop view if exists market.sector_constituents;
 -- 40 has landed. `if exists` keeps it a no-op on a fresh database.
 drop view if exists market.instrument_current;
 drop view if exists market.security_current;
--- Backlog views built on `security_symbol` by LATER migrations (39, 41). They must go before it or
--- every re-run after those landed fails here. `if exists` keeps this a no-op on a fresh database.
--- Each new view on `security_symbol` has to be added here — the coupling is the price of a
--- migration set that re-runs in full on every deploy.
-drop view if exists market.pending_performance;
-drop view if exists market.pending_prices;
+-- DROP WHATEVER DEPENDS ON `security_symbol`, DISCOVERED RATHER THAN LISTED.
+--
+-- A hand-maintained list was wrong three times in one afternoon: `pending_performance` (39),
+-- `instrument_current` (40) and `price_series` (42) each build on this view, and each broke every
+-- re-run until it was added here. The list can only ever be as current as the last person who
+-- remembered, and the failure is a deploy that dies on its SECOND pass — after the first has
+-- already succeeded.
+--
+-- `pg_depend` knows the answer, so ask it. Everything dropped here is recreated later in the same
+-- pass, which the three-pass migration test is what actually proves.
+do $$
+declare v record;
+begin
+  for v in
+    select distinct dv.relname as name
+    from pg_depend d
+    join pg_rewrite r  on r.oid = d.objid
+    join pg_class dv   on dv.oid = r.ev_class
+    join pg_class src  on src.oid = d.refobjid
+    join pg_namespace n on n.oid = src.relnamespace
+    where n.nspname = 'market' and src.relname = 'security_symbol' and dv.relname <> 'security_symbol'
+  loop
+    execute format('drop view if exists market.%I cascade', v.name);
+  end loop;
+end $$;
+
 drop view if exists market.security_symbol;
 
 -- ── the addressable symbol, in one place ─────────────────────────────────────

@@ -959,14 +959,18 @@ Deno.serve(async (req: Request) => {
         // Map the provider's answer back onto OUR display symbol: it replies under the fetch symbol
         // (`HEXA-B.ST`), and the series is stored under the display symbol, which since #79 is the
         // primary listing. They are usually the same now — usually is not always.
-        const toDisplay = new Map(plan.symbols.map((s) => [s.fetchSymbol.toUpperCase(), s.symbol]))
-        const priceRows: { symbol: string; date: string; close: number }[] = []
+        // Keyed on SECURITY_ID, not on the symbol. `market.prices.symbol` is a foreign key to the
+        // curated instruments table, so a universe-wide write into it is refused — correctly. And a
+        // symbol is not a stable key: migration 39 changed the display symbol for 41% of non-US
+        // securities, and anything keyed on it needed re-keying by hand.
+        const toId = new Map(plan.symbols.map((s) => [s.fetchSymbol.toUpperCase(), bySymbolId.get(s.symbol)]))
+        const priceRows: { security_id: string; date: string; close: number }[] = []
         for (const r of rows) {
           const parsed = barFrom(r, plan.symbols[0].fetchSymbol)
           if (!parsed) continue
-          const display = toDisplay.get(parsed.symbol.toUpperCase())
-          if (!display || parsed.bar.date < cutoff) continue
-          priceRows.push({ symbol: display, date: parsed.bar.date, close: parsed.bar.close })
+          const id = toId.get(parsed.symbol.toUpperCase())
+          if (!id || parsed.bar.date < cutoff) continue
+          priceRows.push({ security_id: id, date: parsed.bar.date, close: parsed.bar.close })
         }
 
         if (priceRows.length === 0) {
@@ -989,21 +993,21 @@ Deno.serve(async (req: Request) => {
 
         for (let i = 0; i < priceRows.length; i += 500) {
           const { error } = await market
-            .from('prices')
-            .upsert(dedupeBy(priceRows.slice(i, i + 500), (r) => `${r.symbol}|${r.date}`),
-              { onConflict: 'symbol,date' })
-          if (error) throw new Error(`prices upsert failed: ${error.message}`)
+            .from('security_price')
+            .upsert(dedupeBy(priceRows.slice(i, i + 500), (r) => `${r.security_id}|${r.date}`),
+              { onConflict: 'security_id,date' })
+          if (error) throw new Error(`security_price upsert failed: ${error.message}`)
         }
         written += priceRows.length
 
         // Keep the window bounded. Without this the table grows forever and the "~400 bars per
         // security" sizing that justified storing this at all stops being true.
-        const touched = [...new Set(priceRows.map((r) => r.symbol))]
+        const touched = [...new Set(priceRows.map((r) => r.security_id))]
         for (let i = 0; i < touched.length; i += 100) {
           const { error } = await market
-            .from('prices')
+            .from('security_price')
             .delete()
-            .in('symbol', touched.slice(i, i + 100))
+            .in('security_id', touched.slice(i, i + 100))
             .lt('date', cutoff)
           if (error) throw new Error(`price window prune failed: ${error.message}`)
         }
