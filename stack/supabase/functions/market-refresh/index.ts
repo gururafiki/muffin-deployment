@@ -878,6 +878,55 @@ Deno.serve(async (req: Request) => {
         out.fundamentalsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
       }
 
+      // 4. STATEMENTS, because on demand is the only route that reaches them in a useful time.
+      //
+      // `security-statements` fetches ONE security at a time — three calls each, and the endpoints
+      // do not accept several symbols (measured: `symbolsAsked 50, symbolsAnswered 0`). At 60 a run
+      // and four cron passes a day, an 8,791-deep backlog is about five weeks. So the securities a
+      // person actually opens would be among the last to get statements, which is exactly backwards.
+      //
+      // This costs three requests on a button a person pressed, for the one security they are
+      // looking at. The backlog stays as the background sweep; this is what makes the wait
+      // irrelevant for anything anyone cares about.
+      try {
+        const stRows: Record<string, unknown>[] = []
+        for (const kind of ['income', 'balance', 'cash'] as const) {
+          const got = await fetcher(
+            `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(fetchSymbol)}` +
+              `&provider=yfinance&limit=4`,
+            12_000,
+          )
+          for (const r of got) {
+            const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
+            if (!period) continue
+            stRows.push({
+              security_id: securityId,
+              statement: kind,
+              period_ending: period,
+              period_type: r.fiscal_period ? String(r.fiscal_period) : null,
+              currency: r.reported_currency ? String(r.reported_currency) : null,
+              data: r,
+              source_code: 'yfinance',
+              as_of: new Date().toISOString(),
+            })
+          }
+        }
+        if (stRows.length === 0) out.statements = 'not covered'
+        else {
+          const { error } = await market.from('security_statement').upsert(
+            dedupeBy(stRows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}`),
+            { onConflict: 'security_id,statement,period_ending' },
+          )
+          if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
+          out.statements = `${stRows.length} rows`
+        }
+      } catch (e) {
+        // Deliberately NOT written to `statements_missing_at`. A failure on a button press says
+        // nothing about whether the provider has statements for this security, and marking here
+        // would exclude it from the backlog for 30 days on the strength of one bad request.
+        out.statementsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
+      }
+
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ ...out, refreshed: true })
     }
