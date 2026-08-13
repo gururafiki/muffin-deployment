@@ -200,6 +200,24 @@ jobs:
             echo "  ok   $health"
           fi
 
+          # 7f. NOTHING IS PERFECTLY FLAT. A delisted instrument keeps being served by the price
+          #     provider — the same final bars forever — so every period is measured between two
+          #     identical closes and comes back as exactly +0.0%. That reads as "the market was
+          #     flat", not "this fund is dead". Measured 2026-08-13: Egypt, Nigeria and Portugal
+          #     each showed +0.0% on all nine periods, dated that day, from ETFs whose last SEC
+          #     filing was 2022, 2023 and 2024.
+          #     A real 0.00% over a year is vanishingly unlikely; over 1d it is merely rare, so this
+          #     counts the LONG periods only.
+          flat=$(count 'performance?select=scope_id&period=in.(1y,6m,3m)&change_pct=eq.0')
+          if [ -z "${flat:-}" ]; then
+            echo "::error::flat-return check — could not read a count"; fail=1
+          elif [ "$flat" -gt 5 ]; then
+            echo "::error::$flat returns are exactly 0.00% over 3m/6m/1y — a delisted instrument is being priced off its final bars"
+            fail=1
+          else
+            echo "  ok   exactly-flat long returns = $flat (tripwire at 5)"
+          fi
+
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
           #    because OpenFIGI returns `exchCode` bare for some venues and labelled for others
           #    ("KS" vs "TT (Taiwan Stock Exchange)"), so an exact match resolved Korea and dropped

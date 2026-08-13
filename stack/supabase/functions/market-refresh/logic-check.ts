@@ -130,6 +130,31 @@ console.log('\nreturnsFor — anchors')
 // ── symbols are not URL-safe ─────────────────────────────────────────────────
 // Shipped: `BRK/B` 400s and takes its whole batch of 20 with it; `PE&OLES*.MX` unencoded ENDS the
 // symbol parameter and silently truncates the request, which still returns 200.
+// ── a dead instrument must not report a live return ──────────────────────────
+// Shipped: Egypt, Nigeria and Portugal each showed +0.0% on EVERY period, dated today, from ETFs
+// that stopped trading years ago. The provider keeps serving the final bars, so each period is
+// measured between two identical closes.
+console.log('\nreturnsFor — a stale series reports nothing, not zero')
+{
+  const now = new Date('2026-08-13T00:00:00Z')
+  const dead: Bar[] = [
+    { date: '2024-03-28', close: 12.5 },
+    { date: '2024-04-01', close: 12.5 },
+  ]
+  check(Object.keys(returnsFor(dead, now)).length === 0,
+    'a series that ends years ago yields NO periods', JSON.stringify(returnsFor(dead, now)))
+  check(!Object.values(returnsFor(dead, now)).includes(0),
+    'and specifically never the +0.0% that reads as "the market was flat"')
+
+  // The boundary: a long weekend plus holidays is legitimate and must still report.
+  const stale = [
+    { date: '2026-08-01', close: 100 },
+    { date: '2026-08-06', close: 110 },
+  ]
+  check(Object.keys(returnsFor(stale, now)).length > 0,
+    'a 7-day gap still reports — markets close for holidays', JSON.stringify(returnsFor(stale, now)))
+}
+
 console.log('\nsymbolList — real tickers are not URL-safe')
 check(symbolList(['AAPL', 'MSFT']) === 'AAPL,MSFT', 'ordinary symbols are untouched')
 check(symbolList(['BRK/B']) === 'BRK%2FB', 'a slash is encoded (it 400s the whole batch raw)')

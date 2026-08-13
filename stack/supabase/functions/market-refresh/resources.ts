@@ -386,6 +386,23 @@ const daysBefore = (now: Date, days: number) =>
 export function returnsFor(series: Bar[], now: Date): Record<string, number> {
   const out: Record<string, number> = {}
   if (series.length < 2) return out
+
+  // A STALE SERIES CANNOT PRODUCE A CURRENT RETURN. When an instrument stops trading the provider
+  // keeps serving its final bars, so every period is measured between two identical closes and
+  // comes back as exactly +0.0% — which reads as "the market was flat", not "this fund is dead".
+  //
+  // Measured 2026-08-13: Egypt, Nigeria and Portugal each showed +0.0% on ALL periods, dated today,
+  // computed from EGPT / NGE / PGAL — ETFs whose last SEC filing was 2022, 2023 and 2024 and which
+  // have no bars in the last month. Colombia (GXG) still trades and its +42.5% is real, which is
+  // why this keys on the DATA being stale rather than on a list of dead tickers.
+  //
+  // Ten days, not two: a long weekend plus a public holiday either side is a legitimate gap, and
+  // several of these markets close for multi-day festivals. Anything still trading has a bar inside
+  // ten calendar days.
+  const latestDate = series[series.length - 1].date
+  const freshEnough = daysBefore(now, 10)
+  if (latestDate < freshEnough) return out
+
   const latest = series[series.length - 1].close
   // DEFENCE IN DEPTH, and it earned that immediately: `barFrom` already drops non-positive closes
   // at the parse, but this function is exported and computes the number, so the rule has to hold
