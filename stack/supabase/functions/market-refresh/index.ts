@@ -1192,13 +1192,35 @@ Deno.serve(async (req: Request) => {
           })
         }
         if (listingRows.length > 0) {
-          // NOT touching `is_primary` on conflict: the backfill and the home-market pick already
-          // decided it, and a later cross-listing must never quietly steal the primary flag.
-          const { error: lErr } = await market.from('listing').upsert(listingRows, {
-            onConflict: 'security_id,exch_code',
-            ignoreDuplicates: true,
-          })
+          // INSERTED NON-PRIMARY, then promoted separately. `onConflict: 'security_id,exch_code'`
+          // names the PRIMARY KEY, so `ignoreDuplicates` does nothing for the PARTIAL UNIQUE INDEX
+          // `listing_one_primary_idx` — and a security that already has a primary on one exchange
+          // fails the whole statement when a second is inserted for another:
+          //
+          //   listing upsert failed: duplicate key value violates unique constraint
+          //   "listing_one_primary_idx"
+          //
+          // Caught in production 2026-08-13 by the ingestion watch.
+          const { error: lErr } = await market.from('listing').upsert(
+            listingRows.map((r) => ({ ...r, is_primary: false })),
+            { onConflict: 'security_id,exch_code', ignoreDuplicates: true },
+          )
           if (lErr) throw new Error(`listing upsert failed: ${lErr.message}`)
+
+          // Promote the home-market pick: demote first so exactly one row can hold the flag. Two
+          // statements rather than one because the index is what enforces the invariant, and an
+          // upsert cannot express "move this flag".
+          const chosen = listingRows.find((r) => r.provider_symbol === symbol)
+          if (chosen) {
+            const { error: dErr } = await market.from('listing')
+              .update({ is_primary: false })
+              .eq('security_id', row.security_id).eq('is_primary', true)
+            if (dErr) throw new Error(`demote primary failed: ${dErr.message}`)
+            const { error: pErr } = await market.from('listing')
+              .update({ is_primary: true })
+              .eq('security_id', row.security_id).eq('exch_code', chosen.exch_code)
+            if (pErr) throw new Error(`promote primary failed: ${pErr.message}`)
+          }
         }
 
         // A NEW SYMBOL INVALIDATES EVERY NEGATIVE CACHE. Those flags record "we asked and got
