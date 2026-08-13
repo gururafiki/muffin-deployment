@@ -364,6 +364,37 @@ console.log('\nbatch outcomes — a failure and an empty answer are different br
     merged.length ? merged.join('; ') : 'none')
 }
 
+// ── marking on an empty answer must be EARNED ────────────────────────────────
+// An empty answer is a legitimate "no data for these" — until the endpoint stops answering at all,
+// when it becomes "no data for anyone" and the same branch records a provider hiccup as hundreds of
+// permanently unanswerable securities.
+//
+// Measured 2026-08-13: draining hard enough to trip yfinance's rate limit made it return
+// 200-with-no-rows instead of erroring, so `fetchWithIsolation`'s outage rule — which only sees
+// THROWS — never fired, and `security-industries` marked 1,414 securities as having no industry.
+// Among them INTC, PEP, XOM, TXN, EA and SCCO. The backlog went to zero and looked drained.
+//
+// So every `rows.length === 0` branch that writes a `*_missing_at` must gate on a success counter
+// proving the endpoint answered for someone in this run. Checked against the source because there
+// are three such branches in three different resources and the last two rounds of this were fixed
+// one call site at a time.
+console.log('\nempty-answer marking — gated on the endpoint having answered')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const lines = index.split('\n')
+  const ungated: string[] = []
+  lines.forEach((line, i) => {
+    if (!/if \(rows\.length === 0\)/.test(line)) return
+    const block = lines.slice(i, i + 26).join('\n')
+    if (!/_missing_at: new Date/.test(block)) return          // this branch marks nothing
+    if (/\b(written|classified) > 0\b/.test(block)) return     // ...and it is gated
+    ungated.push(`line ${i + 1}`)
+  })
+  check(ungated.length === 0,
+    'no empty-answer branch marks securities before the endpoint has answered',
+    ungated.length ? ungated.join(', ') : 'all gated')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
