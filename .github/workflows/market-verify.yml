@@ -163,10 +163,19 @@ jobs:
             echo "::error::SUPABASE_SERVICE_ROLE_KEY is not set — the backlog check cannot run"
             fail=1
           else
+            # `|| true` BECAUSE AN EMPTY BACKLOG IS THE SUCCESS CASE AND IT WAS KILLING THE RUN.
+            #
+            # GitHub Actions runs `run:` under `bash -eo pipefail` whatever the script's own `set`
+            # says. When `pending_industry` is empty — which is what this check exists to
+            # celebrate — `grep` matches nothing and exits 1, `pipefail` propagates it, and `-e`
+            # ends the job with no message at all. Measured 2026-08-13, the first time that backlog
+            # reached 0: the step died 0.5s after the previous check, 24 of 30 assertions run,
+            # exit 1, nothing printed. A guard that breaks precisely when the thing it guards is
+            # perfect.
             head_ids=$(curl -sS --max-time 60 \
               "$BASE/rest/v1/pending_industry?select=security_id&order=best_weight.desc&limit=100" \
               -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' \
-              | grep -oE '"security_id":"[^"]+"' | cut -d'"' -f4 | paste -sd, -)
+              | grep -oE '"security_id":"[^"]+"' | cut -d'"' -f4 | paste -sd, - || true)
             if [ -z "${head_ids:-}" ]; then
               echo "  ok   pending_industry is empty — every classified security has an industry"
             else
