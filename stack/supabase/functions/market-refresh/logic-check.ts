@@ -237,6 +237,35 @@ console.log('\nfetchWithIsolation — a bad symbol costs only itself')
   check((outage.error ?? '').includes('provider outage'),
     'and the reason says so, so the tally is not read as progress')
 
+  // A THROTTLE IS STATED, NOT INFERRED — and it is the case the count rule cannot see.
+  //
+  // The count rule only fires when NOTHING in a batch answers. yfinance throttles progressively, so
+  // it refuses some symbols while answering others: `rows.length > 0`, the rule stays silent, and
+  // the refused ones are recorded as permanently unanswerable. Caused deliberately 2026-08-13 by
+  // draining six resources back to back — the message said `YFRateLimitError: Too Many Requests`
+  // the whole time and nothing was reading it, which is how this costs 1,369 negative-cached
+  // securities while every count looks like healthy progress.
+  const RATE_LIMITED =
+    'openbb 400: {"detail":"Error getting data for WK -> YFRateLimitError: Too Many Requests."}'
+  const partialThrottle = await fetchWithIsolation(
+    async (p: string) => {
+      // The BATCH carries the rate-limit message — that is how the provider actually reports it,
+      // measured: `openbb 400 on …symbol=GPGI,ITGR,CNK,…: {"detail":"… -> YFRateLimitError …"}`.
+      // Isolation then retries one at a time and some still get through, which is what makes the
+      // count rule blind to this: `rows.length > 0`, so it never fires.
+      if (p.includes(',')) throw new Error(RATE_LIMITED)
+      if (p.includes('GOOD')) return [{ symbol: 'GOOD' }]
+      throw new Error(RATE_LIMITED)
+    },
+    path, ['GOOD', 'RATELIMITED'], 5_000, far,
+  )
+  check(partialThrottle.dead.length === 0,
+    'a rate-limited symbol is NOT blamed even when others answered',
+    JSON.stringify(partialThrottle.dead))
+  check((partialThrottle.error ?? '').includes('RATE-LIMITING'),
+    'and the reason names the rate limit, not the symbol')
+  check(partialThrottle.rows.length === 1, 'while the symbols that did answer are kept')
+
   // Out of budget: untried symbols must NOT be recorded as unanswerable. Negative-caching a symbol
   // we never asked about is how a backlog loses work permanently.
   const expired = await fetchWithIsolation(

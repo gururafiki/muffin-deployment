@@ -192,11 +192,56 @@ export async function fetchWithIsolation(
     // `security-performance` already carried exactly this rule in a comment — "if the whole batch
     // fails, the provider is down or rate-limiting, mark nothing" — and it did not travel to the
     // helper that generalised the batching. A rule written at one call site is not a rule.
+    //
+    // FIRST, THOUGH: ASK THE ERROR. It usually says.
+    //
+    // The count rule above is an INFERENCE, and the provider states the answer outright —
+    // `YFRateLimitError: Too Many Requests` is not a fact about a symbol under any reading. Acting
+    // on the message instead of the tally also covers the case counts cannot see at all: a
+    // throttle that refuses only SOME batches, where `rows.length > 0` and the count rule never
+    // fires, so a handful of securities get blamed for a rate limit on every run.
+    //
+    // Found by causing it, 2026-08-13: draining six resources back to back tripped the limit, and
+    // the truncated message (`Error getting data for ITGR -> YFR…`) read as an ordinary symbol
+    // failure. That is how it costs 1,369 negative-cached securities — the message is right there
+    // and nothing was reading it.
+    if (throttled(error)) {
+      return { rows, dead: [], error: `${error} (provider is RATE-LIMITING — no symbol blamed)` }
+    }
+    //
+    // THE COUNT RULE STAYS AS IT WAS. It was briefly changed to blame the symbols whenever the
+    // provider had already returned rows earlier in the run, on the theory that a draining backlog
+    // concentrates its unanswerable tail into uniformly-bad batches. MEASURED AND WRONG: after the
+    // throttling stopped, `security-industries` reported `remaining: 0, note: every security has an
+    // industry`. The batches that looked permanently stuck had drained — every failure was this
+    // rate limit, self-inflicted by draining six resources back to back.
+    //
+    // The theory was also unsafe on its own terms: a rate limit is PROGRESSIVE, so a run can answer
+    // 195 securities and then start refusing, and "it answered earlier" is not evidence it is up
+    // now. It would have blamed innocent securities in exactly the situation that once
+    // negative-cached 1,369 of them.
     if (rows.length === 0 && dead.length > 0) {
       return { rows, dead: [], error: `${error} (all ${dead.length} failed individually — treated as a provider outage, not bad symbols)` }
     }
     return { rows, dead, error }
   }
+}
+
+/**
+ * Does this provider error say the provider is REFUSING us, rather than saying anything about the
+ * symbol we asked for?
+ *
+ * Matched on the wire text because that is where the provider states it. Every entry was seen in a
+ * real response from this deployment or is the standard HTTP spelling of the same thing; the list
+ * is deliberately short, since a false positive here means a genuinely dead symbol is retried
+ * forever, and a false negative means a rate limit is recorded as 20 unanswerable securities.
+ */
+export function throttled(message: string): boolean {
+  const m = message.toLowerCase()
+  return m.includes('ratelimit') ||
+    m.includes('rate limit') ||
+    m.includes('too many requests') ||
+    m.includes('429')
 }
 
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
