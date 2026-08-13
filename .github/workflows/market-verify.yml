@@ -78,6 +78,13 @@ jobs:
           check_min "holdings"    "$(count 'fund_holding?select=fund_id')"           12000
           check_min "issuers"     "$(count 'issuer?select=issuer_id')"                3000
 
+          #    The total is NOT a proxy for the equity universe, and since securities are typed from
+          #    the filing's `assetCat` it is less of one than ever: bonds outnumber equities here
+          #    (15,205 vs 12,348 when the typing landed). Every backlog and every serving view
+          #    filters `security_type_code = 'equity'`, so a bug that retyped equities would empty
+          #    the app while leaving the total — and check 1 — completely untouched.
+          check_min "equities"    "$(count 'security?select=security_id&security_type_code=eq.equity')" 9000
+
           # 2. No placeholder ever becomes an identifier again. This is the exact value that
           #    caused the merge, asserted directly.
           check_zero "all-zero CUSIPs" "$(count 'security_identifier?select=value&kind_code=eq.cusip&value=eq.000000000')"
