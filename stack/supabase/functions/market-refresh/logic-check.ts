@@ -339,6 +339,31 @@ check(pickHomeListing([{ symbol: 'AAA.XX', quoteType: 'EQUITY' }], 'ZZ', VENUES)
 //
 // Read as TEXT on purpose. The names live in three files that cannot import each other — a YAML
 // workflow, a Deno handler and a shell loop — so the only thing they share is the string.
+// ── a throw and an empty answer must not share a branch ──────────────────────
+// FIFTH instance of this shape, which is why it is asserted against the SOURCE rather than left to
+// review: `figi_missing_at`, `security-fundamentals`, `security-industries`, the isolation
+// empty-branch, and then `security-profiles` — where the two were merged behind a comment claiming
+// they were "indistinguishable". They never are: the throw sets a flag, and OpenBB answers 204 NO
+// CONTENT when a provider genuinely has nothing.
+//
+// Merging them costs a backlog. An unanswerable batch is counted failed AND skips its
+// negative-cache write, so it returns every run forever; then the "all batches failed" guard fails
+// the whole resource at exactly the moment the answerable work is done. Measured 2026-08-13:
+// `pending_profile` fell 2,665 -> 2,437 and froze, while three sibling resources on the SAME
+// endpoint reported ok.
+//
+// A behavioural test cannot reach this — the decision is inline in a 200-line resource handler with
+// a live Supabase client. The shape is what recurs, so the shape is what is checked.
+console.log('\nbatch outcomes — a failure and an empty answer are different branches')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  // `somethingFailed || rows.length === 0` — a throw flag OR'd with an empty result.
+  const merged = [...index.matchAll(/\w*[Ff]ailed\s*\|\|\s*\w+\.length === 0/g)].map((m) => m[0])
+  check(merged.length === 0,
+    'no branch ORs a failure flag with an empty result',
+    merged.length ? merged.join('; ') : 'none')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
