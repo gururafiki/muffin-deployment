@@ -240,6 +240,39 @@ jobs:
             echo "  ok   exactly-flat long returns = $flat (tripwire at 5)"
           fi
 
+          # 7g. A MEGA-CAP IS NEVER UNANSWERABLE. This is the check that was missing on 2026-08-13,
+          #     when an over-eager drain tripped yfinance's rate limit and ~8,300 securities were
+          #     recorded as permanently unanswerable. A throttled yfinance answers 200-WITH-NO-ROWS
+          #     rather than erroring, so every outage rule — all of them THROW checks — stayed
+          #     quiet, and `pending_industry` went to 0 and read as DRAINED.
+          #
+          #     WHAT WAS TRIED AND REJECTED. "Marked a lot today while classifying little" is the
+          #     natural formulation and it does not work: measured on the real incident, the day
+          #     classified 2,020 securities WHILE marking 1,732, because the outage was a
+          #     thirty-minute window inside a productive day. Any day-granularity comparison is
+          #     blind to it, and a version of this check written that way passed on the very data
+          #     it was meant to catch.
+          #
+          #     ABSURDITY IS THE SIGNAL INSTEAD, and it is unmissable: 109 of 213 US mega-caps were
+          #     marked no-industry, 152 marked no-statements. INTC, PEP, XOM, TXN, EA, SCCO, EQH,
+          #     REGN, UPS. Derived from market cap rather than an authored ticker list so it
+          #     maintains itself, and restricted to US securities because `market_cap` is stored in
+          #     each security's own currency and only becomes comparable within one.
+          for col in industry_missing_at statements_missing_at performance_missing_at; do
+            big=$(count "security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000")
+            bad=$(count "security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&$col=not.is.null")
+            if [ -z "${big:-}" ] || [ -z "${bad:-}" ]; then
+              echo "::error::mega-cap check ($col) — could not read a count: $(last_body)"; fail=1
+            elif [ "$big" -lt 100 ]; then
+              echo "::error::only $big US mega-caps have a market cap — the cap refresh has stopped"; fail=1
+            elif [ "$bad" -gt 20 ]; then
+              echo "::error::$bad of $big US mega-caps carry $col — a provider refusal is being recorded as dead securities"
+              fail=1
+            else
+              echo "  ok   US mega-caps carrying $col = $bad of $big (tripwire at 20)"
+            fi
+          done
+
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
           #    because OpenFIGI returns `exchCode` bare for some venues and labelled for others
           #    ("KS" vs "TT (Taiwan Stock Exchange)"), so an exact match resolved Korea and dropped
