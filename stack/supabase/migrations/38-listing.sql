@@ -50,6 +50,19 @@ comment on table market.listing is
 -- Longest suffix first so `.SS` cannot be matched by a shorter one, then `preference` so a country
 -- with two venues sharing a suffix (Canada CT/CN both `.TO`, UAE DU/DH both `.AE`) resolves to its
 -- primary board rather than whichever row the planner reached first.
+
+-- GUARDED AGAINST AN EXISTING PRIMARY. `on conflict (security_id, exch_code)` catches the primary
+-- KEY, not the partial unique index `listing_one_primary_idx` — so once `security-yahoo-symbols`
+-- has recorded a security's other venues, this backfill tries to add a SECOND primary on a
+-- different exchange and the statement errors:
+--
+--   ERROR: duplicate key value violates unique constraint "listing_one_primary_idx"
+--
+-- That failed a production deploy on 2026-08-13 and, because migration 35 drops the dependent views
+-- before this file runs, took `pending_prices` and friends down with it until the next successful
+-- pass. It could not fail locally: a fresh database has no resolver-written listings, so the
+-- three-pass migration test saw nothing. "Applies twice on an empty database" is not the same as
+-- "applies twice on THIS database".
 insert into market.listing (security_id, exch_code, symbol, provider_symbol, is_primary, source_code)
 select
   ps.security_id,
@@ -69,6 +82,7 @@ join lateral (
   limit 1
 ) e on true
 where ps.provider_code = 'yfinance'
+  and not exists (select 1 from market.listing l where l.security_id = ps.security_id and l.is_primary)
 on conflict (security_id, exch_code) do nothing;
 
 -- A provider symbol with NO suffix is a US listing. Handled separately because matching an empty
@@ -78,6 +92,7 @@ select ps.security_id, 'US', ps.symbol, ps.symbol, true, 'openfigi'
 from market.security_provider_symbol ps
 where ps.provider_code = 'yfinance'
   and ps.symbol not like '%.%'
+  and not exists (select 1 from market.listing l where l.security_id = ps.security_id and l.is_primary)
 on conflict (security_id, exch_code) do nothing;
 
 -- The ticker identifier is a US listing too when the security has no provider symbol at all —
