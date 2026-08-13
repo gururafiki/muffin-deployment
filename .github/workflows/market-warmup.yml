@@ -119,6 +119,16 @@ jobs:
               echo "::warning::$r failed (HTTP $code): $payload"
               failed=$((failed + 1))
             fi
+
+            # PACE THE LOOP. Seventeen resources back to back is what tripped yfinance's rate limit
+            # on 2026-08-13, and a throttled yfinance answers 200-WITH-NO-ROWS rather than erroring
+            # — so before the empty-answer gates landed, that hammering recorded ~8,300 securities
+            # as permanently unanswerable, including INTC, PEP, XOM and REGN. The gates make that
+            # impossible now, but a rate-limited run still does less work than a paced one: every
+            # refused batch is a batch not drained.
+            #
+            # 30s x 17 is about eight minutes of wall clock for a job that runs every three hours.
+            sleep 30
           done <<EOF
           $RESOURCES
           EOF
