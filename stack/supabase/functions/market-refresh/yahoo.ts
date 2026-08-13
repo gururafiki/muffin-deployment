@@ -57,7 +57,27 @@ export function allowedSuffixes(iso2: string, venueMap: VenueMap): string[] {
  * plausible series that is quietly about a different listing.
  */
 export function pickHomeListing(hits: YahooHit[], iso2: string, venueMap: VenueMap): string | null {
-  const suffixes = allowedSuffixes(iso2, venueMap)
+  let suffixes = allowedSuffixes(iso2, venueMap)
+
+  // AN OFFSHORE INCORPORATION IS NOT A MARKET, and refusing to resolve one strands the security.
+  //
+  // N-PORT reports the INCORPORATION jurisdiction, so Alibaba is filed under `KY` — Cayman Islands.
+  // There is no exchange in the Cayman Islands, so `allowedSuffixes` is empty and this returned
+  // null for every hit, including the correct one. The security then fell back to OpenFIGI's US
+  // lookup, which for a foreign company is a thin OTC foreign-ordinary line: Alibaba was displayed
+  // AND PRICED as `BABAF` while its real listing is `9988.HK`.
+  //
+  // Measured 2026-08-13: **180 equities** sit in jurisdictions with no venue (119 KY, 56 BM, 5 VG),
+  // and none of those is drillable, so they were unreachable by browsing as well as mispriced.
+  //
+  // Where the country names no market, accept any suffix the venue table KNOWS. That is still a
+  // real exchange chosen from data rather than a guess — Yahoo returns `9988.HK` and
+  // `KYG017191142.SG` for Alibaba, and `.SG` is Stuttgart, which is not in the table, so it is
+  // correctly refused. The strict home-market rule still applies everywhere it can: a country that
+  // HAS venues must match one of its own, or a Korean bank gets priced off its Frankfurt line.
+  if (suffixes.length === 0) {
+    suffixes = [...new Set(Object.values(venueMap).flat().map((v) => v.suffix))].filter((x) => x !== '')
+  }
   if (suffixes.length === 0) return null
   for (const hit of hits) {
     // Equities only. An ISIN search readily returns ETFs, warrants and futures written on the name.
