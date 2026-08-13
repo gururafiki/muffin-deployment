@@ -370,11 +370,9 @@ Deno.serve(async (req: Request) => {
         .from('pending_statements')
         .select('security_id,symbol')
         .order('best_weight', { ascending: false })
-        // 300, not 60. That number was sized for THREE CALLS PER SECURITY — 180 requests a run,
-        // which filled the worker. Batched at ten symbols it is 90 requests for five times the
-        // securities, so the old page now leaves most of the budget unused. 8,851 deep at 60 a run
-        // and four cron runs a day was about five weeks.
-        .limit(scopeLimit ?? 300)
+        // 60, because it is three calls PER SECURITY — 180 requests a run, which fills the worker.
+        // It was briefly 300 on the assumption that batching worked; it does not (see STMT_BATCH).
+        .limit(scopeLimit ?? 60)
       if (pErr) throw new Error(`pending_statements read failed: ${pErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
@@ -409,7 +407,20 @@ Deno.serve(async (req: Request) => {
       // if it does is a backlog that does not drain — visible and harmless — rather than
       // securities wrongly marked, because marking still requires the run to have written
       // something.
-      const STMT_BATCH = 10
+      // ONE. Measured 2026-08-13 the moment the batched version deployed:
+      //
+      //   symbolsAsked 50   symbolsAnswered 0   written 0   failed 0   none 0
+      //
+      // `equity/fundamental/income|balance|cash` do NOT accept several symbols, even though
+      // `equity/fundamental/metrics` — same router family, same provider — does. That is precisely
+      // the "route convention is not perfectly regular" warning in CLAUDE.md, and I batched on the
+      // family resemblance rather than a measurement.
+      //
+      // The reporting is what made this a five-minute revert instead of a silent outage: `written`
+      // and `none` both zero says the run did nothing AND blamed nobody, and `symbolsAnswered` says
+      // why. Keep them — if a future openbb release makes these endpoints batch, this number will
+      // say so.
+      const STMT_BATCH = 1
       const symbolsAnswered = new Set<string>()
       for (let i = 0; i < wanted.length && Date.now() < deadline - 6_000; i += STMT_BATCH) {
         const group = wanted.slice(i, i + STMT_BATCH)
