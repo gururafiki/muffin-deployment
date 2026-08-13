@@ -1546,6 +1546,10 @@ Deno.serve(async (req: Request) => {
       let unmapped = 0
       let capped = 0
       let noProfile = 0
+      // Securities in batches that came back empty BEFORE this endpoint had answered for anyone.
+      // Deliberately not marked and deliberately counted: a run reporting a large number here is
+      // saying "the endpoint is not answering", which is exactly what a silent skip would hide.
+      let emptyBeforeAnyAnswer = 0
       let batchesFailed = 0
       let lastError: string | null = null
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
@@ -1601,15 +1605,32 @@ Deno.serve(async (req: Request) => {
           continue
         }
         if (rows.length === 0) {
-          // The provider answered and had nothing to say about any of them. That IS about these
-          // securities, so record it — 30 days, not never, exactly like every other negative cache
-          // here. Deliberately does NOT touch `batchesFailed`: nothing failed.
-          const { error } = await market
-            .from('security')
-            .update({ profile_missing_at: new Date().toISOString() })
-            .in('security_id', batch.map((b) => b.securityId))
-          if (error) throw new Error(`profile_missing_at update failed: ${error.message}`)
-          noProfile += batch.length
+          // The provider answered and had nothing to say about any of them — but ONLY blame the
+          // securities once this endpoint has demonstrably answered for someone in this run.
+          //
+          // WITHOUT THAT CONDITION THIS IS THE 1,369 INCIDENT AGAIN, in a new column. Checked
+          // before shipping rather than after: the head of `pending_profile` was `HBNC, TRST, CAC,
+          // CLB, HAFC, MYE, MAZE, CHRD, CFR, IRMD, PRI, COLB` — ordinary US mid-caps — and Yahoo
+          // returns a full profile WITH a sector for them (CFR -> Financial Services, CHRD ->
+          // Energy). So a run where every batch comes back empty is not 600 unanswerable
+          // securities; it is the endpoint not answering, and marking them would have locked 2,437
+          // perfectly good securities out for 30 days.
+          //
+          // `classified > 0` is the proof the endpoint works, and it is safe here in a way it was
+          // NOT for the throw path (a rate limit is progressive, so "it answered earlier" says
+          // nothing about now). An empty 200/204 is not a refusal signature, and the failure mode
+          // this guards is far worse than a delayed drain: a batch left unmarked is retried next
+          // run, whereas one wrongly marked is gone for a month.
+          if (classified > 0) {
+            const { error } = await market
+              .from('security')
+              .update({ profile_missing_at: new Date().toISOString() })
+              .in('security_id', batch.map((b) => b.securityId))
+            if (error) throw new Error(`profile_missing_at update failed: ${error.message}`)
+            noProfile += batch.length
+          } else {
+            emptyBeforeAnyAnswer += batch.length
+          }
           continue
         }
 
@@ -1684,6 +1705,7 @@ Deno.serve(async (req: Request) => {
         // A run of `classified: 0, noProfile: 600` is a backlog draining correctly, and it used to
         // be indistinguishable from a provider outage.
         noProfile,
+        emptyBeforeAnyAnswer,
         batchesFailed,
         remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
       })
