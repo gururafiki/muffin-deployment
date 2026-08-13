@@ -466,7 +466,27 @@ export function returnsFor(series: Bar[], now: Date): Record<string, number> {
   const pctAt = (idx: number | null) => {
     if (idx === null || idx < comparableFrom) return null
     const from = series[idx].close
-    return from === 0 ? null : Math.round((latest / from - 1) * 1_000_000) / 10_000
+    if (from === 0) return null
+    // A WINDOW THAT NEVER MOVED IS NOT A 0.00% RETURN — it is a series that is not being priced.
+    //
+    // Measured 2026-08-13, which is how this was found: `GOTO.JK` had 62 bars across the 3-month
+    // window and ONE distinct close (50, every single trading day); `AOT-R.BK` had 65 bars and two.
+    // Both are ordinary listings on live exchanges. A stock does not close at exactly the same
+    // price for sixty-two consecutive sessions, so the provider is padding, not quoting.
+    //
+    // The existing guards cannot see this: the closes are positive (so `barFrom` accepts them), the
+    // latest bar is today (so the staleness rule passes), and there is no discontinuity (so
+    // `firstComparableIndex` has nothing to cut). It renders as "this market was flat", which is a
+    // claim about the market rather than an admission that we have no prices for it.
+    //
+    // Per WINDOW, not per series: a security can legitimately be flat over a week and informative
+    // over a year, and the long windows of these same symbols do contain real movement.
+    let moved = false
+    for (let i = idx + 1; i < series.length; i++) {
+      if (series[i].close !== from) { moved = true; break }
+    }
+    if (!moved) return null
+    return Math.round((latest / from - 1) * 1_000_000) / 10_000
   }
 
   // 1d is the PREVIOUS BAR, not a date lookback — a weekend or holiday would

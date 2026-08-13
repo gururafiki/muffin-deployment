@@ -275,6 +275,41 @@ console.log('\nfetchWithIsolation — a bad symbol costs only itself')
   check(expired.dead.length === 0, 'a blown deadline blames nobody', JSON.stringify(expired.dead))
 }
 
+// ── a window that never moved is not a 0.00% return ──────────────────────────
+// Found by the flat-return tripwire firing at 32 rows (threshold 5) on 2026-08-13. The cause was
+// not delisting, which is what that tripwire was written for: `GOTO.JK` had 62 bars across the
+// 3-month window and ONE distinct close — 50, every trading day — and `AOT-R.BK` had 65 bars and
+// two. Ordinary listings on live exchanges, padded rather than quoted.
+//
+// No existing guard could see it. The closes are positive, so `barFrom` accepts them; the latest
+// bar is today, so the staleness rule passes; there is no discontinuity, so `firstComparableIndex`
+// has nothing to cut. It renders as "this market was flat" — a claim about the market rather than
+// an admission that we have no prices for it.
+console.log('\nreturnsFor — a constant window reports nothing, not zero')
+{
+  const day = (n: number) => new Date(Date.UTC(2026, 7, 13) - n * 86_400_000).toISOString().slice(0, 10)
+  const now = new Date(Date.UTC(2026, 7, 13))
+
+  // 200 sessions all at exactly 50 — the GOTO.JK shape.
+  const frozen: Bar[] = Array.from({ length: 200 }, (_, i) => ({ date: day(199 - i), close: 50 }))
+  const f = returnsFor(frozen, now)
+  check(f['3m'] === undefined, 'a window with one distinct close reports NO 3m', JSON.stringify(f['3m']))
+  check(f['1y'] === undefined, 'and no 1y')
+
+  // Flat for the recent quarter, but genuinely up over the year: the short window must go and the
+  // long one must survive. Per-window, because a security can be flat for a week and not for a year.
+  // 420 sessions so the 1y anchor actually EXISTS — at 300 the year was omitted for want of a bar
+  // that old, which passes the assertion for entirely the wrong reason.
+  const mixed: Bar[] = Array.from({ length: 420 }, (_, i) => ({
+    date: day(419 - i),
+    close: i < 320 ? 10 + i * 0.1 : 42,
+  }))
+  const m = returnsFor(mixed, now)
+  check(m['3m'] === undefined, 'a flat recent quarter still reports no 3m', JSON.stringify(m['3m']))
+  check(typeof m['1y'] === 'number' && m['1y'] > 0,
+    'while the year, which did move, is still reported', JSON.stringify(m['1y']))
+}
+
 // ── an ISIN hit must be on the security's HOME market ────────────────────────
 // Yahoo's ISIN index is inconsistent: Televisa's returns the local TLEVISACPO.MX, Walmex's returns
 // ONLY a Frankfurt line. Taking the first hit would price a Mexican retailer off a thin,
