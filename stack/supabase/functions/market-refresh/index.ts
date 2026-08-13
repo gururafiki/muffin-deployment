@@ -1928,6 +1928,22 @@ Deno.serve(async (req: Request) => {
     // broken upstream is retried soon but not on every single trigger.
     await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: message })
     console.error(`market-refresh(${resource}) failed: ${message}`)
-    return json({ resource, error: message }, 502)
+    // 200 WITH `ok: false`, NOT 502 — the invocation succeeded and is REPORTING a failed outcome.
+    //
+    // This used to return 502 and the reason never reached the caller: something in
+    // Cloudflare/Traefik/Kong owns that status and replaces the body with its own 16-byte
+    // `error code: 502`. Measured 2026-08-13 — a 400 from this same function arrives with its full
+    // 482-byte JSON, so it is the 502 specifically that is synthesized, not bodies in general.
+    //
+    // The cost was not cosmetic. `security-profiles` was rate-limited and said so in
+    // `refresh_log`, while every caller saw a bare 502 — which this codebase documents as meaning
+    // A DEAD WORKER ("look at memory, not at your error handling"). Four probes went into
+    // re-deriving from the database what the response had already been told. The warm-up's
+    // `::warning::$r failed (HTTP 502): error code: 502` had been saying nothing for the same
+    // reason.
+    //
+    // Keeping 5xx for genuine crashes is the point: with application failures out of that range, a
+    // bare 502 means what the docs say again.
+    return json({ resource, ok: false, error: message })
   }
 })
