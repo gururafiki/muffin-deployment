@@ -1105,7 +1105,15 @@ Deno.serve(async (req: Request) => {
         .from('pending_yahoo_symbol')
         .select('security_id,isin,country_iso2,current_symbol')
         .order('best_weight', { ascending: false })
-        .limit(scopeLimit ?? 60)
+        // 300, raised from 60 after measuring: 60 symbols took 5s and 200 took 18s of the 55s
+        // budget, with `failed: 0` at both. The endpoint is far less rate-limiting than the
+        // one-call-per-security shape suggested, and the wall-clock deadline is the real bound.
+        //
+        // This resource GATES the others — a security without a correct symbol cannot get a
+        // profile, an industry, fundamentals or prices — so at 60 a backlog of 8,792 needed 18 days
+        // and everything downstream waited on it. Kept well under the measured ceiling rather than
+        // maximised: this is somebody else's free endpoint.
+        .limit(scopeLimit ?? 300)
       if (pendErr) throw new Error(`pending_yahoo_symbol read failed: ${pendErr.message}`)
 
       const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id))
