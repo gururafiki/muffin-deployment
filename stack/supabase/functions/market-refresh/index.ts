@@ -29,25 +29,26 @@ import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
+  BACKLOG_TTL_MINUTES,
+  barFrom,
+  dedupeBy,
+  fetchWithIsolation,
+  FINVIZ_SECTOR_IDS,
+  loadEquityReturns,
   loadPricesBatched,
   loadProfiles,
   openbbFetcher,
+  planPriceFetches,
+  PRICE_WINDOW_DAYS,
   PRICES_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
   REFERENCE_TTL_MINUTES,
-  TICKERS_TTL_MINUTES,
   RESOURCES,
-  FINVIZ_SECTOR_IDS,
-  type PerfRow,
-  loadEquityReturns,
   SEC_PERF_TTL_MINUTES,
-  BACKLOG_TTL_MINUTES,
   symbolList,
-  dedupeBy,
-  planPriceFetches,
-  PRICE_WINDOW_DAYS,
-  barFrom,
-  fetchWithIsolation,
+  throttled,
+  TICKERS_TTL_MINUTES,
+  type PerfRow,
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
@@ -469,6 +470,7 @@ Deno.serve(async (req: Request) => {
       let written = 0
       let missing = 0
       let batchesFailed = 0
+      let throttledOut = false
       let emptyBatches = 0
       let lastError: string | null = null
 
@@ -497,6 +499,17 @@ Deno.serve(async (req: Request) => {
           if (got.error) {
             batchesFailed++
             lastError = got.error
+            // STOP THE RUN ON A THROTTLE — do not spend the rest of the page on it.
+            //
+            // A rate limit is not a per-batch accident: once yfinance is refusing us, every
+            // remaining batch fails too. Measured 2026-08-13 — `security-fundamentals` reads 600
+            // rows at BATCH 10, so a throttled run fired SIXTY requests, failed all sixty, wrote
+            // nothing, and each of those requests pushed the limit further out. `batchesFailed: 60`
+            // with `written: 0`, repeatedly.
+            //
+            // Breaking turns that into one failed request and an early return. The backlog is
+            // incremental, so a short run costs nothing; the next one starts where this stopped.
+            if (throttled(got.error)) { throttledOut = true; break }
             // THE BATCH FAILED — that is not the same as the provider having nothing to say. With
             // nothing returned and nothing individually blamed, `fetchWithIsolation` has already
             // judged this an outage, and falling through to the empty-answer branch below would
@@ -514,6 +527,9 @@ Deno.serve(async (req: Request) => {
           // message covers a timeout, a refused connection and a malformed URL.
           batchesFailed++
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          // Same rule as the isolation path: once the provider is refusing us, the rest of
+          // the page will refuse too, and each attempt pushes the limit further out.
+          if (throttled(lastError)) { throttledOut = true; break }
           continue
         }
         // A symbol the provider refuses ON ITS OWN is unanswerable, so stop asking. Without this
@@ -1030,6 +1046,7 @@ Deno.serve(async (req: Request) => {
       let written = 0
       let emptySeries = 0
       let batchesFailed = 0
+      let throttledOut = false
       let lastError: string | null = null
       const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
 
@@ -1046,6 +1063,9 @@ Deno.serve(async (req: Request) => {
         } catch (e) {
           batchesFailed++
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          // Same rule as the isolation path: once the provider is refusing us, the rest of
+          // the page will refuse too, and each attempt pushes the limit further out.
+          if (throttled(lastError)) { throttledOut = true; break }
           continue
         }
 
@@ -1341,6 +1361,7 @@ Deno.serve(async (req: Request) => {
       let noIndustry = 0
       let capped = 0
       let batchesFailed = 0
+      let throttledOut = false
       let lastError: string | null = null
 
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
@@ -1367,6 +1388,17 @@ Deno.serve(async (req: Request) => {
           if (got.error) {
             batchesFailed++
             lastError = got.error
+            // STOP THE RUN ON A THROTTLE — do not spend the rest of the page on it.
+            //
+            // A rate limit is not a per-batch accident: once yfinance is refusing us, every
+            // remaining batch fails too. Measured 2026-08-13 — `security-fundamentals` reads 600
+            // rows at BATCH 10, so a throttled run fired SIXTY requests, failed all sixty, wrote
+            // nothing, and each of those requests pushed the limit further out. `batchesFailed: 60`
+            // with `written: 0`, repeatedly.
+            //
+            // Breaking turns that into one failed request and an early return. The backlog is
+            // incremental, so a short run costs nothing; the next one starts where this stopped.
+            if (throttled(got.error)) { throttledOut = true; break }
           }
           // A symbol the provider refuses ON ITS OWN is genuinely unanswerable, so stop asking.
           // `industry_missing_at` was never reached for these: it is only written when a batch
@@ -1386,6 +1418,9 @@ Deno.serve(async (req: Request) => {
         } catch (e) {
           batchesFailed++
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          // Same rule as the isolation path: once the provider is refusing us, the rest of
+          // the page will refuse too, and each attempt pushes the limit further out.
+          if (throttled(lastError)) { throttledOut = true; break }
           continue
         }
         // ...BUT ONLY ONCE THIS ENDPOINT HAS ANSWERED FOR SOMEONE IN THIS RUN.
@@ -1546,6 +1581,9 @@ Deno.serve(async (req: Request) => {
         capped,
         noIndustry,
         batchesFailed,
+        // True when the run stopped early because the provider began refusing.
+        // Without it a throttled run is indistinguishable from a drained backlog.
+        throttledOut,
         lastError,
         remaining: Math.max(0, wanted.length - classified - noIndustry),
       })
@@ -1589,6 +1627,7 @@ Deno.serve(async (req: Request) => {
       // saying "the endpoint is not answering", which is exactly what a silent skip would hide.
       let emptyBeforeAnyAnswer = 0
       let batchesFailed = 0
+      let throttledOut = false
       let lastError: string | null = null
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
@@ -1745,6 +1784,9 @@ Deno.serve(async (req: Request) => {
         noProfile,
         emptyBeforeAnyAnswer,
         batchesFailed,
+        // True when the run stopped early because the provider began refusing.
+        // Without it a throttled run is indistinguishable from a drained backlog.
+        throttledOut,
         remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
       })
     }
@@ -1779,6 +1821,7 @@ Deno.serve(async (req: Request) => {
       const now = new Date()
       let written = 0
       let batchesFailed = 0
+      let throttledOut = false
       let emptyBatches = 0
       let lastError: string | null = null
       for (let i = 0; i < symbols.length && Date.now() < deadline; i += BATCH) {
@@ -1796,6 +1839,9 @@ Deno.serve(async (req: Request) => {
         } catch (e) {
           batchesFailed++
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          // Same rule as the isolation path: once the provider is refusing us, the rest of
+          // the page will refuse too, and each attempt pushes the limit further out.
+          if (throttled(lastError)) { throttledOut = true; break }
           continue
         }
         const rows = fetched.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id }))
