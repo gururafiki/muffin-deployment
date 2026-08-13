@@ -39,6 +39,36 @@ const WRITE_CHUNK = 500
 /** N-PORT `units` for a share position; anything else is a bond, contract, etc. */
 const SHARE_UNITS = new Set(['NS'])
 
+/**
+ * N-PORT `assetCat` -> our security type.
+ *
+ * THIS IS READING THE FILING, NOT GUESSING. A previous comment here said "guessing a type from a
+ * filing's asset category would be a fiction" and declined to use it — but `assetCat` is a REQUIRED
+ * N-PORT field with a closed vocabulary, so it is the filer's own statement of what the instrument
+ * is. `units` is the weaker signal: it describes the unit of measure (NS = number of shares, PA =
+ * principal amount), not the instrument.
+ *
+ * Measured 2026-08-13 across the tracked funds: STIV, EC, DE, EP, RA, DFE, DBT, ABS-MBS, ABS-O and
+ * LON all appear. Without this every one of them collapsed into `other`, so 15,205 bonds, futures,
+ * repos and money-market positions were indistinguishable — "E MINI RUSS 1000 VJUN26" sat beside
+ * "Saudi Government International Bonds" under the same type.
+ *
+ * `market.security_type` already carried bond/cash/derivative/fund; only the ingest was not using
+ * them.
+ */
+const ASSET_CATEGORY_TYPE: Record<string, string> = {
+  EC: 'equity',        // equity-common
+  EP: 'equity',        // equity-preferred — still an ownership claim
+  DBT: 'bond',
+  'ABS-MBS': 'bond',   // mortgage-backed: debt
+  'ABS-O': 'bond',     // other asset-backed: debt
+  LON: 'bond',         // a loan is debt
+  DE: 'derivative',
+  DFE: 'derivative',
+  STIV: 'cash',        // short-term investment vehicle (money-market)
+  RA: 'cash',          // repurchase agreement — a cash equivalent
+}
+
 export interface IngestResult {
   fund: string
   reportDate: string
@@ -249,9 +279,11 @@ async function resolveSecurities(
       security_id: securityId,
       issuer_id: lei ? (issuers.get(lei) ?? null) : null,
       name: h.name,
-      // A share position is an equity; everything else stays `other` until something classifies
-      // it. Guessing a type from a filing's asset category would be a fiction.
-      security_type_code: SHARE_UNITS.has(h.units ?? '') ? 'equity' : 'other',
+      // The filing's own asset category first; `units` only as a fallback for a filer that omits
+      // it. An unmapped category stays `other` rather than being forced into a bucket.
+      security_type_code:
+        ASSET_CATEGORY_TYPE[(h.assetCategory ?? '').toUpperCase()] ??
+        (SHARE_UNITS.has(h.units ?? '') ? 'equity' : 'other'),
       currency_code: h.currency ?? null,
       country_iso2: countryOf(h, countries),
       is_tradeable: false, // until a ticker is resolved by the profile enrichment
