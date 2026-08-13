@@ -1545,6 +1545,7 @@ Deno.serve(async (req: Request) => {
       let classified = 0
       let unmapped = 0
       let capped = 0
+      let noProfile = 0
       let batchesFailed = 0
       let lastError: string | null = null
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
@@ -1574,11 +1575,41 @@ Deno.serve(async (req: Request) => {
         } catch (_e) {
           providerFailed = true
         }
-        if (providerFailed || rows.length === 0) {
-          // Zero rows for a whole batch is indistinguishable from a failure, so it is treated as
-          // one. This is exactly the state that made the drain loop spin: `classified: 0,
-          // unmapped: 0, remaining: 1000`, run after run, with nothing to say why.
+        // A REQUEST THAT FAILED AND A REQUEST THAT ANSWERED NOTHING ARE DIFFERENT FACTS.
+        //
+        // These were one branch, on the reasoning that zero rows is "indistinguishable from a
+        // failure". They are not indistinguishable — `providerFailed` is precisely the flag that
+        // tells them apart, and OpenBB answers 204 NO CONTENT when a provider genuinely has
+        // nothing, which is an answer rather than a fault.
+        //
+        // Merging them meant an unanswerable batch was counted as failed AND skipped the
+        // negative-cache write below, so those securities returned on every run forever. Then the
+        // `batchesFailed > 0 && classified === 0` guard failed the whole resource — which happens
+        // exactly when the answerable work is DONE and only unanswerable securities are left, so
+        // it looks like the provider breaking at the moment everything started working.
+        //
+        // Measured 2026-08-13: `pending_profile` fell 2,665 -> 2,437 and then froze there across
+        // every subsequent run, while `security-industries`, `security-statements` and
+        // `security-fundamentals` — hitting the SAME `equity/profile` endpoint — all reported ok.
+        // The provider was fine throughout.
+        //
+        // FIFTH instance of this shape here (`figi_missing_at`, `security-fundamentals`,
+        // `security-industries`, the isolation empty-branch, now this). The first two were FIXED
+        // and this call site was not: a rule at one call site is not a rule.
+        if (providerFailed) {
           batchesFailed++
+          continue
+        }
+        if (rows.length === 0) {
+          // The provider answered and had nothing to say about any of them. That IS about these
+          // securities, so record it — 30 days, not never, exactly like every other negative cache
+          // here. Deliberately does NOT touch `batchesFailed`: nothing failed.
+          const { error } = await market
+            .from('security')
+            .update({ profile_missing_at: new Date().toISOString() })
+            .in('security_id', batch.map((b) => b.securityId))
+          if (error) throw new Error(`profile_missing_at update failed: ${error.message}`)
+          noProfile += batch.length
           continue
         }
 
@@ -1648,8 +1679,13 @@ Deno.serve(async (req: Request) => {
         classified,
         capped,
         unmapped,
+        // Securities the provider ANSWERED about and had no profile for, now negative-cached.
+        // Reported separately from `batchesFailed` because they are the opposite thing: progress.
+        // A run of `classified: 0, noProfile: 600` is a backlog draining correctly, and it used to
+        // be indistinguishable from a provider outage.
+        noProfile,
         batchesFailed,
-        remaining: Math.max(0, wanted.length - classified - unmapped),
+        remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
       })
     }
 
