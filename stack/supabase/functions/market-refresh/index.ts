@@ -530,14 +530,28 @@ Deno.serve(async (req: Request) => {
         // run and the guard below eventually failed the whole resource on them.
         // Excludes anything the isolation pass just recorded, so one batch cannot be counted twice
         // (the `noIndustry: 23 for a batch of 20` tally bug, in a second place).
+        // ...BUT ONLY ONCE THIS ENDPOINT HAS ANSWERED FOR SOMEONE IN THIS RUN.
+        //
+        // An empty answer is a legitimate "no data for these" — right up until the endpoint stops
+        // answering at all, when it becomes "no data for anyone" and marking a batch on it is how a
+        // provider hiccup gets recorded as hundreds of permanently unanswerable securities.
+        //
+        // MEASURED, NOT HYPOTHETICAL — this is what it did on 2026-08-13. Draining hard enough to
+        // trip yfinance's rate limit made it answer 200-with-no-rows rather than erroring, so
+        // `fetchWithIsolation`'s outage rule (which only sees THROWS) never fired, and this branch
+        // marked **1,414 securities** as having no industry. Among them: INTC, PEP, XOM, TXN, EA,
+        // SCCO. The largest companies in the United States, recorded as unclassifiable, silently,
+        // while the backlog went to zero and looked drained.
         if (rows.length === 0) {
           emptyBatches++
-          const { error } = await market
-            .from('security')
-            .update({ fundamentals_missing_at: new Date().toISOString() })
-            .in('security_id', batch.filter((b) => !deadSymbols.includes(b.symbol)).map((b) => b.securityId))
-          if (error) throw new Error(`fundamentals_missing_at update failed: ${error.message}`)
-          missing += batch.filter((b) => !deadSymbols.includes(b.symbol)).length
+          if (written > 0) {
+            const { error } = await market
+              .from('security')
+              .update({ fundamentals_missing_at: new Date().toISOString() })
+              .in('security_id', batch.filter((b) => !deadSymbols.includes(b.symbol)).map((b) => b.securityId))
+            if (error) throw new Error(`fundamentals_missing_at update failed: ${error.message}`)
+            missing += batch.filter((b) => !deadSymbols.includes(b.symbol)).length
+          }
           continue
         }
 
@@ -1362,6 +1376,18 @@ Deno.serve(async (req: Request) => {
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           continue
         }
+        // ...BUT ONLY ONCE THIS ENDPOINT HAS ANSWERED FOR SOMEONE IN THIS RUN.
+        //
+        // An empty answer is a legitimate "no data for these" — right up until the endpoint stops
+        // answering at all, when it becomes "no data for anyone" and marking a batch on it is how a
+        // provider hiccup gets recorded as hundreds of permanently unanswerable securities.
+        //
+        // MEASURED, NOT HYPOTHETICAL — this is what it did on 2026-08-13. Draining hard enough to
+        // trip yfinance's rate limit made it answer 200-with-no-rows rather than erroring, so
+        // `fetchWithIsolation`'s outage rule (which only sees THROWS) never fired, and this branch
+        // marked **1,414 securities** as having no industry. Among them: INTC, PEP, XOM, TXN, EA,
+        // SCCO. The largest companies in the United States, recorded as unclassifiable, silently,
+        // while the backlog went to zero and looked drained.
         if (rows.length === 0) {
           // Empty is "no data for these", not a fault — record it so they stop being re-asked.
           // EXCLUDING anything the isolation pass already marked, or a batch where some symbols
@@ -1372,7 +1398,7 @@ Deno.serve(async (req: Request) => {
           const stillUnrecorded = batch
             .filter((b) => !alreadyMissing.has(b.securityId))
             .map((b) => b.securityId)
-          if (stillUnrecorded.length > 0) {
+          if (stillUnrecorded.length > 0 && classified > 0) {
             const { error } = await market
               .from('security')
               .update({ industry_missing_at: new Date().toISOString() })
