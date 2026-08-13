@@ -948,19 +948,27 @@ Deno.serve(async (req: Request) => {
       // was unreachable that way while being one `/v3/mapping` call away. Promotion only ever
       // needed the FIGI.
       const tickerArg = String(symbolScope ?? '').trim().toUpperCase()
+      const exchArg = String(exchScope ?? 'US').trim().toUpperCase()
+      // What the mapping told us, kept so the security can be created from it when the sweep has
+      // not reached this listing. Resolving the FIGI alone is HALF A FEATURE: `untracked_listing`
+      // is built from `exchange_listing`, so a ticker the directory has never enumerated resolves
+      // and then promotes nothing. Measured on the first BABA attempt: `figi BBG006G2JVL2,
+      // promoted: false, reason: already tracked or unknown figi` — the FIGI was right and there
+      // was simply no row to promote.
+      let mapped: { name?: string; compositeFigi?: string; securityType?: string } | undefined
       if (!figi && tickerArg) {
         const hits = await mapTickers(
-          [{ ticker: tickerArg, exchCode: String(exchScope ?? 'US').trim().toUpperCase() }],
+          [{ ticker: tickerArg, exchCode: exchArg }],
           { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined },
         )
-        const hit = hits[0]
-        if (!hit?.compositeFigi) {
+        mapped = hits[0]
+        if (!mapped?.compositeFigi) {
           return json({
             resource, ticker: tickerArg, promoted: false,
             reason: 'OpenFIGI has no listing for that ticker on that exchange',
           })
         }
-        figi = hit.compositeFigi
+        figi = mapped.compositeFigi
       }
 
       if (!figi) return json({ error: 'promote-listing needs a `figi` or a `symbol`' }, 400)
@@ -973,34 +981,67 @@ Deno.serve(async (req: Request) => {
       if (lErr) throw new Error(`untracked_listing read failed: ${lErr.message}`)
       // Already promoted is a SUCCESS, not an error: two people tapping the same row should not
       // produce a failure for the second one.
-      if (!listing) {
+      // Is it already ours? Then this is a SUCCESS, not an error — two people tapping the same row
+      // must not fail for the second one.
+      const { data: existing, error: exErr } = await market
+        .from('security_identifier')
+        .select('security_id')
+        .eq('kind_code', 'figi')
+        .eq('value', figi)
+        .maybeSingle()
+      if (exErr) throw new Error(`security_identifier read failed: ${exErr.message}`)
+      if (existing) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, figi, promoted: false, reason: 'already tracked or unknown figi' })
+        return json({ resource, figi, promoted: false, reason: 'already tracked' })
+      }
+
+      // NOT IN THE DIRECTORY, BUT NAMED BY A PERSON. Build the row from the mapping response
+      // instead of refusing: that is the whole point of promoting by ticker, since the US alone
+      // holds 20,107 common stocks and OpenFIGI pages to 15,000, so waiting for the sweep is not an
+      // answer for "this major company should be here".
+      const source = listing ?? (mapped
+        ? {
+            figi,
+            composite_figi: figi,
+            exch_code: exchArg,
+            ticker: tickerArg,
+            name: mapped.name ?? tickerArg,
+            // The mapping response carries no country. Left NULL rather than guessed — the country
+            // a security is FILED under is not one to invent, and `security-profiles` fills it.
+            country_iso2: null,
+            // No suffix for a US listing; anywhere else the local-symbol backlog resolves it.
+            provider_symbol: exchArg === 'US' ? tickerArg : null,
+          }
+        : null)
+
+      if (!source) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, figi, promoted: false, reason: 'unknown figi and no ticker to map' })
       }
 
       const securityId = crypto.randomUUID()
       const { error: sErr } = await market.from('security').insert({
         security_id: securityId,
-        name: listing.name,
+        name: source.name,
         security_type_code: 'equity',
-        country_iso2: listing.country_iso2 ?? null,
+        country_iso2: source.country_iso2 ?? null,
         is_tradeable: true,
       })
       if (sErr) throw new Error(`security insert failed: ${sErr.message}`)
 
       // FIGI first — it is what stops this listing being offered as untracked again.
       const identifiers = [
-        { kind_code: 'figi', value: listing.composite_figi ?? listing.figi, security_id: securityId, source_code: 'openfigi' },
-        { kind_code: 'ticker', value: listing.ticker, security_id: securityId, source_code: 'openfigi' },
+        { kind_code: 'figi', value: source.composite_figi ?? source.figi, security_id: securityId, source_code: 'openfigi' },
+        { kind_code: 'ticker', value: source.ticker, security_id: securityId, source_code: 'openfigi' },
       ]
       const { error: iErr } = await market
         .from('security_identifier')
         .upsert(identifiers, { onConflict: 'kind_code,value', ignoreDuplicates: true })
       if (iErr) throw new Error(`identifier insert failed: ${iErr.message}`)
 
-      if (listing.provider_symbol) {
+      if (source.provider_symbol) {
         const { error: pErr } = await market.from('security_provider_symbol').upsert(
-          { security_id: securityId, provider_code: 'yfinance', symbol: listing.provider_symbol },
+          { security_id: securityId, provider_code: 'yfinance', symbol: source.provider_symbol },
           { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
         )
         if (pErr) throw new Error(`provider symbol insert failed: ${pErr.message}`)
@@ -1012,7 +1053,7 @@ Deno.serve(async (req: Request) => {
         figi,
         promoted: true,
         securityId,
-        symbol: listing.provider_symbol ?? listing.ticker,
+        symbol: source.provider_symbol ?? source.ticker,
         note: 'sector and returns arrive on the next security-profiles / security-performance run',
       })
     }
