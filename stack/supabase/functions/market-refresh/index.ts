@@ -23,7 +23,13 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
-import { listExchange, mapIsinsToLocalSymbols, mapIsinsToTickers } from './figi.ts'
+import {
+  listExchange,
+  mapIsinsToLocalSymbols,
+  mapIsinsToTickers,
+  mapTickers,
+  PAGING_CEILING,
+} from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
@@ -121,6 +127,7 @@ Deno.serve(async (req: Request) => {
   let fundScope: string | undefined
   let figiScope: string | undefined
   let symbolScope: string | undefined
+  let exchScope: string | undefined
   let force = false
   // Caps how much a backlog resource attempts in one run. Added as a BISECT tool: when
   // `security-industries` died in 3.8s with a bare 502, nothing distinguished "too much work"
@@ -145,6 +152,8 @@ Deno.serve(async (req: Request) => {
     if (body?.fund) fundScope = String(body.fund).toUpperCase()
     if (body?.figi) figiScope = String(body.figi).trim()
     if (body?.symbol) symbolScope = String(body.symbol).trim()
+    // Which venue a promoted ticker lives on. Defaults to US, where the ADRs are.
+    if (body?.exchange) exchScope = String(body.exchange).trim()
     if (Number.isFinite(body?.limit)) scopeLimit = Math.max(1, Math.min(1000, Number(body.limit)))
     // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
     // refreshes must still collapse into one upstream fetch. Requires the
@@ -932,8 +941,29 @@ Deno.serve(async (req: Request) => {
     }
 
     if (resource === PROMOTE_RESOURCE) {
-      const figi = String(figiScope ?? '').trim()
-      if (!figi) return json({ error: 'promote-listing needs a `figi`' }, 400)
+      let figi = String(figiScope ?? '').trim()
+
+      // PROMOTE BY TICKER, without waiting for the venue to be enumerated. The directory route
+      // needs the sweep to have reached the listing and it pages no deeper than 15,000, so `BABA`
+      // was unreachable that way while being one `/v3/mapping` call away. Promotion only ever
+      // needed the FIGI.
+      const tickerArg = String(symbolScope ?? '').trim().toUpperCase()
+      if (!figi && tickerArg) {
+        const hits = await mapTickers(
+          [{ ticker: tickerArg, exchCode: String(exchScope ?? 'US').trim().toUpperCase() }],
+          { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined },
+        )
+        const hit = hits[0]
+        if (!hit?.compositeFigi) {
+          return json({
+            resource, ticker: tickerArg, promoted: false,
+            reason: 'OpenFIGI has no listing for that ticker on that exchange',
+          })
+        }
+        figi = hit.compositeFigi
+      }
+
+      if (!figi) return json({ error: 'promote-listing needs a `figi` or a `symbol`' }, 400)
 
       const { data: listing, error: lErr } = await market
         .from('untracked_listing')
@@ -990,7 +1020,7 @@ Deno.serve(async (req: Request) => {
     if (resource === LISTINGS_RESOURCE) {
       const { data: cursors, error: curErr } = await market
         .from('exchange_cursor')
-        .select('exch_code,country_iso2,suffix,next_cursor,last_run_at,security_type')
+        .select('exch_code,country_iso2,suffix,next_cursor,last_run_at,security_type,query_prefix')
         .eq('enabled', true)
         // Least recently run first, so no venue is starved by the ones before it. A venue
         // mid-enumeration (next_cursor set) is finished before a fresh one is started.
@@ -1011,10 +1041,16 @@ Deno.serve(async (req: Request) => {
       // sweep held `BABB`, `BABAF` and `BABYF` but not `BABA` — and the same for TSM, NVO and every
       // other foreign company's US line, the exact names someone expects to find.
       const secType = (target.security_type as string | null) ?? 'Common Stock'
+      // NULL means "sweep the venue whole"; a prefix means it is too large for one query.
+      const prefix = (target.query_prefix as string | null) ?? undefined
       const { listings, next, pages, total } = await listExchange(
         exch,
         (target.next_cursor as string | null) ?? undefined,
-        { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined, securityType2: secType },
+        {
+          apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
+          securityType2: secType,
+          query: prefix,
+        },
       )
 
       let written = 0
@@ -1037,18 +1073,47 @@ Deno.serve(async (req: Request) => {
 
       // When a TYPE is exhausted, advance to the next one rather than declaring the venue done.
       // The list is a table, so adding "Preferred Stock" later is a row rather than a deploy.
+      // WHERE TO GO NEXT — three nested dimensions: page -> prefix -> type.
       let nextType = secType
-      if (!next) {
-        const { data: types, error: tErr } = await market
-          .from('exchange_sweep_type')
-          .select('security_type,sort_order')
+      let nextPrefix: string | null = prefix ?? null
+
+      // Too big to page through whole, so take it in slices. Decided from the `total` the API
+      // itself reports rather than a list of "big" exchanges: Athens has 606 listings and slicing
+      // it into 36 would be 36 requests to fetch what one gets.
+      if (!prefix && (total ?? 0) > PAGING_CEILING) {
+        const { data: first, error: pErr } = await market
+          .from('exchange_sweep_partition')
+          .select('prefix,sort_order')
           .order('sort_order')
-        if (tErr) throw new Error(`exchange_sweep_type read failed: ${tErr.message}`)
-        const order = (types ?? []).map((t) => t.security_type as string)
-        const at = order.indexOf(secType)
-        // Past the last type, wrap to the first: the directory is a living thing, and a venue that
-        // finished every type months ago should eventually be re-enumerated for new listings.
-        nextType = order.length === 0 ? secType : order[(at + 1) % order.length]
+          .limit(1)
+        if (pErr) throw new Error(`exchange_sweep_partition read failed: ${pErr.message}`)
+        nextPrefix = (first?.[0]?.prefix as string | undefined) ?? null
+      } else if (!next) {
+        const { data: parts, error: pErr } = await market
+          .from('exchange_sweep_partition')
+          .select('prefix,sort_order')
+          .order('sort_order')
+        if (pErr) throw new Error(`exchange_sweep_partition read failed: ${pErr.message}`)
+        const prefixes = (parts ?? []).map((r) => r.prefix as string)
+
+        if (prefix) {
+          const at = prefixes.indexOf(prefix)
+          nextPrefix = at >= 0 && at + 1 < prefixes.length ? prefixes[at + 1] : null
+        }
+
+        // Only advance the TYPE once the prefixes are exhausted (or there were none).
+        if (!nextPrefix) {
+          const { data: types, error: tErr } = await market
+            .from('exchange_sweep_type')
+            .select('security_type,sort_order')
+            .order('sort_order')
+          if (tErr) throw new Error(`exchange_sweep_type read failed: ${tErr.message}`)
+          const order = (types ?? []).map((t) => t.security_type as string)
+          const at = order.indexOf(secType)
+          // Past the last type, wrap to the first: the directory is a living thing, and a venue
+          // swept months ago should eventually be re-enumerated for new listings.
+          nextType = order.length === 0 ? secType : order[(at + 1) % order.length]
+        }
       }
 
       const { error: updErr } = await market
@@ -1058,6 +1123,7 @@ Deno.serve(async (req: Request) => {
           // than resuming a page that no longer exists.
           next_cursor: next ?? null,
           security_type: nextType,
+          query_prefix: next ? (prefix ?? null) : nextPrefix,
           last_run_at: new Date().toISOString(),
           listings: written,
         })
