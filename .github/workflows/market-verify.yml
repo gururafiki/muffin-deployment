@@ -46,15 +46,30 @@ jobs:
           fail=0
           # PostgREST returns the row count in Content-Range with Prefer: count=exact, so a
           # count costs one request and no body.
+          # WHY THE BODY IS KEPT. A count that comes back empty used to be reported as
+          # "auth, schema cache, or service down" — a guess, and on 2026-08-13 the wrong one: the
+          # real answer was `57014 canceling statement due to statement timeout`, because the run
+          # overlapped a DEPLOY. Migrations re-apply in full on every deploy and migration 35 drops
+          # and recreates the serving views, so an anon read taken at that moment blocks on their
+          # locks until PostgREST gives up. service_role sailed through (BYPASSRLS), which made it
+          # look like a grant problem and cost a round of probing.
+          #
+          # The body says which it is, and PostgREST always sends one, so keep it and print it.
+          #
+          # THROUGH A FILE, not a variable. `count` is always called as `$(count …)`, which runs it
+          # in a SUBSHELL — an assignment there cannot reach the caller, so a `last_body` global
+          # would read empty at exactly the moment it is wanted. A file outlives the subshell.
+          BODY=/tmp/market-verify-last-body
           count() {
-            curl -sS --max-time 60 -o /dev/null -D - "$BASE/rest/v1/$1" \
+            curl -sS --max-time 60 -D /tmp/market-verify-hdr -o "$BODY" "$BASE/rest/v1/$1" \
               -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
-              -H 'Accept-Profile: market' -H 'Prefer: count=exact' -H 'Range: 0-0' \
-              2>/dev/null | tr -d '\r' | awk -F'/' '/^[Cc]ontent-[Rr]ange:/ {print $2}'
+              -H 'Accept-Profile: market' -H 'Prefer: count=exact' -H 'Range: 0-0' 2>/dev/null
+            tr -d '\r' < /tmp/market-verify-hdr | awk -F'/' '/^[Cc]ontent-[Rr]ange:/ {print $2}'
           }
+          last_body() { head -c 200 "$BODY" 2>/dev/null || echo '<no body>'; }
           check_min() { # name, actual, floor
             if [ -z "${2:-}" ] || [ "$2" = "*" ]; then
-              echo "::error::$1 — could not read a count (auth, schema cache, or service down)"; fail=1; return
+              echo "::error::$1 — could not read a count: $(last_body)"; fail=1; return
             fi
             if [ "$2" -lt "$3" ]; then
               echo "::error::$1 = $2, expected at least $3"; fail=1
@@ -64,7 +79,7 @@ jobs:
           }
           check_zero() {
             if [ -z "${2:-}" ] || [ "$2" = "*" ]; then
-              echo "::error::$1 — could not read a count"; fail=1; return
+              echo "::error::$1 — could not read a count: $(last_body)"; fail=1; return
             fi
             if [ "$2" -ne 0 ]; then echo "::error::$1 = $2, expected 0"; fail=1
             else echo "  ok   $1 = 0"; fi
