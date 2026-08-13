@@ -381,18 +381,33 @@ console.log('\nbatch outcomes — a failure and an empty answer are different br
 console.log('\nempty-answer marking — gated on the endpoint having answered')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const lines = index.split('\n')
-  const ungated: string[] = []
-  lines.forEach((line, i) => {
-    if (!/if \(rows\.length === 0\)/.test(line)) return
-    const block = lines.slice(i, i + 26).join('\n')
-    if (!/_missing_at: new Date/.test(block)) return          // this branch marks nothing
-    if (/\b(written|classified) > 0\b/.test(block)) return     // ...and it is gated
-    ungated.push(`line ${i + 1}`)
-  })
-  check(ungated.length === 0,
-    'no empty-answer branch marks securities before the endpoint has answered',
-    ungated.length ? ungated.join(', ') : 'all gated')
+
+  // WHY A LIST OF EXACT GATES rather than an analysis of the branches.
+  //
+  // The first version of this check walked from each `… .length === 0` branch to its closing brace
+  // and asked whether a gate appeared inside. It caught ONE of four deleted gates when tested by
+  // mutation: brace depth counted braces in comments and template literals too, so most blocks
+  // ended early and the write fell outside the window — the check reported "all six marking sites
+  // gated" while three were not. It would have shipped as protection while protecting nothing,
+  // which is the failure mode this whole file exists to prevent.
+  //
+  // A named list is brittle to refactoring and that is the acceptable trade: rewording a gate fails
+  // here loudly and the list gets updated, whereas DELETING one — the thing that costs thousands of
+  // securities — can never pass silently.
+  //
+  // Each entry is a site where a batch that produced nothing writes a `*_missing_at`, and the
+  // string is the proof that the endpoint answered for someone in this run.
+  const gates: [string, string][] = [
+    ['security-prices',       'ids.length > 0 && written > 0'],
+    ['security-performance',  'missedIds.length > 0 && fetched.length > 0'],
+    ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
+    ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
+    ['security-profiles',     'if (classified > 0) {'],
+    ['security-fundamentals', 'if (written > 0) {'],
+  ]
+  for (const [resource, gate] of gates) {
+    check(index.includes(gate), `${resource} still gates its empty-answer marking`, gate)
+  }
 }
 
 console.log('\nresource registry — the cron and the function agree')
