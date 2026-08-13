@@ -275,10 +275,19 @@ export interface ExchangeListing {
  * `securityType2: 'Common Stock'` is not optional: an unfiltered query returns derivatives too
  * (searching "Samsung Electronics" gives 8,725 hits, nearly all options on it).
  */
+/**
+ * @param securityType2 What kind of instrument to enumerate. Defaults to `Common Stock`.
+ *
+ * **ADRs ARE A SEPARATE TYPE, AND SWEEPING ONLY COMMON STOCK LOSES EVERY ONE OF THEM.** Measured
+ * 2026-08-13: `BABA` carries `securityType2: 'Depositary Receipt'` (`securityType: 'ADR'`), so it
+ * was absent from a 15,000-row US sweep that contained `BABB`, `BABAF` and `BABYF`. The same is
+ * true of every major foreign company's US listing — TSM, NVO, SAP's ADR — which is exactly the
+ * population someone expects to find and cannot.
+ */
 export async function listExchange(
   exchCode: string,
   cursor: string | undefined,
-  opts: { apiKey?: string; maxPages?: number; budgetMs?: number } = {},
+  opts: { apiKey?: string; maxPages?: number; budgetMs?: number; securityType2?: string } = {},
 ): Promise<{ listings: ExchangeListing[]; next?: string; pages: number; total?: number }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
@@ -297,7 +306,7 @@ export async function listExchange(
       headers,
       body: JSON.stringify({
         exchCode,
-        securityType2: 'Common Stock',
+        securityType2: opts.securityType2 ?? 'Common Stock',
         ...(next ? { start: next } : {}),
       }),
       signal: AbortSignal.timeout(20_000),

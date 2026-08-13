@@ -990,7 +990,7 @@ Deno.serve(async (req: Request) => {
     if (resource === LISTINGS_RESOURCE) {
       const { data: cursors, error: curErr } = await market
         .from('exchange_cursor')
-        .select('exch_code,country_iso2,suffix,next_cursor,last_run_at')
+        .select('exch_code,country_iso2,suffix,next_cursor,last_run_at,security_type')
         .eq('enabled', true)
         // Least recently run first, so no venue is starved by the ones before it. A venue
         // mid-enumeration (next_cursor set) is finished before a fresh one is started.
@@ -1006,10 +1006,15 @@ Deno.serve(async (req: Request) => {
 
       const exch = target.exch_code as string
       const suffix = (target.suffix as string | null) ?? ''
+      // WHICH KIND OF INSTRUMENT THIS VENUE IS PART-WAY THROUGH. Sweeping only `Common Stock` loses
+      // every ADR: `BABA` is `securityType2: 'Depositary Receipt'`, which is why a 15,000-row US
+      // sweep held `BABB`, `BABAF` and `BABYF` but not `BABA` — and the same for TSM, NVO and every
+      // other foreign company's US line, the exact names someone expects to find.
+      const secType = (target.security_type as string | null) ?? 'Common Stock'
       const { listings, next, pages, total } = await listExchange(
         exch,
         (target.next_cursor as string | null) ?? undefined,
-        { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined },
+        { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined, securityType2: secType },
       )
 
       let written = 0
@@ -1030,12 +1035,29 @@ Deno.serve(async (req: Request) => {
         written += chunk.length
       }
 
+      // When a TYPE is exhausted, advance to the next one rather than declaring the venue done.
+      // The list is a table, so adding "Preferred Stock" later is a row rather than a deploy.
+      let nextType = secType
+      if (!next) {
+        const { data: types, error: tErr } = await market
+          .from('exchange_sweep_type')
+          .select('security_type,sort_order')
+          .order('sort_order')
+        if (tErr) throw new Error(`exchange_sweep_type read failed: ${tErr.message}`)
+        const order = (types ?? []).map((t) => t.security_type as string)
+        const at = order.indexOf(secType)
+        // Past the last type, wrap to the first: the directory is a living thing, and a venue that
+        // finished every type months ago should eventually be re-enumerated for new listings.
+        nextType = order.length === 0 ? secType : order[(at + 1) % order.length]
+      }
+
       const { error: updErr } = await market
         .from('exchange_cursor')
         .update({
-          // A null cursor means the venue is exhausted, so the next run starts it over rather than
-          // resuming a page that no longer exists.
+          // A null cursor means this TYPE is exhausted, so the next run starts the next type rather
+          // than resuming a page that no longer exists.
           next_cursor: next ?? null,
+          security_type: nextType,
           last_run_at: new Date().toISOString(),
           listings: written,
         })
