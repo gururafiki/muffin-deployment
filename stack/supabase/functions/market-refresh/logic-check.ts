@@ -445,6 +445,35 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   }
 }
 
+// ── an offshore incorporation is not a market ────────────────────────────────
+// N-PORT reports the INCORPORATION jurisdiction, so Alibaba is filed under `KY`. There is no
+// exchange in the Cayman Islands, so the strict home-market rule refused every hit — including the
+// correct one — and the security fell back to OpenFIGI's US lookup: displayed AND priced as `BABAF`
+// while its real listing is `9988.HK`. 180 equities sit in venue-less jurisdictions (119 KY, 56 BM,
+// 5 VG), none of them drillable.
+console.log('\npickHomeListing — a country with no venues still resolves')
+{
+  const offshore: YahooHit[] = [
+    { symbol: 'KYG017191142.SG', quoteType: 'EQUITY' },   // Stuttgart — not in the venue table
+    { symbol: '9988.HK', quoteType: 'EQUITY' },           // Hong Kong — the real listing
+  ]
+  check(pickHomeListing(offshore, 'KY', VENUES) === '9988.HK',
+    'a Cayman-filed security resolves to its real exchange',
+    String(pickHomeListing(offshore, 'KY', VENUES)))
+
+  // The strict rule must still hold where the country DOES name markets, or a Korean bank gets
+  // priced off its Frankfurt line — the mistake `exchanges.ts` exists to prevent.
+  const korean: YahooHit[] = [
+    { symbol: 'KRX.F', quoteType: 'EQUITY' },             // Frankfurt
+    { symbol: '005930.KS', quoteType: 'EQUITY' },         // Seoul
+  ]
+  check(pickHomeListing(korean, 'KR', VENUES) === '005930.KS',
+    'a country WITH venues still requires one of its own',
+    String(pickHomeListing(korean, 'KR', VENUES)))
+  check(pickHomeListing([{ symbol: 'KRX.F', quoteType: 'EQUITY' }], 'KR', VENUES) === null,
+    'and refuses a foreign cross-listing rather than taking it')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
