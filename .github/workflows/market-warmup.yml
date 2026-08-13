@@ -108,7 +108,12 @@ jobs:
 
             # `skipped` is a SUCCESS: it means the data was already fresh, which is
             # exactly what a warm-up wants to find.
-            if [ "$code" = "200" ]; then
+            #
+            # A FAILED RESOURCE NOW ANSWERS 200 WITH `"ok":false`, so the HTTP code alone is no
+            # longer the verdict. It used to answer 502 — and the proxy replaced the body with its
+            # own `error code: 502`, so this printed `failed (HTTP 502): error code: 502` and told
+            # nobody anything. 5xx is reserved for a genuinely dead worker again.
+            if [ "$code" = "200" ] && ! printf '%s' "$payload" | grep -q '"ok":false'; then
               echo "  ok       $r -> $payload"
             else
               echo "::warning::$r failed (HTTP $code): $payload"
