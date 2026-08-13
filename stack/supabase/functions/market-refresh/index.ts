@@ -425,10 +425,16 @@ Deno.serve(async (req: Request) => {
               { onConflict: 'security_id,statement,period_ending' })
           if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
           written += rows.length
-        } else if (anyAnswer || failed === 0) {
+        } else if (anyAnswer || (failed === 0 && written > 0)) {
           // Answered with nothing, rather than not answered at all — record it so this security
           // stops being re-asked. A provider failure is NOT marked, or one outage would silence
           // thousands of companies for a month.
+          //
+          // `failed === 0` ALONE WAS THE HOLE, and it is a big one: when a throttled provider
+          // answers 200-with-no-rows instead of erroring, nothing fails and nothing answers, so
+          // this marked every security it touched. 5,613 carried `statements_missing_at` from a
+          // single afternoon. `written > 0` is the missing half — proof the endpoint produced rows
+          // for SOMEONE in this run, not merely that it declined to throw.
           none++
           const { error } = await market
             .from('security')
@@ -1064,10 +1070,16 @@ Deno.serve(async (req: Request) => {
           // The provider answered and had nothing for these. Negative-cache so they stop being
           // re-asked — but only when the batch itself did not fail, or a rate limit would mark the
           // whole universe unpriceable (the 1,369 mistake).
+          //
+          // "DID NOT FAIL" IS A THROW CHECK, AND THAT WAS THE HOLE. A throttled provider answers
+          // 200-with-no-rows rather than erroring, so nothing throws, every batch looks like a
+          // clean "no data", and the whole page is marked anyway — the mistake this comment was
+          // written to prevent, committed underneath it. `written > 0` is the missing half: proof
+          // the provider produced bars for SOMEONE in this run.
           const ids = plan.symbols
             .map((s) => bySymbolId.get(s.symbol))
             .filter((id): id is string => !!id)
-          if (ids.length > 0) {
+          if (ids.length > 0 && written > 0) {
             const { error } = await market
               .from('security')
               .update({ prices_missing_at: new Date().toISOString() })
@@ -1795,7 +1807,11 @@ Deno.serve(async (req: Request) => {
           .filter((sym) => !got.has(sym))
           .map((sym) => fetchToSecurity.get(sym))
           .filter((id): id is string => !!id)
-        if (missedIds.length > 0) {
+        // GATED ON THE BATCH HAVING ANSWERED AT ALL. `missedIds` means "the provider answered
+        // about the batch but had no series for these" — which is only true if it answered about
+        // ANY of them. With `fetched` empty this marked all 40, and a throttled provider returning
+        // 200-with-no-rows makes that every batch in the run: 1,205 securities in one afternoon.
+        if (missedIds.length > 0 && fetched.length > 0) {
           const { error } = await market
             .from('security')
             .update({ performance_missing_at: new Date().toISOString() })
