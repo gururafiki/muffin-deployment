@@ -275,10 +275,79 @@ export interface ExchangeListing {
  * `securityType2: 'Common Stock'` is not optional: an unfiltered query returns derivatives too
  * (searching "Samsung Electronics" gives 8,725 hits, nearly all options on it).
  */
+/**
+ * @param securityType2 What kind of instrument to enumerate. Defaults to `Common Stock`.
+ *
+ * **ADRs ARE A SEPARATE TYPE, AND SWEEPING ONLY COMMON STOCK LOSES EVERY ONE OF THEM.** Measured
+ * 2026-08-13: `BABA` carries `securityType2: 'Depositary Receipt'` (`securityType: 'ADR'`), so it
+ * was absent from a 15,000-row US sweep that contained `BABB`, `BABAF` and `BABYF`. The same is
+ * true of every major foreign company's US listing — TSM, NVO, SAP's ADR — which is exactly the
+ * population someone expects to find and cannot.
+ */
+/**
+ * OpenFIGI `/v3/filter` reports the true `total` but stops PAGING here. Measured 2026-08-14:
+ * `exchCode: US` + `Common Stock` reports 20,107 and yields exactly 15,000, then offers no further
+ * cursor. It is a silent ceiling — the sweep looks finished rather than truncated.
+ */
+export const PAGING_CEILING = 15_000;
+
+/**
+ * Resolve a NAMED TICKER to its composite FIGI, so a company can be promoted without waiting for
+ * its exchange to be enumerated.
+ *
+ * The directory route needs the sweep to have reached the listing, and it pages no deeper than
+ * `PAGING_CEILING` — the US reports 20,107 common stocks and yields 15,000. So `BABA` was
+ * unreachable that way while being one `/v3/mapping` call away:
+ *
+ *   TICKER=BABA exchCode=US -> BBG006G2JVL2, ALIBABA GROUP HOLDING-SP ADR, Depositary Receipt
+ *
+ * Deliberately does NOT filter by `securityType2`: the caller named a specific ticker, so an ADR is
+ * as valid an answer as a common share — which is the point, since ADRs are exactly what a
+ * Common-Stock-only sweep drops.
+ */
+export async function mapTickers(
+  wanted: { ticker: string; exchCode?: string }[],
+  opts: { apiKey?: string; timeoutMs?: number } = {},
+): Promise<{ ticker: string; name?: string; compositeFigi?: string; securityType?: string }[]> {
+  if (wanted.length === 0) return [];
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
+
+  const res = await fetch('https://api.openfigi.com/v3/mapping', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(
+      wanted.map((w) => ({
+        idType: 'TICKER',
+        idValue: w.ticker.toUpperCase(),
+        ...(w.exchCode ? { exchCode: w.exchCode.toUpperCase() } : {}),
+      })),
+    ),
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
+  });
+  if (!res.ok) throw new Error(`openfigi mapping ${res.status}`);
+
+  const body = (await res.json()) as ({ data?: Record<string, unknown>[]; warning?: string })[];
+  return wanted.map((w, i) => {
+    const hit = body[i]?.data?.[0];
+    return {
+      ticker: w.ticker.toUpperCase(),
+      name: hit?.name ? String(hit.name) : undefined,
+      compositeFigi: hit?.compositeFIGI ? String(hit.compositeFIGI) : undefined,
+      securityType: hit?.securityType2 ? String(hit.securityType2) : undefined,
+    };
+  });
+}
+
 export async function listExchange(
   exchCode: string,
   cursor: string | undefined,
-  opts: { apiKey?: string; maxPages?: number; budgetMs?: number } = {},
+  opts: {
+    apiKey?: string; maxPages?: number; budgetMs?: number;
+    securityType2?: string;
+    /** Ticker prefix, when the venue is too large to enumerate whole. See PAGING_CEILING. */
+    query?: string;
+  } = {},
 ): Promise<{ listings: ExchangeListing[]; next?: string; pages: number; total?: number }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
@@ -297,7 +366,8 @@ export async function listExchange(
       headers,
       body: JSON.stringify({
         exchCode,
-        securityType2: 'Common Stock',
+        securityType2: opts.securityType2 ?? 'Common Stock',
+        ...(opts.query ? { query: opts.query } : {}),
         ...(next ? { start: next } : {}),
       }),
       signal: AbortSignal.timeout(20_000),
