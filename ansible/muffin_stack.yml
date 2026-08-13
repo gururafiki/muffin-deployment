@@ -247,8 +247,25 @@
     - name: Apply idempotent app migrations (tables + RLS)
       shell: >
         docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)"
-        psql -U postgres -v ON_ERROR_STOP=1 -d postgres
+        psql -U postgres --single-transaction -v ON_ERROR_STOP=1 -d postgres
         < "/home/ubuntu/supabase/migrations/{{ item | basename }}"
+      # `--single-transaction` because psql otherwise AUTOCOMMITS EACH STATEMENT, and two
+      # consequences of that both bit today:
+      #
+      #   1. Migration 35 drops the serving views before recreating them (it discovers dependents
+      #      via pg_depend). Autocommitted, that leaves a window where they do not exist, and every
+      #      reader in it fails — `price_series` 42P01, `pending_performance.fetch_symbol does not
+      #      exist`, and a `fund_sector_weight` statement timeout, all chased as bugs before being
+      #      recognised as a deploy in progress.
+      #   2. A migration that fails PART WAY leaves its earlier statements committed. That is how
+      #      migration 38's failure left production without `pending_prices` — 35 had already
+      #      dropped it and 38 died before anything recreated it.
+      #
+      # Verified before enabling: the whole set applies three times under --single-transaction and
+      # all seven behaviour tests pass. Migration 39 carries its own begin/commit for a temp-table
+      # rekey; under this flag its inner commit simply ends the outer transaction early, which is no
+      # worse than the autocommit it has always had.
+      #
       # `with_fileglob` does NOT sort — it returns Python glob order, which is
       # filesystem order. Measured 2026-08-09: the migrations ran 04, 01, 05, 02, 03,
       # so 04/05 hit a `market` schema that 02 had not created yet and the deploy

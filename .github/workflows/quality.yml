@@ -106,7 +106,10 @@ jobs:
           for pass in 1 2; do
             echo "--- pass $pass ---"
             for f in $files; do
-              if ! psql -h localhost -U postgres -q -v ON_ERROR_STOP=1 -f "$f" > /tmp/out 2>&1; then
+              # `--single-transaction` mirrors how Ansible applies these in production. Without the
+              # flag here, CI would pass on a set that fails there — a migration whose statements
+              # only work because each autocommits separately would go unnoticed.
+              if ! psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 -f "$f" > /tmp/out 2>&1; then
                 echo "::error::$(basename "$f") failed on pass $pass: $(grep -m1 ERROR /tmp/out)"
                 exit 1
               fi
