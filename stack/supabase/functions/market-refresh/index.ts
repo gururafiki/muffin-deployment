@@ -2068,7 +2068,7 @@ Deno.serve(async (req: Request) => {
       // holding all of that in a 150 MB worker is what killed it (a bare 502, no error body — the
       // same failure and the same fix as the price refresh). This also means a worker that dies
       // keeps the progress it already made.
-      const writeBatch = async (batch: { securityId: string; ticker: string }[], missed: string[]) => {
+      const writeBatch = async (batch: { securityId: string; ticker: string; name?: string }[], missed: string[]) => {
         // Record the misses FIRST — a negative result is a result. Without it the ~80% of holdings
         // with no US listing stay in the backlog and are re-sent to OpenFIGI four times a day
         // forever, starving the securities that could actually resolve.
@@ -2093,6 +2093,28 @@ Deno.serve(async (req: Request) => {
           { onConflict: 'kind_code,value', ignoreDuplicates: true },
         )
         if (insErr) throw new Error(`ticker upsert failed: ${insErr.message}`)
+
+        // A PLACEHOLDER NAME IS NOT A NAME, and the fix arrives in this same response.
+        //
+        // N-PORT lets a filer report a holding as `New Issuer: BB Company ID:<n>` — a Bloomberg
+        // internal id, not a company — and 28 securities carry one. The app renders `security.name`
+        // verbatim, so those read as exactly that string. OpenFIGI knows them, and it has been
+        // returning the name alongside the ticker all along; it was simply dropped on the floor.
+        // Measured: INE377Y01014 -> BAJAJ HOUSING FINANCE LTD, AEE01569T248 -> TALABAT HOLDING PLC,
+        // INE379A01028 -> ITC HOTELS LIMITED.
+        //
+        // Only replaces a PLACEHOLDER. A real filed name is the filing's own word for the security
+        // and outranks a vendor's, which is the same rule `security_taxonomy` follows for a curated
+        // sector over a provider's.
+        for (const r of batch) {
+          if (!r.name) continue
+          const { error } = await market
+            .from('security')
+            .update({ name: r.name })
+            .eq('security_id', r.securityId)
+            .or('name.ilike.New Issuer:*,name.ilike.*Company ID:*')
+          if (error) throw new Error(`placeholder rename failed: ${error.message}`)
+        }
         // Now priceable and linkable, which is what `is_tradeable` means.
         const { error: updErr } = await market
           .from('security')

@@ -33,6 +33,14 @@ export interface FigiResult {
   ticker: string;
   exchCode?: string;
   securityType?: string;
+  /**
+   * The issuer name OpenFIGI holds, which arrives in the SAME response as the ticker and was being
+   * discarded. It is the only route to a usable name for the 28 securities N-PORT reports as
+   * `New Issuer: BB Company ID:<n>` — a filer placeholder, not a company, which the app would
+   * render verbatim. Measured 2026-08-13: INE377Y01014 -> BAJAJ HOUSING FINANCE LTD,
+   * AEE01569T248 -> TALABAT HOLDING PLC, INE379A01028 -> ITC HOTELS LIMITED.
+   */
+  name?: string;
 }
 
 export interface LocalSymbolResult {
@@ -148,6 +156,7 @@ export async function mapIsinsToTickers(
         ticker: ticker.toUpperCase(),
         exchCode: hit?.exchCode ? String(hit.exchCode) : undefined,
         securityType: hit?.securityType ? String(hit.securityType) : undefined,
+        name: hit?.name ? String(hit.name) : undefined,
       });
     }
     if (opts.onBatch) await opts.onBatch(resolved, missed);
