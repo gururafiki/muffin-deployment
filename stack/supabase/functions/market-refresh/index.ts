@@ -1367,12 +1367,19 @@ Deno.serve(async (req: Request) => {
         // (has a sector, lacks an industry), which is where the caps for the existing universe
         // come from. Same response, no extra request.
         const caps: { security_id: string; market_cap: number }[] = []
+        // The CURRENCY rides along too. `equity/profile` returns it in the SAME response the market
+        // cap comes from and it was being discarded, leaving 1,675 securities with a cap and no
+        // currency — which `formatMoney` then renders unlabelled. Same reasoning as the cap itself:
+        // no extra request, no new provider, only storing a field already on the wire.
+        const currencies: { security_id: string; code: string }[] = []
         for (const r of rows) {
           const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
           if (!securityId) continue
           answered.add(securityId)
           const cap = Number(r.market_cap)
           if (Number.isFinite(cap) && cap > 0) caps.push({ security_id: securityId, market_cap: cap })
+          const cur = typeof r.currency === 'string' ? r.currency.trim().toUpperCase() : ''
+          if (/^[A-Z]{3}$/.test(cur)) currencies.push({ security_id: securityId, code: cur })
           // `industry_category`, NOT `industry` — the latter is present on the yfinance response
           // and is always null, which is how the old sub-sectors silently came back empty.
           const label = String(r.industry_category ?? '').trim()
@@ -1413,6 +1420,25 @@ Deno.serve(async (req: Request) => {
           if (error) throw new Error(`market_cap update failed: ${error.message}`)
         }
         capped += caps.length
+
+        // Learn the codes BEFORE referencing them: `security.currency_code` is a foreign key, and an
+        // unseen code fails the STATEMENT rather than the row — the exact failure the fundamentals
+        // path hit on 2026-08-12.
+        const unseen = [...new Set(currencies.map((c) => c.code))]
+        if (unseen.length > 0) {
+          const { error: curErr } = await market
+            .from('currency')
+            .upsert(unseen.map((code) => ({ code })), { onConflict: 'code', ignoreDuplicates: true })
+          if (curErr) throw new Error(`currency learn failed: ${curErr.message}`)
+        }
+        for (const c of currencies) {
+          const { error } = await market
+            .from('security')
+            .update({ currency_code: c.code })
+            .eq('security_id', c.security_id)
+            .or(`currency_code.is.null,currency_code.neq.${c.code}`)
+          if (error) throw new Error(`currency_code update failed: ${error.message}`)
+        }
 
         const writes = pairs
           .filter((p) => industryNode.has(p.code))
