@@ -612,11 +612,28 @@ Deno.serve(async (req: Request) => {
             const raw = (w.raw as Record<string, unknown> | undefined)?.currency
             if (typeof raw !== 'string' || !/^[A-Za-z]{3}$/.test(raw)) continue
             const cur = raw.toUpperCase()
+            // THE PROVIDER WINS, and this is the one place a filing does not.
+            //
+            // N-PORT's `curCd` is the currency the FUND valued the position in — for a US-domiciled
+            // fund that is frequently USD regardless of where the security trades. The provider
+            // reports the quote currency of the symbol we asked about, which IS the security's own
+            // currency by construction.
+            //
+            // Measured 2026-08-13: of 1,000 securities with fundamentals, 14 disagreed and every
+            // one was `stored=USD` against `provider=PEN/CLP/BRL/EUR` — Peruvian, Chilean and
+            // Brazilian securities labelled in dollars. That mislabels the figures the stock page
+            // renders, which is exactly what the currency work fixed for everything else.
+            //
+            // Previously `.is('currency_code', null)` meant the first value ever written stuck, so
+            // an early wrong N-PORT currency was permanent.
+            // `.neq()` alone would skip every row where the column is NULL — SQL comparisons
+            // against NULL are never true, and NULL is the majority case here. `.or()` covers both
+            // "never set" and "set to something the provider disagrees with".
             const { error: cErr } = await market
               .from('security')
               .update({ currency_code: cur })
               .eq('security_id', w.security_id as string)
-              .is('currency_code', null)
+              .or(`currency_code.is.null,currency_code.neq.${cur}`)
             if (cErr) throw new Error(`currency_code update failed: ${cErr.message}`)
           }
         }
