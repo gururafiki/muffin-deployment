@@ -1231,20 +1231,19 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // A NEW SYMBOL INVALIDATES EVERY NEGATIVE CACHE. Those flags record "we asked and got
-        // nothing" — but we asked under the WRONG NAME, so leaving them set would fix the spelling
-        // and still exclude the security from every backlog for 30 days. This clearing is the
-        // difference between resolving a symbol and actually recovering the security.
+        // A NEW SYMBOL INVALIDATES EVERY SYMBOL-KEYED NEGATIVE CACHE. Those flags record "we asked
+        // and got nothing" — but we asked under the WRONG NAME, so leaving them set would fix the
+        // spelling and still exclude the security from every backlog for 30 days. This clearing is
+        // the difference between resolving a symbol and actually recovering the security.
+        //
+        // The list lives in `market.clear_symbol_caches` rather than here. It used to be five
+        // columns written out at this call site, and `prices_missing_at` (migration 42, later)
+        // never joined them — so 4,801 equities stayed locked out of `pending_prices` after their
+        // symbol was corrected, with no error and no symptom. Next to the columns it is at least
+        // enforceable: `tests/negative-caches-are-classified.sql` fails when a `%_missing_at`
+        // column is added and nobody says which side of this it belongs on.
         const { error: clrErr } = await market
-          .from('security')
-          .update({
-            industry_missing_at: null,
-            profile_missing_at: null,
-            performance_missing_at: null,
-            fundamentals_missing_at: null,
-            statements_missing_at: null,
-          })
-          .eq('security_id', row.security_id)
+          .rpc('clear_symbol_caches', { p_security_id: row.security_id })
         if (clrErr) throw new Error(`clearing negative caches failed: ${clrErr.message}`)
 
         resolved++

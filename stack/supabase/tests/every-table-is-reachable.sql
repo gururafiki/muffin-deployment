@@ -63,7 +63,10 @@ declare
   --   `fund_holding_current` a BUILDING BLOCK, used only inside other views. A view resolves its
   --     underlying objects as its OWNER, so `sector_constituents` reads it fine while anon cannot —
   --     which is the correct shape, not a missing grant.
-  internal text[] := array['untracked_listing', 'fund_holding_current'];
+  --   `symbol_cache_classification` not data at all — it declares which negative caches a new
+  --     symbol invalidates, so `negative-caches-are-classified.sql` can enforce it. Nothing in the
+  --     app reads it, and granting anon would assert it is part of the API when it is not.
+  internal text[] := array['untracked_listing', 'fund_holding_current', 'symbol_cache_classification'];
 begin
   for v in
     select viewname from pg_views
