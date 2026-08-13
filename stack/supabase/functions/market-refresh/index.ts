@@ -370,7 +370,11 @@ Deno.serve(async (req: Request) => {
         .from('pending_statements')
         .select('security_id,symbol')
         .order('best_weight', { ascending: false })
-        .limit(scopeLimit ?? 60)
+        // 300, not 60. That number was sized for THREE CALLS PER SECURITY — 180 requests a run,
+        // which filled the worker. Batched at ten symbols it is 90 requests for five times the
+        // securities, so the old page now leaves most of the budget unused. 8,851 deep at 60 a run
+        // and four cron runs a day was about five weeks.
+        .limit(scopeLimit ?? 300)
       if (pErr) throw new Error(`pending_statements read failed: ${pErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
@@ -385,25 +389,56 @@ Deno.serve(async (req: Request) => {
       let written = 0
       let none = 0
       let failed = 0
+      let throttledOut = false
 
-      for (const item of wanted) {
-        if (Date.now() > deadline - 6_000) break
-        const rows: Record<string, unknown>[] = []
-        let anyAnswer = false
+      // BATCHED, at ten symbols a call.
+      //
+      // This fetched ONE security at a time — three calls each, for income, balance and cash — on
+      // the reasoning that a multi-symbol response "interleaves periods from different companies
+      // with only a `symbol` to separate them". A symbol IS enough to separate them: it is exactly
+      // how `security-fundamentals` and `security-performance` attribute their batched responses,
+      // and `equity/fundamental/metrics` — the same router family, the same provider — has been
+      // called with `symbolList()` all along.
+      //
+      // The cost of not batching was the whole schedule: 60 securities a run against a backlog of
+      // 8,851, four cron runs a day, is about five weeks. Ten per call makes it days.
+      //
+      // NOT ASSUMED, THOUGH. `symbolsAnswered` counts the distinct symbols a batched response
+      // actually attributes, and it is reported: if this provider silently answers for only the
+      // first symbol, that number is 1 per batch and says so on the first run. The failure mode
+      // if it does is a backlog that does not drain — visible and harmless — rather than
+      // securities wrongly marked, because marking still requires the run to have written
+      // something.
+      const STMT_BATCH = 10
+      const symbolsAnswered = new Set<string>()
+      for (let i = 0; i < wanted.length && Date.now() < deadline - 6_000; i += STMT_BATCH) {
+        const group = wanted.slice(i, i + STMT_BATCH)
+        const bySymbol = new Map(group.map((g) => [g.symbol.toUpperCase(), g]))
+        const rowsFor = new Map<string, Record<string, unknown>[]>()
+        const answered = new Set<string>()
+
         for (const kind of ['income', 'balance', 'cash'] as const) {
           const remaining = deadline - Date.now()
           if (remaining < 5_000) break
           try {
             const got = await fetcher(
-              `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(item.symbol)}` +
+              `/api/v1/equity/fundamental/${kind}?symbol=${symbolList(group.map((g) => g.symbol))}` +
                 `&provider=yfinance&limit=4`,
-              Math.min(12_000, remaining),
+              Math.min(20_000, remaining),
             )
-            if (got.length > 0) anyAnswer = true
             for (const r of got) {
+              // Attributed BY SYMBOL, never by position: the provider returns a row per period, so
+              // a batch is inherently out of order and positional pairing would file one company's
+              // balance sheet under another's name.
+              const sym = String(r.symbol ?? (group.length === 1 ? group[0].symbol : '')).toUpperCase()
+              const item = bySymbol.get(sym)
+              if (!item) continue
+              answered.add(sym)
+              symbolsAnswered.add(sym)
               const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
               if (!period) continue
-              rows.push({
+              const list = rowsFor.get(sym) ?? []
+              list.push({
                 security_id: item.securityId,
                 statement: kind,
                 period_ending: period,
@@ -413,11 +448,21 @@ Deno.serve(async (req: Request) => {
                 source_code: 'yfinance',
                 as_of: new Date().toISOString(),
               })
+              rowsFor.set(sym, list)
             }
-          } catch (_e) {
+          } catch (e) {
             failed++
+            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+            // Same rule as everywhere else: a refusal is about the endpoint, not these securities.
+            if (throttled(msg)) { throttledOut = true; break }
           }
         }
+        if (throttledOut) break
+
+        for (const item of group) {
+          const sym = item.symbol.toUpperCase()
+          const rows = rowsFor.get(sym) ?? []
+          const anyAnswer = answered.has(sym)
 
         if (rows.length > 0) {
           const { error } = await market
@@ -443,10 +488,25 @@ Deno.serve(async (req: Request) => {
             .eq('security_id', item.securityId)
           if (error) throw new Error(`statements_missing_at update failed: ${error.message}`)
         }
+        }
       }
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, written, none, failed, remaining: Math.max(0, wanted.length - written) })
+      return json({
+        resource,
+        written,
+        none,
+        failed,
+        throttledOut,
+        // THE EVIDENCE THAT BATCHING WORKS, reported rather than assumed. This endpoint family was
+        // only ever called one symbol at a time here, so nothing had established that
+        // `income`/`balance`/`cash` attribute a multi-symbol response the way `metrics` does. If
+        // this comes back at roughly one per batch, the provider is answering for the first symbol
+        // only and the batch size must go back to 1.
+        symbolsAnswered: symbolsAnswered.size,
+        symbolsAsked: wanted.length,
+        remaining: Math.max(0, wanted.length - written),
+      })
     }
 
     if (resource === FUNDAMENTALS_RESOURCE) {
