@@ -237,16 +237,77 @@ jobs:
           #     flat", not "this fund is dead". Measured 2026-08-13: Egypt, Nigeria and Portugal
           #     each showed +0.0% on all nine periods, dated that day, from ETFs whose last SEC
           #     filing was 2022, 2023 and 2024.
-          #     A real 0.00% over a year is vanishingly unlikely; over 1d it is merely rare, so this
-          #     counts the LONG periods only.
-          flat=$(count 'performance?select=scope_id&period=in.(1y,6m,3m)&change_pct=eq.0')
-          if [ -z "${flat:-}" ]; then
+          #
+          #     COUNTING FLAT ROWS WAS THE WRONG TEST, and it started crying wolf on 2026-08-14 at
+          #     12 rows. "A real 0.00% is vanishingly unlikely" was written when the universe was 35
+          #     curated instruments; across 12,348 equities it is arithmetic. Most quotes sit on a
+          #     coarse tick grid — Tokyo and Shenzhen in whole units, Seoul in won — so a price that
+          #     returns to exactly its anchor is common. Measured on the 18 rows flagged that day,
+          #     10 were provably an exact round-trip: the identical close really is present in the
+          #     anchor neighbourhood. POST.VI, MING.OL and 2109.T were ordinary live companies, and
+          #     the check called them delisted.
+          #
+          #     THE DISCRIMINATOR IS PER SYMBOL, NOT PER ROW. A frozen series is flat on EVERY
+          #     window at once — Egypt, Nigeria and Portugal were flat on all nine. A round-trip
+          #     coincidence lands on one window; it cannot land on three at once. Measured the same
+          #     day: of the symbols with a fresh zero, 36 had exactly one and 2 had two, and NONE
+          #     had three, so this is green today and still trips on the original defect.
+          #
+          #     FRESH ROWS ONLY, deliberately. Stale rows are a different fault with a different
+          #     check (7h) — and mixing them is what made this one unreadable, since a mark freezes
+          #     a security's rows and every one of them then reads as a flat-return failure.
+          #     The 1000 cap is `PGRST_DB_MAX_ROWS` and is left as-is on purpose: this reads 30 rows
+          #     on a healthy day, and a run that produced a thousand fresh zeros has already failed
+          #     this check many times over.
+          flat_syms=$(curl -sS --max-time 60 \
+            "$BASE/rest/v1/performance?select=scope_id&scope=eq.instrument&change_pct=eq.0&as_of=gte.$(date -u +%Y-%m-%d)&limit=1000" \
+            -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' \
+            | python3 -c 'import json,sys,collections; c=collections.Counter(r["scope_id"] for r in json.load(sys.stdin)); print(sum(1 for n in c.values() if n>=3))') && rc=0 || rc=1
+          if [ "$rc" -ne 0 ] || [ -z "${flat_syms:-}" ]; then
             echo "::error::flat-return check — could not read a count"; fail=1
-          elif [ "$flat" -gt 5 ]; then
-            echo "::error::$flat returns are exactly 0.00% over 3m/6m/1y — a delisted instrument is being priced off its final bars"
+          elif [ "$flat_syms" -gt 0 ]; then
+            echo "::error::$flat_syms symbols are exactly 0.00% on 3+ periods of a FRESH refresh — a series is frozen and being reported as a flat market"
             fail=1
           else
-            echo "  ok   exactly-flat long returns = $flat (tripwire at 5)"
+            echo "  ok   symbols flat on 3+ fresh periods = $flat_syms"
+          fi
+
+          # 7h. A NEGATIVE CACHE CONTRADICTED BY OUR OWN DATA. This is the check that would have
+          #     caught 2026-08-14 four days earlier, and it is cheap because the contradiction is
+          #     already in the database: `performance_missing_at` says the provider has no series
+          #     for a security, while `security_price` holds daily bars it wrote this week.
+          #
+          #     THE TWO RESOURCES CALL THE SAME ENDPOINT — `security-prices` and
+          #     `security-performance` both fetch `equity/price/historical` for the same symbol,
+          #     which is what makes this a contradiction rather than an inference. One of them
+          #     cannot be getting a series while the other records that none exists. (The same
+          #     argument does NOT extend to `industry_missing_at` or `statements_missing_at`: those
+          #     come from different endpoints, where "has prices, has no industry" is an ordinary
+          #     gap rather than a contradiction. Do not widen this check to them.)
+          #
+          #     Measured when written: 3,045 securities were marked and 2,548 of them had bars from
+          #     the last five days — MediaTek, Tapestry, Ferguson, Royalty Pharma, ACS. 2,297 were
+          #     marked in a single pass on 08-11, when `security-performance` still decided by batch
+          #     tally and yfinance was throttling progressively (it omits symbols from a 200 rather
+          #     than erroring, so nothing threw). The marks then FROZE those securities' rows,
+          #     because the retraction only runs for symbols a run answers.
+          #
+          #     Tripwire at 200, not 0: a security can legitimately have bars and no usable return —
+          #     a money-market line with one distinct close forever earns its mark honestly. What
+          #     cannot happen without a defect is thousands of them.
+          #     COUNTED WITH `count=exact`, not by measuring a page. The first version asked for
+          #     `limit=5000` and got exactly 1000 back — `PGRST_DB_MAX_ROWS`, which is not an error,
+          #     just a shorter answer — so it would have reported 1000 for ever however bad things
+          #     got, and reported it as a measurement.
+          cutoff=$(date -u -d '5 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-5d +%Y-%m-%d)
+          contra=$(count "security?select=security_id,security_price!inner(date)&performance_missing_at=not.is.null&security_price.date=gte.$cutoff")
+          if [ -z "${contra:-}" ] || [ "$contra" = "*" ]; then
+            echo "::error::contradicted-mark check — could not read a count: $(last_body)"; fail=1
+          elif [ "$contra" -gt 200 ]; then
+            echo "::error::$contra securities are negative-cached for performance while carrying price bars from the last 5 days — a provider refusal is being recorded as dead securities, and their old returns are frozen behind it"
+            fail=1
+          else
+            echo "  ok   performance marks contradicted by recent bars = $contra (tripwire at 200)"
           fi
 
           # 7g. A MEGA-CAP IS NEVER UNANSWERABLE. This is the check that was missing on 2026-08-13,
