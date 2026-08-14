@@ -1929,6 +1929,7 @@ Deno.serve(async (req: Request) => {
       let throttledOut = false
       let lastError: string | null = null
       let homed = 0
+      let noCountryMarked = 0
       // Provider country names no row in `countries` or `country_alias` could resolve. Reported so
       // the alias table is filled from what the provider actually says.
       const unresolvedCountries = new Set<string>()
@@ -2022,6 +2023,8 @@ Deno.serve(async (req: Request) => {
         // Islands: N-PORT reports incorporation, `hq_country` reports where the company actually
         // is. Same response, same run, one more column.
         const homes: { security_id: string; provider_country_iso2: string }[] = []
+        // Answered about, no usable country. Negative-cached so the backlog can drain.
+        const noCountry: string[] = []
         for (const r of rows) {
           const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
           const cap = Number(r.market_cap)
@@ -2029,14 +2032,21 @@ Deno.serve(async (req: Request) => {
             caps.push({ security_id: securityId, market_cap: cap })
           }
           const hq = String(r.hq_country ?? '').trim()
-          if (securityId && hq) {
-            const iso = isoByCountryName.get(hq.toLowerCase())
-            // An unresolved name is COUNTED and NAMED, never silently dropped. The alias table is
-            // meant to be filled from this report rather than from a guess about the provider's
-            // vocabulary — the FK would reject an invented code anyway, and would take the whole
-            // batch with it.
-            if (iso) homes.push({ security_id: securityId, provider_country_iso2: iso })
-            else if (unresolvedCountries.size < 40) unresolvedCountries.add(hq)
+          if (securityId) {
+            const iso = hq ? isoByCountryName.get(hq.toLowerCase()) : undefined
+            if (iso) {
+              homes.push({ security_id: securityId, provider_country_iso2: iso })
+            } else {
+              // THE PROFILE ANSWERED AND STILL GAVE NO USABLE COUNTRY, which is a fact about this
+              // security and earns a negative cache. Without one it re-enters `pending_profile`
+              // on every run for ever — the failure this schema has rediscovered five times, and
+              // the reason `symbol_cache_classification` exists.
+              noCountry.push(securityId)
+              // An unresolved NAME is also counted and NAMED, never silently dropped: the alias
+              // table is meant to be filled from this report rather than from a guess about the
+              // provider's vocabulary. (An empty `hq_country` is not a name and adds nothing.)
+              if (hq && unresolvedCountries.size < 40) unresolvedCountries.add(hq)
+            }
           }
           const code = FINVIZ_SECTOR_IDS[String(r.sector ?? '')]
           // An unrecognised provider label is COUNTED, not silently dropped: a vocabulary change
@@ -2087,6 +2097,19 @@ Deno.serve(async (req: Request) => {
         }
         homed += homes.length
 
+        // GATED ON THE BATCH HAVING ANSWERED, like every other marking site here: `rows` empty
+        // means the provider said nothing, not that these securities have no country. A throttled
+        // yfinance returns 200-with-no-rows, and marking on that is what recorded ~8,300
+        // securities as permanently unanswerable in one afternoon.
+        if (noCountry.length > 0 && rows.length > 0) {
+          const { error } = await market
+            .from('security')
+            .update({ provider_country_missing_at: new Date().toISOString() })
+            .in('security_id', noCountry)
+          if (error) throw new Error(`provider_country_missing_at update failed: ${error.message}`)
+        }
+        noCountryMarked += noCountry.length
+
         // Everything in the batch the provider DID answer for, but not about — a ticker it does
         // not carry, or a sector label outside the map. Recorded so it stops being re-asked; the
         // batch answering at all is what proves the provider was up.
@@ -2125,6 +2148,7 @@ Deno.serve(async (req: Request) => {
         // The names are LISTED, not just counted: the whole point of `country_alias` is to be
         // filled from what the provider actually says, and a bare count cannot tell you that.
         homed,
+        noCountryMarked,
         unresolvedCountries: [...unresolvedCountries],
         remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
       })
