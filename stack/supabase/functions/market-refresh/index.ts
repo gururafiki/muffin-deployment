@@ -1448,7 +1448,12 @@ Deno.serve(async (req: Request) => {
               .in('security_id', ids)
             if (error) throw new Error(`prices_missing_at update failed: ${error.message}`)
           }
-          emptySeries += plan.symbols.length
+          // COUNT WHAT WAS ACTUALLY EMPTY, not the size of the batch that came back empty. Since
+          // isolation can now recover a security whose BATCH produced nothing — that is the whole
+          // reason for asking individually — `plan.symbols.length` would report securities as
+          // having no series in the same run that wrote bars for them. A counter that overstates is
+          // how the statements coverage was misread as 12x its real value.
+          emptySeries += emptyIds.length
           continue
         }
 
