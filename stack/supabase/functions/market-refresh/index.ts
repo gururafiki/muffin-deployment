@@ -1862,6 +1862,24 @@ Deno.serve(async (req: Request) => {
       if (nodeErr) throw new Error(`taxonomy_node read failed: ${nodeErr.message}`)
       const nodeByCode = new Map((nodes ?? []).map((n) => [n.code as string, n.node_id as string]))
 
+      // COUNTRY NAME -> ISO-2, from the same table the globe reads so the two cannot disagree.
+      // `hq_country` is an English name ("Taiwan", "United Kingdom"), not a code. Aliases cover the
+      // spellings `countries.name` states formally and no provider emits ("Russian Federation").
+      const { data: countryRows, error: cErr } = await market
+        .from('countries')
+        .select('iso2,name')
+      if (cErr) throw new Error(`countries read failed: ${cErr.message}`)
+      const isoByCountryName = new Map(
+        (countryRows ?? []).map((c) => [String(c.name).trim().toLowerCase(), c.iso2 as string]),
+      )
+      const { data: aliasRows, error: aErr } = await market
+        .from('country_alias')
+        .select('provider_name,iso2')
+      if (aErr) throw new Error(`country_alias read failed: ${aErr.message}`)
+      for (const a of aliasRows ?? []) {
+        isoByCountryName.set(String(a.provider_name).trim().toLowerCase(), a.iso2 as string)
+      }
+
       const deadline = Date.now() + 60_000
       // 20, not 50: a profile lookup is one upstream fetch PER SYMBOL inside yfinance, and foreign
       // listings are markedly slower than US ones. A smaller batch keeps each call inside the
@@ -1878,6 +1896,10 @@ Deno.serve(async (req: Request) => {
       let batchesFailed = 0
       let throttledOut = false
       let lastError: string | null = null
+      let homed = 0
+      // Provider country names no row in `countries` or `country_alias` could resolve. Reported so
+      // the alias table is filled from what the provider actually says.
+      const unresolvedCountries = new Set<string>()
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
@@ -1964,11 +1986,25 @@ Deno.serve(async (req: Request) => {
         // Market cap rides along on the SAME response. It was recorded as blocked on a paid
         // provider for weeks; only deep fundamentals are. Capturing it costs nothing here.
         const caps: { security_id: string; market_cap: number }[] = []
+        // So does the OPERATING country, and discarding it is why Alibaba sits under the Cayman
+        // Islands: N-PORT reports incorporation, `hq_country` reports where the company actually
+        // is. Same response, same run, one more column.
+        const homes: { security_id: string; provider_country_iso2: string }[] = []
         for (const r of rows) {
           const securityId = bySymbol.get(String(r.symbol ?? '').toUpperCase())
           const cap = Number(r.market_cap)
           if (securityId && Number.isFinite(cap) && cap > 0) {
             caps.push({ security_id: securityId, market_cap: cap })
+          }
+          const hq = String(r.hq_country ?? '').trim()
+          if (securityId && hq) {
+            const iso = isoByCountryName.get(hq.toLowerCase())
+            // An unresolved name is COUNTED and NAMED, never silently dropped. The alias table is
+            // meant to be filled from this report rather than from a guess about the provider's
+            // vocabulary — the FK would reject an invented code anyway, and would take the whole
+            // batch with it.
+            if (iso) homes.push({ security_id: securityId, provider_country_iso2: iso })
+            else if (unresolvedCountries.size < 40) unresolvedCountries.add(hq)
           }
           const code = FINVIZ_SECTOR_IDS[String(r.sector ?? '')]
           // An unrecognised provider label is COUNTED, not silently dropped: a vocabulary change
@@ -2001,6 +2037,23 @@ Deno.serve(async (req: Request) => {
           if (error) throw new Error(`market_cap update failed: ${error.message}`)
         }
         capped += caps.length
+
+        // Grouped by ISO code, so this is one update per COUNTRY in the batch rather than one per
+        // security — a batch of 20 is typically two or three countries.
+        const byIso = new Map<string, string[]>()
+        for (const h of homes) {
+          const list = byIso.get(h.provider_country_iso2) ?? []
+          list.push(h.security_id)
+          byIso.set(h.provider_country_iso2, list)
+        }
+        for (const [iso, ids] of byIso) {
+          const { error } = await market
+            .from('security')
+            .update({ provider_country_iso2: iso })
+            .in('security_id', ids)
+          if (error) throw new Error(`provider_country_iso2 update failed: ${error.message}`)
+        }
+        homed += homes.length
 
         // Everything in the batch the provider DID answer for, but not about — a ticker it does
         // not carry, or a sector label outside the map. Recorded so it stops being re-asked; the
@@ -2036,6 +2089,11 @@ Deno.serve(async (req: Request) => {
         // True when the run stopped early because the provider began refusing.
         // Without it a throttled run is indistinguishable from a drained backlog.
         throttledOut,
+        // Operating-HQ countries recorded, and the provider spellings nothing could resolve.
+        // The names are LISTED, not just counted: the whole point of `country_alias` is to be
+        // filled from what the provider actually says, and a bare count cannot tell you that.
+        homed,
+        unresolvedCountries: [...unresolvedCountries],
         remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
       })
     }
