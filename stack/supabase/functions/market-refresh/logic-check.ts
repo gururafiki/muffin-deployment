@@ -433,7 +433,6 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // Each entry is a site where a batch that produced nothing writes a `*_missing_at`, and the
   // string is the proof that the endpoint answered for someone in this run.
   const gates: [string, string][] = [
-    ['security-prices',       'ids.length > 0 && written > 0'],
     ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
     ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
     ['security-profiles',     'if (classified > 0) {'],
@@ -457,6 +456,22 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // the marked set comes from `confirmedDead` (per-symbol evidence, not batch arithmetic), and a
   // mark RETRACTS the rows it can no longer stand behind — otherwise the stale number outlives
   // the fix, which is how 1d/1w/1m = 0.00% survived four days behind a mark.
+  // `security-prices` is held to the same stricter rule, and for the same reason: `written > 0`
+  // kills a backlog the moment its answerable work is done. Measured 2026-08-14 —
+  // `written: 0, emptySeries: 300, batchesFailed: 0, remaining: 393`, unchanged run after run,
+  // because every security left is one yfinance does not carry (ICT.PS and FAB.AE return
+  // "not covered"). Nothing was wrongly marked; the same 300 were simply re-asked eight times a
+  // day for ever. Fourth instance of this shape in this file's history.
+  check(
+    index.includes('const ids = emptyIds'),
+    'security-prices marks only symbols confirmed ALONE',
+    'const ids = emptyIds',
+  )
+  check(
+    index.includes('isolatedWrites += bars.length'),
+    'security-prices KEEPS what isolation recovers rather than discarding it',
+    'isolatedWrites',
+  )
   check(
     index.includes('const missedIds = confirmedDead'),
     'security-performance marks only symbols confirmed ALONE',
