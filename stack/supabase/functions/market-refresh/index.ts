@@ -2094,25 +2094,76 @@ Deno.serve(async (req: Request) => {
           continue
         }
         const rows = fetched.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id }))
-        // Symbols the provider answered ABOUT but had no series for. Recorded so they stop being
-        // re-asked: yfinance carries no history for many local listings, and without this they are
-        // re-sent every run and crowd out the ones that would resolve.
+        // A 200 THAT OMITS A SYMBOL SAYS NOTHING ABOUT THAT SYMBOL — so it is asked again, ALONE,
+        // and only an answer about it on its own is allowed to mark it.
+        //
+        // The previous rule gated on `fetched.length > 0`: if ANY symbol in the batch answered,
+        // every absent one was recorded as permanently unanswerable. That is a TALLY, and the
+        // provider defeats tallies — yfinance throttles PROGRESSIVELY, answering some symbols in a
+        // batch while refusing others, with no error anywhere because the refusal is an omission
+        // from a 200 rather than a throw. `fetchWithIsolation` exists for exactly this and could
+        // not help here: it isolates when the call THROWS, and this call succeeds.
+        //
+        // Measured 2026-08-14, which is how this was found: 3,045 securities carried
+        // `performance_missing_at`, and 2,548 of them HAD daily price bars from the last five days
+        // — the provider was demonstrably answering for them. Among them MediaTek, Tapestry,
+        // Ferguson, Royalty Pharma, Edenred and ACS (an IBEX 35 constituent). 2,297 were marked in
+        // a single pass on 08-11. Driving `security-refresh` against TPR and 2454.TW returned all
+        // seven periods, a market cap, fundamentals and statements — so the marks were simply false.
+        //
+        // The bound is the DEADLINE, not a count of misses: a run isolates what it has budget for
+        // and leaves the rest for the next one. Nothing is marked for want of time — that is the
+        // negative-cache equivalent of blaming the victim, and `fetchWithIsolation` already refuses
+        // to do it. A throttle makes every isolation throw, so a throttled run marks NOTHING.
         const got = new Set(fetched.map((r) => r.scope_id))
-        const missedIds = batch
-          .filter((sym) => !got.has(sym))
+        const missed = batch.filter((sym) => !got.has(sym))
+        const confirmedDead: string[] = []
+        for (const sym of missed) {
+          if (Date.now() > deadline - 4_000) break
+          try {
+            const alone = await loadEquityReturns(
+              fetcher, [sym], now, SEC_PERF_TTL_MINUTES,
+              Math.min(8_000, deadline - Date.now()),
+            )
+            if (alone.length === 0) {
+              // Answered about this symbol on its own and had no usable series for it. That is
+              // evidence about the SYMBOL, which is the only thing that earns a mark.
+              confirmedDead.push(sym)
+            } else {
+              rows.push(...alone.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id })))
+            }
+          } catch (e) {
+            // A refusal is not an answer. Left unmarked and retried next run.
+            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+            if (throttled(msg)) { lastError = msg; throttledOut = true; break }
+          }
+        }
+        const missedIds = confirmedDead
           .map((sym) => fetchToSecurity.get(sym))
           .filter((id): id is string => !!id)
-        // GATED ON THE BATCH HAVING ANSWERED AT ALL. `missedIds` means "the provider answered
-        // about the batch but had no series for these" — which is only true if it answered about
-        // ANY of them. With `fetched` empty this marked all 40, and a throttled provider returning
-        // 200-with-no-rows makes that every batch in the run: 1,205 securities in one afternoon.
-        if (missedIds.length > 0 && fetched.length > 0) {
+        if (missedIds.length > 0) {
           const { error } = await market
             .from('security')
             .update({ performance_missing_at: new Date().toISOString() })
             .in('security_id', missedIds)
           if (error) throw new Error(`performance_missing_at update failed: ${error.message}`)
+          // MARKING MUST RETRACT, for the same reason producing must. The upsert path already
+          // deletes periods a successful run stopped producing; giving up on a security left its
+          // OLD rows untouched — and then excluded it from the backlog for 30 days, so nothing
+          // could ever correct them. That is how a stale number outlives the fix that stopped
+          // generating it: REA.AX, 1803.T and MRP.JO were all still serving 1d/1w/1m = 0.00% from
+          // 08-10, frozen behind a mark set on 08-12, while their real prices moved every day.
+          for (let j = 0; j < confirmedDead.length; j += 100) {
+            const slice = confirmedDead.slice(j, j + 100).map((s) => fetchToDisplay.get(s) ?? s)
+            const { error: delErr } = await market
+              .from('performance')
+              .delete()
+              .eq('scope', 'instrument')
+              .in('scope_id', slice)
+            if (delErr) throw new Error(`stale performance retract failed: ${delErr.message}`)
+          }
         }
+        if (throttledOut) break
         if (rows.length === 0) { emptyBatches++; continue }
         const { error } = await market
           .from('performance')

@@ -434,7 +434,6 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // string is the proof that the endpoint answered for someone in this run.
   const gates: [string, string][] = [
     ['security-prices',       'ids.length > 0 && written > 0'],
-    ['security-performance',  'missedIds.length > 0 && fetched.length > 0'],
     ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
     ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
     ['security-profiles',     'if (classified > 0) {'],
@@ -443,6 +442,31 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   for (const [resource, gate] of gates) {
     check(index.includes(gate), `${resource} still gates its empty-answer marking`, gate)
   }
+
+  // `security-performance` is held to a STRICTER rule than the five above, so it is asserted
+  // separately rather than by its old gate string.
+  //
+  // Those five gate on "the endpoint answered for SOMEONE in this run", which is a tally — and a
+  // tally is exactly what yfinance defeats. It throttles PROGRESSIVELY: some symbols in a batch
+  // come back, others are simply absent from the same 200, and nothing throws. Measured
+  // 2026-08-14, that had left 2,548 securities negative-cached while the provider was serving
+  // daily bars for every one of them (MediaTek, Tapestry, Ferguson, ACS), 2,297 of them marked in
+  // a single pass. So marking now requires the symbol to have been asked ON ITS OWN.
+  //
+  // Two things must remain true, and deleting either is the failure this file exists to catch:
+  // the marked set comes from `confirmedDead` (per-symbol evidence, not batch arithmetic), and a
+  // mark RETRACTS the rows it can no longer stand behind — otherwise the stale number outlives
+  // the fix, which is how 1d/1w/1m = 0.00% survived four days behind a mark.
+  check(
+    index.includes('const missedIds = confirmedDead'),
+    'security-performance marks only symbols confirmed ALONE',
+    'const missedIds = confirmedDead',
+  )
+  check(
+    index.includes('stale performance retract failed'),
+    'security-performance retracts the rows it stops standing behind',
+    'stale performance retract failed',
+  )
 }
 
 // ── an offshore incorporation is not a market ────────────────────────────────
