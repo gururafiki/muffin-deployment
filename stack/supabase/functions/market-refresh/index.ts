@@ -1116,7 +1116,7 @@ Deno.serve(async (req: Request) => {
       const secType = (target.security_type as string | null) ?? 'Common Stock'
       // NULL means "sweep the venue whole"; a prefix means it is too large for one query.
       const prefix = (target.query_prefix as string | null) ?? undefined
-      const { listings, next, pages, total } = await listExchange(
+      const { listings, next, pages, total, throttled: figiThrottled } = await listExchange(
         exch,
         (target.next_cursor as string | null) ?? undefined,
         {
@@ -1198,13 +1198,25 @@ Deno.serve(async (req: Request) => {
           security_type: nextType,
           query_prefix: next ? (prefix ?? null) : nextPrefix,
           last_run_at: new Date().toISOString(),
-          listings: written,
+          // ONLY RECORD A COUNT A RUN ACTUALLY PRODUCED. `listings: written` unconditionally meant
+          // a refused run overwrote the venue's total with zero: Japan went 1,800 -> 0 on a run
+          // that fetched nothing, destroying the only record of what had been swept there. A run
+          // that wrote nothing has nothing to say about the venue, so it says nothing.
+          ...(written > 0 ? { listings: written } : {}),
         })
         .eq('exch_code', exch)
       if (updErr) throw new Error(`exchange_cursor update failed: ${updErr.message}`)
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, exchange: exch, written, pages, total, complete: !next })
+      // `throttled` is reported, not folded into `complete`. A refused run and an exhausted venue
+      // both come back with no listings, and telling them apart is the whole point: without it,
+      // `written: 0, pages: 0, complete: false` reads as "nothing to do" and a sweep that is being
+      // refused looks exactly like one that is finished.
+      return json({
+        resource, exchange: exch, written, pages, total,
+        complete: !next && !figiThrottled,
+        throttled: figiThrottled,
+      })
     }
 
     if (resource === LOCAL_SYM_RESOURCE) {

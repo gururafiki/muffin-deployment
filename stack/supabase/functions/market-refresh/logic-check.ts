@@ -507,11 +507,16 @@ console.log('\nresource registry — the cron and the function agree')
 
   // The names the cron POSTs, from the `RESOURCES=$(printf ...)` block.
   const block = warmup.match(/RESOURCES=\$\(printf[\s\S]*?\)\n/)?.[0] ?? ''
-  const cronResources = [...block.matchAll(/^\s{10,}([a-z][a-z-]+)\s*\\?$/gm)].map((m) => m[1])
+  // The trailing `)` is not optional decoration — the LAST entry in the list ends with it instead
+  // of a line-continuation `\`, so a pattern that only allows `\` silently drops one resource. It
+  // dropped `derive-classifications`, which meant the check above had never actually verified it.
+  // Found by the scheduling check below reporting it as unscheduled when it plainly was not.
+  const cronResources = [...block.matchAll(/^\s{10,}([a-z][a-z-]+)\s*[\\)]?$/gm)].map((m) => m[1])
   check(cronResources.length > 10, 'found the cron resource list', `${cronResources.length} names`)
 
   // What the function will accept: `RESOURCES` keys in resources.ts plus the EXTRA allow-list.
   const resourcesFile = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
+  const figi = await Deno.readTextFile(new URL('./figi.ts', import.meta.url))
   const declared = new Set<string>([
     ...[...resourcesFile.matchAll(/^\s{2}'([a-z][a-z-]+)':\s*\{/gm)].map((m) => m[1]),
     ...[...index.matchAll(/_RESOURCE = '([a-z][a-z-]+)'/g)].map((m) => m[1]),
@@ -530,6 +535,47 @@ console.log('\nresource registry — the cron and the function agree')
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',
     unreachable.length ? `unreachable: ${unreachable.join(', ')}` : '')
+
+  // AND THE OTHER DIRECTION, WHICH IS THE ONE THAT ACTUALLY FAILED.
+  //
+  // The check above asks "does everything the cron calls exist?" — it cannot see a resource that
+  // exists and is never called. `exchange-listings` was in exactly that state: written, deployed,
+  // reachable, and absent from the schedule, so the ONLY thing that grows the universe beyond what
+  // the tracked funds happen to hold ran when a human remembered. Measured 2026-08-14: it had last
+  // run on 08-11, three days earlier, with **16 venues never enumerated at all** — Australia,
+  // Japan, China, Indonesia, Sweden, Greece, Peru — and the US sweep parked on prefix `A`.
+  //
+  // Nothing reported it. Every backlog it feeds was drained, every count was plausible, and a
+  // resource that is never invoked cannot fail. That is the same shape as the inert column in
+  // migration 56: the failure is an ABSENCE, and absences do not raise.
+  //
+  // On-demand resources are named explicitly rather than pattern-matched, so adding one is a
+  // deliberate act. `security-refresh` fires when a user opens a stock page; `promote-listing` when
+  // an admin pulls a named ticker into the universe. Neither has a backlog to drain, so neither
+  // belongs on a timer — everything else does.
+  const ON_DEMAND = new Set(['security-refresh', 'promote-listing'])
+  const unscheduled = [...accepted].filter((r) => !ON_DEMAND.has(r) && !cronResources.includes(r))
+  check(unscheduled.length === 0,
+    'every backlog resource is actually SCHEDULED, not merely reachable',
+    unscheduled.length ? `never runs on the cron: ${unscheduled.join(', ')}` : '')
+
+  // A REFUSED SWEEP MUST NOT READ AS A FINISHED ONE, and a run that produced nothing must not
+  // overwrite what earlier runs recorded. Both were true of `exchange-listings` until 2026-08-14:
+  // OpenFIGI answered 429 on the first page, `listExchange` broke out silently, and the resource
+  // returned `written: 0, pages: 0, complete: false` with `ok: true` — while writing that zero over
+  // Japan's recorded 1,800.
+  //
+  // Asserted on the source because there is no way to reach it behaviourally: it needs OpenFIGI to
+  // rate-limit us on demand.
+  check(/if \(res\.status === 429\) \{ throttled = true; break; \}/.test(figi),
+    'listExchange REPORTS a 429 rather than breaking silently',
+    'throttled = true on 429')
+  check(index.includes('...(written > 0 ? { listings: written } : {})'),
+    'a run that wrote nothing does not reset the venue count',
+    'listings written only when written > 0')
+  check(index.includes('throttled: figiThrottled'),
+    'the sweep response distinguishes refused from exhausted',
+    'throttled is reported')
 }
 
 // ── incremental price fetching ───────────────────────────────────────────────
