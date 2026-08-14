@@ -462,6 +462,19 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // because every security left is one yfinance does not carry (ICT.PS and FAB.AE return
   // "not covered"). Nothing was wrongly marked; the same 300 were simply re-asked eight times a
   // day for ever. Fourth instance of this shape in this file's history.
+  // PAGING MUST BE A PARTITION, NOT FOUR SAMPLES. Both multi-page backlog reads order by
+  // `best_weight`, which is 0 for every security no tracked fund holds — most of the rows. Postgres
+  // gives no stable order among ties, so successive `range()` calls can return one row twice and
+  // another never. Found 2026-08-14 by making the same mistake in an audit query: paging
+  // `security_current` without an order reported 1,935 duplicated company names and repeated ISINs,
+  // all of which vanished under `order=security_id` — 12,000 rows, 12,000 distinct ids, 0 repeats.
+  // The data was fine; the query was not. The resources had the same shape.
+  const pageOrders = index.match(/\.range\(/g)?.length ?? 0
+  const tiebreaks = index.match(/\.order\('security_id', \{ ascending: true \}\)/g)?.length ?? 0
+  check(tiebreaks >= pageOrders,
+    'every paged backlog read has a UNIQUE sort key, so its pages partition',
+    `${pageOrders} range() reads, ${tiebreaks} unique tiebreaks`)
+
   check(
     index.includes('const ids = emptyIds'),
     'security-prices marks only symbols confirmed ALONE',
