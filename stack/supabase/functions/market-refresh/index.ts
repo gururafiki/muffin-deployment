@@ -1341,6 +1341,9 @@ Deno.serve(async (req: Request) => {
       let batchesFailed = 0
       let throttledOut = false
       let lastError: string | null = null
+      // Bars recovered by asking a symbol on its own after its batch produced nothing. A non-zero
+      // value here means a BATCH was hiding an answerable security, which is worth seeing.
+      let isolatedWrites = 0
       const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
 
       for (const plan of plans) {
@@ -1389,10 +1392,56 @@ Deno.serve(async (req: Request) => {
           // clean "no data", and the whole page is marked anyway — the mistake this comment was
           // written to prevent, committed underneath it. `written > 0` is the missing half: proof
           // the provider produced bars for SOMEONE in this run.
-          const ids = plan.symbols
-            .map((s) => bySymbolId.get(s.symbol))
-            .filter((id): id is string => !!id)
-          if (ids.length > 0 && written > 0) {
+          //
+          // AND `written > 0` KILLS THE BACKLOG THE MOMENT ITS ANSWERABLE WORK IS DONE, which is
+          // where this now stands. Once every security left is one yfinance does not carry, no
+          // batch produces a bar, `written` stays 0 for the whole run, the gate never fires, and
+          // the same securities are re-asked eight times a day for ever. Measured 2026-08-14:
+          // `written: 0, emptySeries: 300, batchesFailed: 0, remaining: 393` — unchanged run after
+          // run, 301 of them never priced at all. Driving `security-refresh` at ICT.PS and FAB.AE
+          // returns `returns: 0, "not covered"`: the Philippines and the UAE are genuinely outside
+          // the keyless provider. Fourth instance of this exact shape (`security-fundamentals` and
+          // `security-industries` both died this way, and `security-performance` this morning).
+          //
+          // So evidence comes from ISOLATION, not from a run-wide tally — the same rule
+          // `security-performance` now uses. A symbol asked ON ITS OWN that answers with no bars is
+          // evidence about that symbol; a batch that produced nothing says only that the batch
+          // produced nothing. Bounded by the deadline, so a run isolates what it has budget for and
+          // leaves the rest; a throttled provider makes every isolation throw, so a throttled run
+          // marks nothing.
+          const emptyIds: string[] = []
+          for (const sym of plan.symbols) {
+            if (Date.now() > deadline - 5_000) break
+            const id = bySymbolId.get(sym.symbol)
+            if (!id) continue
+            try {
+              const alone = await fetcher(
+                `/api/v1/equity/price/historical?symbol=${symbolList([sym.fetchSymbol])}` +
+                  `&provider=yfinance&start_date=${plan.startDate}&interval=1d`,
+                Math.min(8_000, deadline - Date.now()),
+              )
+              const bars = alone
+                .map((r) => barFrom(r, sym.fetchSymbol))
+                .filter((b): b is NonNullable<typeof b> => !!b && b.bar.date >= cutoff)
+              if (bars.length === 0) {
+                emptyIds.push(id)
+              } else {
+                const { error } = await market.from('security_price').upsert(
+                  bars.map((b) => ({ security_id: id, date: b.bar.date, close: b.bar.close })),
+                  { onConflict: 'security_id,date' },
+                )
+                if (error) throw new Error(`security_price upsert failed: ${error.message}`)
+                written += bars.length
+                isolatedWrites += bars.length
+              }
+            } catch (e) {
+              const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+              if (throttled(msg)) { lastError = msg; throttledOut = true; break }
+              // A refusal is not an answer. Left unmarked and retried next run.
+            }
+          }
+          const ids = emptyIds
+          if (ids.length > 0) {
             const { error } = await market
               .from('security')
               .update({ prices_missing_at: new Date().toISOString() })
@@ -1427,7 +1476,7 @@ Deno.serve(async (req: Request) => {
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
-        resource, written, emptySeries, batchesFailed, lastError,
+        resource, written, emptySeries, isolatedWrites, batchesFailed, lastError, throttledOut,
         plans: plans.length, remaining: wanted.length,
       })
     }
