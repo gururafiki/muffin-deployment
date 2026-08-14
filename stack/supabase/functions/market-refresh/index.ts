@@ -553,6 +553,9 @@ Deno.serve(async (req: Request) => {
       let throttledOut = false
       let emptyBatches = 0
       let lastError: string | null = null
+      // Market caps recovered from the metrics response, which carries one for the non-US
+      // listings `equity/profile` does not.
+      let capped = 0
 
       for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
@@ -752,6 +755,35 @@ Deno.serve(async (req: Request) => {
               .or(`currency_code.is.null,currency_code.neq.${cur}`)
             if (cErr) throw new Error(`currency_code update failed: ${cErr.message}`)
           }
+
+          // MARKET CAP IS IN THIS RESPONSE TOO, and it was being written to `raw` and nowhere else.
+          //
+          // `security.market_cap` is filled by `security-profiles` from `equity/profile`, which
+          // does not carry a cap for most non-US listings — so coverage sat at 8,163 of 12,348
+          // (66%) with `market_cap_at` unset for the rest, i.e. no attempt ever recorded. Measured
+          // 2026-08-14: **2,871 of the 2,952 equities that have a sector but no cap already had
+          // one sitting in `security_fundamentals.raw.market_cap`**, fetched by this resource and
+          // discarded — COSCO Shipping, HEXPOL, Emmi, Jinxin Fertility. Writing it here takes
+          // coverage to ~89% with no new upstream call.
+          //
+          // Fourth time the answer was already inside a response we fetch: market cap from the
+          // profile, the operating country from the profile, the currency from these metrics, and
+          // now the cap from these metrics. Look at what a response CONTAINS before concluding a
+          // field needs a provider.
+          //
+          // Denominated in the security's own currency, exactly like the profile's value — which
+          // is why `market-verify`'s mega-cap check is US-only and must stay so.
+          for (const w of writes) {
+            const raw = w.raw as Record<string, unknown> | undefined
+            const cap = Number(raw?.market_cap)
+            if (!Number.isFinite(cap) || cap <= 0) continue
+            const { error: mErr } = await market
+              .from('security')
+              .update({ market_cap: cap, market_cap_at: new Date().toISOString() })
+              .eq('security_id', w.security_id as string)
+            if (mErr) throw new Error(`market_cap update failed: ${mErr.message}`)
+            capped++
+          }
         }
         const missed = batch.map((b) => b.securityId).filter((id) => !answered.has(id))
         if (missed.length > 0) {
@@ -769,7 +801,7 @@ Deno.serve(async (req: Request) => {
       // unanswerable securities is not a failure, and failing the resource on it is what stopped
       // the backlog dead once the answerable ones were done. The counters say what happened.
       return json({
-        resource, written, missing, emptyBatches, batchesFailed, lastError,
+        resource, written, missing, capped, emptyBatches, batchesFailed, lastError, throttledOut,
         remaining: Math.max(0, wanted.length - written - missing),
       })
     }
