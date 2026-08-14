@@ -343,6 +343,36 @@ jobs:
             fi
           done
 
+          # 7i. THE SAME ABSURDITY, BY FUND WEIGHT — because the check above has three blind spots
+          #     and a real incident walked through all of them on 2026-08-14.
+          #
+          #     `statements_missing_at` had 2,445 marks set in three bursts (518 + 725 + 1,032, one
+          #     hour each, against a ~15/hour steady state) while yfinance was throttling. 85 of the
+          #     221 securities that are a >=1.5% holding of a sector fund were marked — Exelon,
+          #     Intuitive Surgical, Martin Marietta, Essex Property Trust, IFF — and driving
+          #     `security-refresh` at ISRG, EXC and MLM returned 12 rows of statements each. The
+          #     mega-cap check reported `0 of 213` that same morning.
+          #
+          #     It could not see any of them, because `country_iso2 = 'US' and market_cap > 50e9`
+          #     misses: securities with NO market cap at all (ISRG had none, and 34% of the
+          #     universe still does not), securities below $50bn (EXC $46bn, MLM $33bn, ESS $19bn),
+          #     and every non-US security (Chubb is Swiss). Market cap cannot be the only lens on a
+          #     universe that is two-thirds uncapped and mostly not American — and it is stored in
+          #     each security's own currency, which is why the check was US-only in the first place.
+          #
+          #     WEIGHT HAS NEITHER PROBLEM. It is a percentage of a fund, so it is free of currency,
+          #     free of market cap and free of country, and "a top-ten holding of a sector ETF" is
+          #     an unambiguous statement that a security matters.
+          #
+          #     In a script, not inline, for the same reason `check_resource_health.py` is: the
+          #     obvious PostgREST spelling does not work (embedding `security` with
+          #     `sector_constituents` is ambiguous — PGRST201 — because both are reachable through
+          #     `fund_holding` as a many-to-many), so the two sets are fetched and intersected,
+          #     and that is worth having somewhere it can be read and tested.
+          if ! BASE="$BASE" ANON="$ANON" python3 .github/scripts/check_significant_holdings.py; then
+            fail=1
+          fi
+
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
           #    because OpenFIGI returns `exchCode` bare for some venues and labelled for others
           #    ("KS" vs "TT (Taiwan Stock Exchange)"), so an exact match resolved Korea and dropped
