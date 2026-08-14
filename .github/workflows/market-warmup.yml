@@ -82,6 +82,7 @@ jobs:
               instrument-prices \
               security-local-symbols \
               security-tickers \
+              exchange-listings \
               security-yahoo-symbols \
               security-profiles \
               security-industries \

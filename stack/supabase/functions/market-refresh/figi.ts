@@ -348,7 +348,23 @@ export async function listExchange(
     /** Ticker prefix, when the venue is too large to enumerate whole. See PAGING_CEILING. */
     query?: string;
   } = {},
-): Promise<{ listings: ExchangeListing[]; next?: string; pages: number; total?: number }> {
+): Promise<{
+  listings: ExchangeListing[];
+  next?: string;
+  pages: number;
+  total?: number;
+  /**
+   * OpenFIGI refused us mid-sweep. NOT the same as "this venue is exhausted", and the caller must
+   * not treat the two alike: a 429 on the FIRST page returns zero listings and zero pages, which
+   * is byte-identical to a venue that had nothing to add.
+   *
+   * Measured 2026-08-14: three `exchange-listings` runs fired 15 seconds apart. The second swept
+   * Japan for 1,800 listings across 18 pages; the third hit the rate limit on page one and
+   * reported `written: 0, pages: 0, complete: false` — a success, with `ok: true` in refresh_log.
+   * The venue's recorded total was then overwritten with that zero.
+   */
+  throttled: boolean;
+}> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
 
@@ -358,6 +374,7 @@ export async function listExchange(
   let next = cursor;
   let pages = 0;
   let total: number | undefined;
+  let throttled = false;
 
   for (; pages < maxPages; pages++) {
     if (Date.now() > deadline) break;
@@ -372,8 +389,9 @@ export async function listExchange(
       }),
       signal: AbortSignal.timeout(20_000),
     });
-    // Out of budget for this minute — stop and resume from the cursor next run.
-    if (res.status === 429) break;
+    // Out of budget for this minute — stop and resume from the cursor next run, and SAY SO. A
+    // silent break makes a refusal look like completion.
+    if (res.status === 429) { throttled = true; break; }
     if (!res.ok) throw new Error(`openfigi filter ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
     const body = (await res.json()) as {
@@ -401,5 +419,5 @@ export async function listExchange(
     await new Promise((r) => setTimeout(r, 250));
   }
 
-  return { listings, next, pages, total };
+  return { listings, next, pages, total, throttled };
 }
