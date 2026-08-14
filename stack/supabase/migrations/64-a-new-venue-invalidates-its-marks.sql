@@ -1,40 +1,40 @@
--- ADDING A VENUE MUST CLEAR THE MARKS SET WHILE IT WAS MISSING. Migration 63 did not, and quoted
--- the very lesson it then failed to apply.
+-- CORRECTED. The diagnosis this migration originally carried was WRONG, and the measurement that
+-- disproved it is below. The statement is kept because it is harmless and mildly useful; the
+-- reasoning is rewritten because a comment asserting a false cause is worse than no comment.
 --
--- 63 added Ho Chi Minh, Hanoi, Kuwait, Doha and Buenos Aires to `market.exchange` so their
--- securities could finally resolve a symbol. Sweeping them worked immediately — VN 1,617, VM 409,
--- KK 145, QD 56, AR 213, every count matching what `/v3/filter` had predicted. And the securities
--- stayed symbol-less, because `security-tickers` had already given up on them:
+-- WHAT I CLAIMED. Migration 63 added Ho Chi Minh, Hanoi, Kuwait, Doha and Buenos Aires so their
+-- securities could resolve a symbol. Sweeping them worked at once — VN 1,617, VM 409, KK 145,
+-- QD 56, AR 213, every count matching what `/v3/filter` predicted — and the securities were still
+-- symbol-less. `security-local-symbols` answered `remaining: 0, "no addressable securities
+-- pending"`, and 38 of 40 Kuwaiti, 33 of 35 Qatari and 57 of 57 Vietnamese equities carried
+-- `figi_missing_at`. I concluded the negative cache was blocking resolution — the Taiwan pattern,
+-- where a mark memorises your own bug — and wrote this to clear it.
 --
---   Kuwait   38 of 40 carry figi_missing_at
---   Qatar    33 of 35
---   Vietnam  57 of 57
+-- WHAT ACTUALLY HAPPENED. The cron ran `security-yahoo-symbols` and `security-local-symbols`
+-- twenty minutes later and resolved them: Kuwait 37 of 39, Qatar 33 of 35, Vietnam 56 of 57 now
+-- carry a symbol. Measured after that run, `figi_missing_at` was **unchanged** — still 38, 33 and
+-- 57. The marks were never cleared and the symbols arrived anyway, which is only possible if the
+-- marks were never the blocker.
 --
--- The mark is honest about what happened: OpenFIGI answered, returned listings on `KK`, `QD` and
--- `VN`, and none of those was a venue this pipeline knew — so no acceptable listing was found and
--- the security was recorded as unresolvable. What it cannot express is that the answer depended on
--- OUR venue catalogue, which has now changed. `security-local-symbols` reports
--- `remaining: 0, "no addressable securities pending"` and will never revisit them.
+-- THE REAL CAUSE was simply that no resolver had run since the venues appeared. `security-tickers`
+-- and `security-local-symbols` read different backlogs: `figi_missing_at` gates the FIGI lookup
+-- (`pending_ticker`), and `pending_local_symbol` — which is what actually assigns `SHIP.KW` — does
+-- not consult it. My `remaining: 0` reading was taken in the minutes between the sweep finishing
+-- and the backlog picking the securities up, and I read a timing gap as a permanent exclusion.
 --
--- This is the Taiwan bug in a new place, and migration 63's own comment cites it: "A negative cache
--- can memorise your own bug. Taiwan's 534 were marked `local_symbol_missing_at` by the broken
--- match, so fixing the code changed nothing until that cache was cleared. Any resolution fix must
--- invalidate what the old behaviour poisoned." The venue rows were the fix; this is the
--- invalidation that was missing from it.
+-- AND `figi_missing_at` IS LARGELY CORRECT WHERE IT IS SET. It records that OpenFIGI has no US
+-- line for an ISIN, which for a local Chinese, Indian, Korean or Kuwaiti listing is simply true —
+-- CLAUDE.md says so directly ("ticker resolution asks OpenFIGI for the US line, so ~80% of a Japan
+-- or emerging-markets fund can never resolve"). Measured across the universe: CN 96%, IN 99%,
+-- TW 96%, KR 97% of equities carry it, and nearly all of those have a working symbol regardless.
+-- A high rate is the expected shape of an emerging market, not a defect — which is why the version
+-- of this file that treated it as one was reaching for the wrong lever.
 --
--- SCOPED TO THE AFFECTED COUNTRIES, not a blanket clear. `figi_missing_at` is earned honestly
--- almost everywhere else — a security whose ISIN OpenFIGI genuinely cannot map — and clearing it
--- globally would re-ask a rate-limited provider for thousands of answers we already hold. Only
--- securities in the five countries whose venues did not exist until migration 63 had their answer
--- changed by it.
---
--- BOTH ISIN-KEYED FLAGS, because both were set under the old catalogue.
--- `market.symbol_cache_classification` records that neither is cleared by a corrected SYMBOL —
--- correctly, since they are keyed on the ISIN. A new VENUE is the different event that does
--- invalidate them, and that is exactly why this cannot be left to `clear_symbol_caches`.
---
--- ONE-SHOT: it undoes a specific past state. Re-running it every deploy would clear marks earned
--- honestly after this point and re-ask OpenFIGI for them four times a day.
+-- WHY IT STILL RUNS. Clearing the flag for four small countries costs ~128 OpenFIGI lookups once.
+-- Those that genuinely have no US line are re-marked on the next pass and nothing is worse off;
+-- the handful that DO have one — an ADR listed after the mark was set — gain it. That is a fair
+-- trade for a one-off, and cheaper than another deploy to remove the statement. It is not a
+-- template: do not clear a negative cache because a resolver looked idle for five minutes.
 
 do $$
 declare
@@ -54,9 +54,10 @@ begin
 
   insert into market.one_shot (key, reason) values
     ('64-clear-marks-for-newly-swept-venues',
-     format('Cleared figi/local_symbol marks on %s securities in KW, QA, VN and AR. They were '
-            || 'recorded unresolvable because OpenFIGI returned listings on KK/QD/VN/VM/AR, none '
-            || 'of which was a venue market.exchange knew until migration 63 added them.', cleared));
+     format('Re-asked OpenFIGI for %s securities in KW, QA, VN and AR after migration 63 added '
+            || 'their venues. NOTE: the original justification was wrong — the marks were not '
+            || 'blocking symbol resolution, which the cron completed on its own with the marks '
+            || 'still set. Kept as a cheap one-off re-ask, not as a precedent.', cleared));
 end $$;
 
 notify pgrst, 'reload schema';

@@ -1,24 +1,25 @@
--- Adding a venue must clear the marks set while it was missing — and only those.
+-- Migration 64 clears the FIGI marks for four countries — and must not touch any others.
 --
--- WHY THIS EXISTS. Migration 63 added five venues so their securities could resolve a symbol, and
--- quoted the Taiwan lesson in its own comment: "a negative cache can memorise your own bug ... any
--- resolution fix must invalidate what the old behaviour poisoned." It then did not do that. The
--- sweep worked immediately, and the securities stayed symbol-less because `security-tickers` had
--- already recorded them unresolvable: Kuwait 38 of 40, Qatar 33 of 35, **Vietnam 57 of 57**.
--- `security-local-symbols` reported `remaining: 0, "no addressable securities pending"`.
+-- THE MIGRATION'S ORIGINAL JUSTIFICATION WAS WRONG and the file now says so at length: I read a
+-- five-minute timing gap (`security-local-symbols` answering `remaining: 0` in the minutes between
+-- the sweep finishing and the backlog picking the securities up) as a permanent exclusion, and
+-- concluded the negative cache was blocking resolution. It was not. The cron resolved them twenty
+-- minutes later with `figi_missing_at` STILL SET — 38, 33 and 57, unchanged — which is only
+-- possible if the mark was never the blocker.
 --
--- The mark was honest about what happened — OpenFIGI answered and returned listings on venues this
--- pipeline did not know — and could not express that the answer depended on OUR catalogue, which
--- had just changed. Nothing failed; the fix simply had no effect, which is the hardest kind of
--- non-event to notice.
---
--- Three behaviours, and the last is what stops this becoming a blunt instrument:
+-- This test survives that correction because it never asserted the WHY. It asserts what the
+-- statement does, and those three properties are what make a one-off re-ask safe rather than a
+-- blunt instrument:
 --
 --   1. a mark in an affected country is CLEARED    KW/QA/VN/AR
---   2. a mark ELSEWHERE is untouched               figi_missing_at is earned honestly almost
---                                                  everywhere, and a global clear would re-ask a
---                                                  rate-limited provider for answers we hold
---   3. it is ONE-SHOT                              or every deploy re-clears marks earned since
+--   2. a mark ELSEWHERE is untouched               `figi_missing_at` is CORRECT almost everywhere
+--                                                  it is set — it records that OpenFIGI has no US
+--                                                  line for an ISIN, true for most local listings
+--                                                  (CN 96%, IN 99%, TW 96%, KR 97% carry it, and
+--                                                  nearly all still have a working symbol). A
+--                                                  global clear would re-ask a rate-limited
+--                                                  provider for thousands of answers already held.
+--   3. it is ONE-SHOT                              or every deploy re-asks
 
 \set ON_ERROR_STOP on
 
