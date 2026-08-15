@@ -1226,6 +1226,13 @@ Deno.serve(async (req: Request) => {
           .from('pending_local_symbol')
           .select('security_id,isin,country_iso2')
           .order('best_weight', { ascending: false })
+          // A SECOND, UNIQUE SORT KEY — without it these pages are not a partition.
+          // `best_weight` is 0 for every security no tracked fund holds, which is most of this
+          // backlog, and Postgres gives no stable order among ties: two `range()` calls can return
+          // the same row twice and never return another. Re-processing is harmless (the writes are
+          // idempotent) but the SKIPPED rows are not — they sit at a page boundary the resource
+          // never reaches, which looks exactly like a backlog that has stopped draining.
+          .order('security_id', { ascending: true })
           .range(page * 1000, (page + 1) * 1000 - 1)
         if (error) throw new Error(`pending_local_symbol read failed: ${error.message}`)
         const rows = data ?? []
@@ -2413,6 +2420,10 @@ Deno.serve(async (req: Request) => {
           // Ordered explicitly rather than trusting the view's ORDER BY: a view's ordering is not
           // contractual once PostgREST wraps it, and the ordering is the whole point of the backlog.
           .order('best_weight', { ascending: false })
+          // Unique tiebreak, so the four pages are a partition rather than four samples. See the
+          // note in `security-local-symbols`: ordering by a non-unique column alone lets a row be
+          // returned twice and another never at all.
+          .order('security_id', { ascending: true })
           .range(page * PAGE, (page + 1) * PAGE - 1)
         if (pendErr) throw new Error(`pending_ticker read failed: ${pendErr.message}`)
         const rows = data ?? []
