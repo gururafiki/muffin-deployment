@@ -469,6 +469,19 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // `security_current` without an order reported 1,935 duplicated company names and repeated ISINs,
   // all of which vanished under `order=security_id` — 12,000 rows, 12,000 distinct ids, 0 repeats.
   // The data was fine; the query was not. The resources had the same shape.
+  // AN EARLY RETURN AFTER THE CLAIM MUST GIVE IT BACK. `begin_refresh` takes the lock before any
+  // per-resource validation runs, so a `return json({error}, 400)` below it leaves `refresh_log`
+  // with `finished_at: null` and refuses the resource for the whole in-flight TTL. Measured
+  // 2026-08-15: a `promote-listing` call with no `figi` answered 400, and the next VALID call 45
+  // seconds later was refused `{ skipped: true, reason: 'fresh or in flight' }`. It self-heals in
+  // two minutes, so it is a short self-inflicted outage rather than a stuck resource — but it is
+  // triggered by the already-malformed request, so one mistake costs two failures. Counted rather
+  // than named, so a new validation path cannot be added without releasing.
+  const validationReturns = index.match(/return json\(\{ error: '[^']*needs a/g)?.length ?? 0
+  check(validationReturns === 0,
+    'no post-claim validation returns without releasing the lock',
+    validationReturns ? `${validationReturns} early return(s) still hold the claim` : 'all release')
+
   const pageOrders = index.match(/\.range\(/g)?.length ?? 0
   const tiebreaks = index.match(/\.order\('security_id', \{ ascending: true \}\)/g)?.length ?? 0
   check(tiebreaks >= pageOrders,
