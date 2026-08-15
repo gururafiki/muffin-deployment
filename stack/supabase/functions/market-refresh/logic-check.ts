@@ -482,6 +482,23 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     'no post-claim validation returns without releasing the lock',
     validationReturns ? `${validationReturns} early return(s) still hold the claim` : 'all release')
 
+  // A SPLIT FACTOR IS A FLOAT, so "no split" is not `=== 1`. Tiingo returns a 3-for-1 as
+  // 3.0000000001 often enough to matter, and the inverse — comparing with `!==` — would record a
+  // split on every ordinary bar of every security, which is 3 million phantom rows.
+  const tiingo = await Deno.readTextFile(new URL('./tiingo.ts', import.meta.url))
+  check(/Math\.abs\(factor - 1\) > 1e-9/.test(tiingo),
+    'splitFactor is compared with a tolerance, not for exact equality',
+    'Math.abs(factor - 1) > 1e-9')
+  // A 404 from Tiingo is a FACT about the symbol (it does not carry local foreign listings), and a
+  // 500 is not. Collapsing them is the throw-vs-empty shape that has cost this pipeline thousands
+  // of securities; the typed error is what keeps the marking path narrow.
+  check(tiingo.includes('export class TiingoNoSuchTicker'),
+    'a Tiingo 404 is a distinct, typed outcome — not a generic failure',
+    'TiingoNoSuchTicker')
+  check(index.includes('e instanceof TiingoNoSuchTicker'),
+    'and only that outcome marks the security',
+    'instanceof check at the marking site')
+
   const pageOrders = index.match(/\.range\(/g)?.length ?? 0
   const tiebreaks = index.match(/\.order\('security_id', \{ ascending: true \}\)/g)?.length ?? 0
   check(tiebreaks >= pageOrders,

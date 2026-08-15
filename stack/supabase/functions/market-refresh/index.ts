@@ -33,6 +33,7 @@ import {
 import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
+import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
   BACKLOG_TTL_MINUTES,
@@ -178,6 +179,7 @@ Deno.serve(async (req: Request) => {
   const ONE_SECURITY_RESOURCE = 'security-refresh'
   const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
   const STATEMENTS_RESOURCE = 'security-statements'
+  const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
   const EXTRA = [
@@ -185,7 +187,7 @@ Deno.serve(async (req: Request) => {
     SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
     INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE, STATEMENTS_RESOURCE,
     YAHOO_SYMBOL_RESOURCE, SEC_PRICES_RESOURCE,
-  ]
+  , ACTIONS_RESOURCE]
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
@@ -397,6 +399,107 @@ Deno.serve(async (req: Request) => {
     // row per PERIOD, and a multi-symbol response would interleave periods from different
     // companies with only a `symbol` field to tell them apart. One symbol at a time keeps the
     // attribution structural rather than something to get right.
+    // Splits and dividends — the only corporate-action data in this pipeline. See `tiingo.ts` for
+    // why this provider, what it does not cover (local foreign listings 404), and why the binding
+    // constraint here is UNIQUE SYMBOLS rather than requests per unit time.
+    if (resource === ACTIONS_RESOURCE) {
+      const token = Deno.env.get('TIINGO_TOKEN') ?? ''
+      if (!token) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, note: 'TIINGO_TOKEN is not set — nothing to do' })
+      }
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_corporate_actions')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        // Unique tiebreak, so the page is a partition and not a sample.
+        .order('security_id', { ascending: true })
+        .limit(scopeLimit ?? 60)
+      if (pErr) throw new Error(`pending_corporate_actions read failed: ${pErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: r.symbol as string,
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every security has recent actions' })
+      }
+
+      // Five years, which is what makes a split usable: a 3Y or 5Y return needs every split inside
+      // its own window, and asking for less would silently under-adjust the long periods.
+      // Computed inline rather than via `daysBefore`, which is a resources.ts helper this file
+      // does not import.
+      const since = new Date(Date.now() - 1900 * 86_400_000).toISOString().slice(0, 10)
+      const deadline = Date.now() + 60_000
+      let written = 0
+      let noTicker = 0
+      let none = 0
+      let failed = 0
+      let lastError: string | null = null
+      // Proof the endpoint answered for SOMEONE this run. Without it, a run whose every symbol is
+      // one Tiingo does not carry marks the whole page — the shape that cost 8,300 securities once.
+      let anyAnswer = false
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - 4_000) break
+        try {
+          const actions = await corporateActions(
+            item.symbol, since, token, Math.min(12_000, deadline - Date.now()),
+          )
+          anyAnswer = true
+          if (actions.length === 0) { none++; continue }
+          const rows = actions.map((a) => ({
+            security_id: item.securityId,
+            ex_date: a.exDate,
+            kind: a.kind,
+            value: a.value,
+            source_code: 'tiingo',
+            as_of: new Date().toISOString(),
+          }))
+          const { error } = await market
+            .from('security_corporate_action')
+            .upsert(dedupeBy(rows, (r) => `${r.security_id}|${r.ex_date}|${r.kind}`),
+              { onConflict: 'security_id,ex_date,kind' })
+          if (error) throw new Error(`corporate action upsert failed: ${error.message}`)
+          written += rows.length
+        } catch (e) {
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (e instanceof TiingoNoSuchTicker) {
+            // A 404 is evidence ABOUT THIS SYMBOL — Tiingo answered and does not carry it. That is
+            // the one case that earns a mark, and it needs no run-wide gate because the provider
+            // spoke about this security specifically.
+            noTicker++
+            const { error } = await market
+              .from('security')
+              .update({ corporate_actions_missing_at: new Date().toISOString() })
+              .eq('security_id', item.securityId)
+            if (error) throw new Error(`corporate_actions_missing_at update failed: ${error.message}`)
+            continue
+          }
+          failed++
+          lastError = msg
+          if (throttled(msg)) break
+        }
+      }
+
+      // A security Tiingo ANSWERED about with no actions is marked only if the endpoint proved it
+      // was working this run. `none` alone is not evidence: a provider returning empty arrays
+      // wholesale looks identical.
+      if (none > 0 && anyAnswer && written > 0) {
+        // Nothing to mark — an empty answer here means "no splits or dividends in five years",
+        // which is TRUE of most securities and is not a reason to stop asking. The 30-day
+        // `as_of` window in the backlog view is what stops it being re-asked immediately.
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, none, noTicker, failed, lastError,
+        asked: wanted.length,
+        remaining: Math.max(0, wanted.length - written - none - noTicker),
+      })
+    }
+
     if (resource === STATEMENTS_RESOURCE) {
       const { data: pending, error: pErr } = await market
         .from('pending_statements')

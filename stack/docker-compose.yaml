@@ -536,6 +536,9 @@ services:
       # OPTIONAL. Without it OpenFIGI allows 25 requests/min x 10 ISINs, so ticker resolution is
       # incremental across runs; a free key raises that to 250 x 100 and finishes the backlog in one.
       OPENFIGI_API_KEY: "{{ openfigi_api_key | default('') }}"
+      # Splits and dividends. Absent, `security-corporate-actions` reports it and does nothing
+      # rather than failing — the only corporate-action source, so its absence must be legible.
+      TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
       # Fundamentals for the securities someone opens. 25 calls a day, US listings only — which is
       # useless as a backlog and ample on demand.
       ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
