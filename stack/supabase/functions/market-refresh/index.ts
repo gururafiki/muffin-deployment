@@ -459,6 +459,10 @@ Deno.serve(async (req: Request) => {
             ex_date: a.exDate,
             kind: a.kind,
             value: a.value,
+            // The listing this was OBSERVED on. Without it an action cannot be checked against the
+            // series it will adjust — which is how 33 of the first 45 securities ended up with a
+            // USD dividend recorded against a KRW price series.
+            observed_symbol: item.symbol,
             source_code: 'tiingo',
             as_of: new Date().toISOString(),
           }))

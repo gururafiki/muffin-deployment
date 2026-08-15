@@ -482,6 +482,15 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     'no post-claim validation returns without releasing the lock',
     validationReturns ? `${validationReturns} early return(s) still hold the claim` : 'all release')
 
+  // AN ACTION MUST RECORD THE LISTING IT WAS SEEN ON. Tiingo is asked by US ticker; `security_price`
+  // stores the PRIMARY listing; those differed for 33 of the first 45 securities ingested
+  // (SSNLF vs 005930.KS, NONOF vs NOVO-B.CO, ASMLF vs ASML.AS). A dividend from the OTC line is in
+  // USD against a KRW series — wrong by three orders of magnitude — and unverifiable after the fact
+  // without this column, which is how it survived a full review and a green suite.
+  check(index.includes('observed_symbol: item.symbol'),
+    'a corporate action records the listing it was observed on',
+    'observed_symbol')
+
   // A SPLIT FACTOR IS A FLOAT, so "no split" is not `=== 1`. Tiingo returns a 3-for-1 as
   // 3.0000000001 often enough to matter, and the inverse — comparing with `!==` — would record a
   // split on every ordinary bar of every security, which is 3 million phantom rows.
