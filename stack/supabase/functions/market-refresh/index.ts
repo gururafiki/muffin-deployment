@@ -236,6 +236,29 @@ Deno.serve(async (req: Request) => {
   if (claimError) return json({ error: `claim failed: ${claimError.message}` }, 500)
   if (claimed !== true) return json({ resource, skipped: true, reason: 'fresh or in flight' })
 
+  /**
+   * Give the claim back before returning early.
+   *
+   * `begin_refresh` has taken the lock by this point, and every `return` below it that does not
+   * call `finish_refresh` leaves `refresh_log` with `finished_at: null` — which blocks the resource
+   * for the whole in-flight TTL. Measured 2026-08-15: a `promote-listing` call with no `figi`
+   * answered 400 and the NEXT valid call, 45 seconds later, was refused with
+   * `{ skipped: true, reason: 'fresh or in flight' }`. It self-heals after two minutes, so this is
+   * a short outage rather than a stuck resource — but it is a self-inflicted one, and it is caused
+   * by the request that was ALREADY malformed, so the caller gets punished twice for one mistake.
+   *
+   * This matters more now that a person can trigger `promote-listing` from a button: a mistyped
+   * request would make the next legitimate click fail for no reason the reader can see.
+   */
+  const releaseAnd = async (body: Record<string, unknown>, status: number) => {
+    await market.rpc('finish_refresh', {
+      p_resource: resource,
+      p_ok: false,
+      p_error: String(body.error ?? 'invalid request'),
+    })
+    return json(body, status)
+  }
+
   // The venue catalog, read ONCE per request after the claim (so a skipped request costs nothing)
   // and passed down to every consumer. `market.exchange` is the single source of truth for
   // exchange code -> country -> provider suffix; it used to be a hardcoded map here AND a second
@@ -245,7 +268,7 @@ Deno.serve(async (req: Request) => {
     .select('exch_code,country_iso2,suffix')
     .eq('enabled', true)
     .order('preference')
-  if (venueErr) return json({ error: `exchange catalog read failed: ${venueErr.message}` }, 500)
+  if (venueErr) return releaseAnd({ error: `exchange catalog read failed: ${venueErr.message}` }, 500)
   const venues = venuesFromRows(venueRows ?? [])
 
   const fetcher = openbbFetcher(OPENBB_URL)
@@ -808,7 +831,7 @@ Deno.serve(async (req: Request) => {
 
     if (resource === ONE_SECURITY_RESOURCE) {
       const wanted = String(symbolScope ?? '').trim().toUpperCase()
-      if (!wanted) return json({ error: 'security-refresh needs a `symbol`' }, 400)
+      if (!wanted) return releaseAnd({ error: 'security-refresh needs a `symbol`' }, 400)
 
       const { data: rows, error: findErr } = await market
         .from('security_current')
@@ -1003,7 +1026,7 @@ Deno.serve(async (req: Request) => {
         figi = mapped.compositeFigi
       }
 
-      if (!figi) return json({ error: 'promote-listing needs a `figi` or a `symbol`' }, 400)
+      if (!figi) return releaseAnd({ error: 'promote-listing needs a `figi` or a `symbol`' }, 400)
 
       const { data: listing, error: lErr } = await market
         .from('untracked_listing')
