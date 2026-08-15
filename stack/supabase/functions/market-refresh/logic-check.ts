@@ -499,6 +499,15 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     'and only that outcome marks the security',
     'instanceof check at the marking site')
 
+  // A BACKLOG'S `remaining` MUST BE IN THE SAME UNIT AS WHAT IT COUNTS DOWN FROM. The first live
+  // run of `security-corporate-actions` reported `remaining: 0` on 60 securities that had barely
+  // been touched, because `written` counts ACTION ROWS (521 of them) and `wanted.length` counts
+  // SECURITIES — the subtraction went negative and clamped. A drained backlog and a refused one
+  // looked identical, which is the failure this whole file exists to prevent.
+  check(index.includes('wanted.length - covered - none - noTicker'),
+    'corporate-actions remaining counts SECURITIES, not rows',
+    'remaining uses `covered`, not `written`')
+
   const pageOrders = index.match(/\.range\(/g)?.length ?? 0
   const tiebreaks = index.match(/\.order\('security_id', \{ ascending: true \}\)/g)?.length ?? 0
   check(tiebreaks >= pageOrders,

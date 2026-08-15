@@ -432,7 +432,12 @@ Deno.serve(async (req: Request) => {
       // does not import.
       const since = new Date(Date.now() - 1900 * 86_400_000).toISOString().slice(0, 10)
       const deadline = Date.now() + 60_000
+      // ROWS written, and SECURITIES covered — two different units, kept apart because mixing them
+      // is how `remaining` came back 0 on a run that had barely started. 60 securities yielded 521
+      // action rows on the first live run, so `wanted.length - written` is negative and clamps to
+      // zero, reporting a drained backlog while the provider was refusing us.
       let written = 0
+      let covered = 0
       let noTicker = 0
       let none = 0
       let failed = 0
@@ -463,6 +468,7 @@ Deno.serve(async (req: Request) => {
               { onConflict: 'security_id,ex_date,kind' })
           if (error) throw new Error(`corporate action upsert failed: ${error.message}`)
           written += rows.length
+          covered++
         } catch (e) {
           const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           if (e instanceof TiingoNoSuchTicker) {
@@ -494,9 +500,19 @@ Deno.serve(async (req: Request) => {
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
-        resource, written, none, noTicker, failed, lastError,
+        resource,
+        // rows
+        written,
+        // securities — `covered + none + noTicker` is what the run actually got through, and
+        // `asked - that` is what the deadline or a 429 left behind.
+        covered, none, noTicker,
+        failed, lastError,
+        // True when the provider refused us, so a short run is legible as a backoff rather than
+        // as a drained backlog. Tiingo says "run over your hourly request allocation"; the shared
+        // `throttled()` catches it on the `429` in the status line.
+        throttledOut: failed > 0 && !!lastError && throttled(lastError),
         asked: wanted.length,
-        remaining: Math.max(0, wanted.length - written - none - noTicker),
+        remaining: Math.max(0, wanted.length - covered - none - noTicker),
       })
     }
 
