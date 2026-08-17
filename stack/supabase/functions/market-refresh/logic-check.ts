@@ -20,7 +20,7 @@ import {
   planPriceFetches,
   type Bar,
 } from './resources.ts'
-import { pickHomeListing } from './yahoo.ts'
+import { pickHomeListing, type YahooHit } from './yahoo.ts'
 import { venuesFromRows, hasLocalExchange, pickLocalSymbol, venueForSymbol } from './exchanges.ts'
 
 let failures = 0
@@ -597,15 +597,57 @@ console.log('\nresource registry — the cron and the function agree')
     ...[...resourcesFile.matchAll(/^\s{2}'([a-z][a-z-]+)':\s*\{/gm)].map((m) => m[1]),
     ...[...index.matchAll(/_RESOURCE = '([a-z][a-z-]+)'/g)].map((m) => m[1]),
   ])
-  const extraBlock = index.match(/const EXTRA = \[[\s\S]*?\]/)?.[0] ?? ''
+  // `EXTRA` is DERIVED from the TTL map (`Object.keys`), so the allow-list and the TTL table are
+  // the same list and cannot drift. Parse the map.
+  const extraBlock = index.match(/const EXTRA_TTL_MINUTES: Record<string, number> = \{[\s\S]*?\n  \}/)?.[0] ?? ''
+  check(extraBlock.length > 0, 'found the TTL map that defines the extra resources')
   const accepted = new Set<string>(
     [...declared].filter((name) => {
       const constName = [...index.matchAll(/(\w+_RESOURCE) = '([a-z][a-z-]+)'/g)]
         .find((m) => m[2] === name)?.[1]
       // A resource is reachable if it is a declared RESOURCES entry, or its constant is in EXTRA.
-      return !constName || extraBlock.includes(constName)
+      return !constName || extraBlock.includes(`[${constName}]`)
     }),
   )
+
+  // ── EVERY RESOURCE DECLARES A TTL, AND NOTHING INHERITS ONE ────────────────────────────────
+  //
+  // This is the guard for the defect measured 2026-08-17. The TTL used to be a ternary chain
+  // ending in `: PROFILE_TTL_MINUTES`, kept BESIDE a separate `EXTRA` array of known resources.
+  // Three resources were in the array and not in the chain, so they silently inherited SEVEN DAYS
+  // — and all three are incremental backlogs that must run every pass:
+  // `security-prices` (frozen 08-14 to 08-21 while `pending_prices` grew 2,940 -> 11,348),
+  // `security-yahoo-symbols`, `security-corporate-actions`.
+  //
+  // NOTHING COULD REPORT IT. The cron called them eight times a day and each answered
+  // `{"skipped":true,"reason":"fresh or in flight"}`, which is a SUCCESS for a warm-up — green
+  // workflow, `ok: true` in `refresh_log`, no error anywhere, and price ingestion stopped dead.
+  //
+  // Asserted against the SOURCE because it is the SHAPE that recurs: a default that silently
+  // supplies a wrong answer is worse than no default, which would have 400'd on the first call.
+  const ttlKeys = [...extraBlock.matchAll(/\[(\w+_RESOURCE)\]:\s*(\w+)/g)]
+  const withoutTtl = [...index.matchAll(/(\w+_RESOURCE) = '([a-z][a-z-]+)'/g)]
+    .map((m) => m[1])
+    .filter((c) => !ttlKeys.some(([, key]) => key === c))
+  check(withoutTtl.length === 0,
+    'every declared resource constant has an explicit TTL',
+    withoutTtl.length ? `no TTL declared for: ${withoutTtl.join(', ')}` : '')
+
+  check(!/:\s*PROFILE_TTL_MINUTES\s*$/m.test(index.replace(/\[PROFILE_RESOURCE\]:.*/g, '')),
+    'there is no fallback TTL for a resource that declares none')
+
+  // The incremental backlogs specifically. A backlog resource drains a slice per run, so anything
+  // longer than the cron interval stalls it for the length of the TTL rather than slowing it.
+  const mustBeBacklog = [
+    'SEC_PRICES_RESOURCE', 'YAHOO_SYMBOL_RESOURCE', 'ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE',
+    'FUNDAMENTALS_RESOURCE', 'INDUSTRY_RESOURCE', 'SEC_PROFILE_RESOURCE', 'SEC_PERF_RESOURCE',
+    'LOCAL_SYM_RESOURCE', 'LISTINGS_RESOURCE',
+  ]
+  const wrongTtl = mustBeBacklog.filter((c) =>
+    !ttlKeys.some(([, key, ttl]) => key === c && ttl === 'BACKLOG_TTL_MINUTES'))
+  check(wrongTtl.length === 0,
+    'every incremental backlog runs on the backlog TTL, not a completion-shaped one',
+    wrongTtl.length ? `wrong TTL: ${wrongTtl.join(', ')}` : '')
 
   const unreachable = cronResources.filter((r) => !accepted.has(r))
   check(unreachable.length === 0,
@@ -668,7 +710,8 @@ console.log('\nplanPriceFetches — a daily refresh should ask for a day')
   ], now, 10)
   const fullPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'NEW1'))
   const incPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'FRESH'))
-  check(fullPlan?.startDate.startsWith('2025-'), 'a never-priced security gets the full window',
+  check(fullPlan?.startDate.startsWith('2025-') === true,
+    'a never-priced security gets the full window',
     fullPlan?.startDate)
   check(incPlan !== undefined && incPlan !== fullPlan,
     'it does NOT drag the incremental ones into a 400-day fetch')

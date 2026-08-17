@@ -182,36 +182,62 @@ Deno.serve(async (req: Request) => {
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
-  const EXTRA = [
-    PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
-    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
-    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE, STATEMENTS_RESOURCE,
-    YAHOO_SYMBOL_RESOURCE, SEC_PRICES_RESOURCE,
-  , ACTIONS_RESOURCE]
+  // EVERY RESOURCE DECLARES ITS TTL HERE, AND THERE IS NO DEFAULT.
+  //
+  // This was a ternary chain ending in `: PROFILE_TTL_MINUTES`, with the set of known resources
+  // kept in a SEPARATE array beside it. The two drifted, and the fallback made the drift silent:
+  // a resource missing from the chain did not fail, it inherited SEVEN DAYS.
+  //
+  // Measured 2026-08-17, three resources had fallen through — and every one of them is an
+  // INCREMENTAL backlog, i.e. exactly the kind the comment below warns must never get a
+  // completion-shaped TTL:
+  //
+  //   security-prices           last ran 08-14 18:09, next allowed 08-21 — `pending_prices`
+  //                             meanwhile grew 2,940 -> 11,348 (92% of all equities) and the
+  //                             newest stored bar stayed frozen at Friday 08-14
+  //   security-yahoo-symbols    last ran 08-14 18:06
+  //   security-corporate-actions last ran 08-15 12:35
+  //
+  // The cron called all three on schedule, eight times a day, and each answered
+  // `{"skipped":true,"reason":"fresh or in flight"}` — which the warm-up correctly counts as a
+  // SUCCESS, because a warm-up finding fresh data is the happy path. So the workflow was green,
+  // `refresh_log.ok` was true, no error was ever raised, and price ingestion was simply stopped.
+  //
+  // A DEFAULT TTL IS A SILENT WRONG ANSWER. Keyed off the map so the two cannot drift again:
+  // `EXTRA` is now derived from it rather than maintained beside it, so adding a resource without
+  // a TTL is not "the default applies", it is `unknown resource` — a loud 400 on the first call.
+  const EXTRA_TTL_MINUTES: Record<string, number> = {
+    // Incremental backlogs: each run drains a SLICE, so the TTL only has to permit the NEXT run.
+    // A completion-shaped TTL here does not slow the resource down, it stalls the backlog for the
+    // length of the TTL.
+    [SEC_PROFILE_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SEC_PERF_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [LOCAL_SYM_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [LISTINGS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [INDUSTRY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    // Whole-universe passes that FINISH what they start in one run, so the TTL is the real
+    // cadence of the underlying data rather than a permit for the next slice.
+    [TICKERS_RESOURCE]: TICKERS_TTL_MINUTES,
+    [PRICES_RESOURCE]: PRICES_TTL_MINUTES,
+    [PROFILE_RESOURCE]: PROFILE_TTL_MINUTES,
+    // Reference data: N-PORT is quarterly, so a short TTL would just re-ask SEC for last
+    // quarter's answer.
+    [HOLDINGS_RESOURCE]: REFERENCE_TTL_MINUTES,
+    [DERIVE_RESOURCE]: REFERENCE_TTL_MINUTES,
+  }
+  const EXTRA = Object.keys(EXTRA_TTL_MINUTES)
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
   }
-  const ttlMinutes = spec
-    ? spec.ttlMinutes
-    : resource === PRICES_RESOURCE
-      ? PRICES_TTL_MINUTES
-      // Incremental: each run drains a slice of the backlog, so the TTL must be short enough that
-      // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
-      // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
-      // that the NEXT run is allowed to continue the backlog.
-      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
-        resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE ||
-        resource === ONE_SECURITY_RESOURCE || resource === FUNDAMENTALS_RESOURCE ||
-        resource === STATEMENTS_RESOURCE
-        ? BACKLOG_TTL_MINUTES
-      : resource === TICKERS_RESOURCE
-        ? TICKERS_TTL_MINUTES
-      // Reference data, not prices: N-PORT is quarterly, so a short TTL would just re-ask SEC for
-      // last quarter's answer. Both of these finish what they start in a single run.
-      : resource === HOLDINGS_RESOURCE || resource === DERIVE_RESOURCE
-        ? REFERENCE_TTL_MINUTES
-        : PROFILE_TTL_MINUTES
+  const ttlMinutes = spec ? spec.ttlMinutes : EXTRA_TTL_MINUTES[resource]
 
   // WRITES ARE ADMIN-ONLY. Reads never come through here — the app reads the tables directly over
   // PostgREST — so refusing a non-admin costs a visitor nothing. Previously any valid JWT (i.e.
