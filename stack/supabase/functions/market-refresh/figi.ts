@@ -384,6 +384,16 @@ export async function listExchange(
   listings: ExchangeListing[];
   next?: string;
   pages: number;
+  /**
+   * OpenFIGI requests actually made. NOT the same as `pages`, and the difference is not cosmetic:
+   * `pages` is incremented by the for-update clause, so a venue that answers in ONE request and
+   * breaks out (`if (!next) break`) reports `pages: 0`. Measured 2026-08-17 on the first
+   * multi-venue sweep — nine of ten venues reported `pages: 0` while writing rows, so a caller
+   * budgeting on `pages` counted 11 requests against ~21 actually made.
+   *
+   * A rate-limit budget that undercounts by half is not a budget. Counted at the fetch itself.
+   */
+  requests: number;
   total?: number;
   /**
    * OpenFIGI refused us mid-sweep. NOT the same as "this venue is exhausted", and the caller must
@@ -405,11 +415,13 @@ export async function listExchange(
   const listings: ExchangeListing[] = [];
   let next = cursor;
   let pages = 0;
+  let requests = 0;
   let total: number | undefined;
   let throttled = false;
 
   for (; pages < maxPages; pages++) {
     if (Date.now() > deadline) break;
+    requests++;
     const res = await fetch('https://api.openfigi.com/v3/filter', {
       method: 'POST',
       headers,
@@ -452,5 +464,5 @@ export async function listExchange(
     await new Promise((r) => setTimeout(r, 250));
   }
 
-  return { listings, next, pages, total, throttled };
+  return { listings, next, pages, requests, total, throttled };
 }
