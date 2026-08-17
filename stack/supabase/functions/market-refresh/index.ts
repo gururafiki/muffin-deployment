@@ -1270,6 +1270,40 @@ Deno.serve(async (req: Request) => {
     }
 
     if (resource === LISTINGS_RESOURCE) {
+      // SWEEP AS MANY VENUES AS THE BUDGET ALLOWS, not exactly one.
+      //
+      // This resource used to do a single venue/type/prefix slice per invocation. Measured
+      // 2026-08-17, that is 59 venues x 3 instrument types, plus 36 letter-partitions x 3 for the
+      // one venue over the paging ceiling = **282 slices**. At 8 cron runs a day that is a
+      // **35-day** full catalogue pass — and most slices are tiny: Portugal is 50 listings and one
+      // request, and it was costing a whole cron slot exactly like a 4,000-listing venue.
+      //
+      // Neither limit that matters is per-invocation. OpenFIGI's keyed allowance is 250 requests a
+      // MINUTE and one page is one request, so a run doing twenty venues of one page each spends
+      // twenty of them. The real ceilings are the worker's wall clock and that rate limit, so both
+      // are budgeted explicitly here rather than approximated by "one venue".
+      //
+      // WALL CLOCK IS THE HARD ONE. `workerTimeoutMs` is 90s (functions/main/index.ts), and a
+      // venue that STARTS just under the deadline still has to page, upsert and advance its cursor
+      // — a tail that is not bounded by the deadline. `security-performance` runs at 89s of its 90
+      // for exactly this reason. So the loop refuses to START a venue without enough budget left
+      // for a whole one, rather than checking only that the deadline has not yet passed.
+      const SWEEP_DEADLINE = Date.now() + 55_000
+      // Enough for one venue's worst case (20 pages) plus its writes, measured against the
+      // observed ~1.2s per page.
+      const VENUE_RESERVE_MS = 28_000
+      // Keyed OpenFIGI allowance is 250/min; leave room for the other resources in the same cron
+      // pass (`security-tickers` and `security-local-symbols` also call OpenFIGI).
+      const REQUEST_BUDGET = 150
+      let requestsUsed = 0
+      const swept: Record<string, unknown>[] = []
+      let sweepThrottled = false
+
+      while (
+        Date.now() < SWEEP_DEADLINE - VENUE_RESERVE_MS &&
+        requestsUsed < REQUEST_BUDGET &&
+        !sweepThrottled
+      ) {
       const { data: cursors, error: curErr } = await market
         .from('exchange_cursor')
         .select('exch_code,country_iso2,suffix,next_cursor,last_run_at,security_type,query_prefix')
@@ -1281,10 +1315,7 @@ Deno.serve(async (req: Request) => {
         .limit(1)
       if (curErr) throw new Error(`exchange_cursor read failed: ${curErr.message}`)
       const target = (cursors ?? [])[0]
-      if (!target) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, note: 'no enabled exchanges' })
-      }
+      if (!target) break
 
       const exch = target.exch_code as string
       const suffix = (target.suffix as string | null) ?? ''
@@ -1317,8 +1348,15 @@ Deno.serve(async (req: Request) => {
           securityType2: secType,
           figiTypeField,
           query: prefix,
+          // Bounded by BOTH remaining budgets. A page is one OpenFIGI request, so the request
+          // allowance caps pages directly; the time budget is passed through so a slow venue
+          // stops paging rather than eating the next venue's share.
+          maxPages: Math.max(1, Math.min(20, REQUEST_BUDGET - requestsUsed)),
+          budgetMs: Math.max(5_000, SWEEP_DEADLINE - Date.now()),
         },
       )
+      requestsUsed += pages
+      if (figiThrottled) sweepThrottled = true
 
       let written = 0
       for (let i = 0; i < listings.length; i += 500) {
@@ -1405,15 +1443,34 @@ Deno.serve(async (req: Request) => {
         .eq('exch_code', exch)
       if (updErr) throw new Error(`exchange_cursor update failed: ${updErr.message}`)
 
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      // `throttled` is reported, not folded into `complete`. A refused run and an exhausted venue
-      // both come back with no listings, and telling them apart is the whole point: without it,
-      // `written: 0, pages: 0, complete: false` reads as "nothing to do" and a sweep that is being
-      // refused looks exactly like one that is finished.
-      return json({
-        resource, exchange: exch, securityType: secType, figiTypeField, written, pages, total,
+      // `throttled` is reported per venue, not folded into `complete`. A refused sweep and an
+      // exhausted venue both come back with no listings, and telling them apart is the whole
+      // point: without it, `written: 0, pages: 0, complete: false` reads as "nothing to do" and a
+      // sweep that is being refused looks exactly like one that is finished.
+      swept.push({
+        exchange: exch, securityType: secType, figiTypeField, written, pages, total,
         complete: !next && !figiThrottled,
         throttled: figiThrottled,
+      })
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        venues: swept.length,
+        written: swept.reduce((n, v) => n + (v.written as number), 0),
+        requestsUsed,
+        // Reported so a run that stopped early SAYS WHY. Without it, a sweep cut short by the rate
+        // limit is indistinguishable from one that had nothing left to do — the same distinction
+        // `throttled` exists to make per venue.
+        stoppedBecause: sweepThrottled
+          ? 'openfigi throttled'
+          : requestsUsed >= REQUEST_BUDGET
+          ? 'request budget'
+          : Date.now() >= SWEEP_DEADLINE - VENUE_RESERVE_MS
+          ? 'time budget'
+          : 'no venues left',
+        swept,
       })
     }
 

@@ -778,6 +778,33 @@ console.log('\nresource registry — the cron and the function agree')
   check(/figi_security_type: l\.securityTypeDetail/.test(index),
     'the sweep stores the fine type, so a fund is identifiable as one')
 
+  // ── THE SWEEP'S BUDGETS MUST ACTUALLY BIND ────────────────────────────────────────────────
+  //
+  // `exchange-listings` now sweeps many venues per invocation instead of one, because one slice
+  // per cron run is a 35-DAY full catalogue pass (59 venues x 3 instrument types, plus 36
+  // letter-partitions x 3 for the venue over the paging ceiling = 282 slices, at 8 runs a day).
+  //
+  // Two budgets bound it and BOTH have a way of being decorative:
+  //
+  //  - the REQUEST budget is meaningless unless `requestsUsed` is actually incremented by the
+  //    pages each venue consumed. A counter that never moves is a limit that never binds.
+  //  - the TIME budget must refuse to START a venue that cannot finish, not merely check that the
+  //    deadline has not yet passed. That distinction is the difference between stopping cleanly
+  //    and a killed worker: `security-performance` runs at 89s of its 90s limit precisely because
+  //    its deadline gates whether to start a BATCH while that batch's tail is unbounded.
+  check(/requestsUsed \+= pages/.test(index),
+    'the sweep decrements its OpenFIGI request budget by the pages it used')
+  // Anchored on the WHILE CONDITION, not on the string appearing anywhere. The first version of
+  // this check searched the whole file and passed while broken, because
+  // `SWEEP_DEADLINE - VENUE_RESERVE_MS` also appears in the `stoppedBecause` expression a few
+  // lines below — so weakening the actual loop guard changed nothing it could see.
+  const sweepWhile = index.match(/while \(\s*\n?\s*Date\.now\(\)[^)]*?\)\s*\{/s)?.[0] ?? ''
+  check(/SWEEP_DEADLINE - VENUE_RESERVE_MS/.test(sweepWhile),
+    'the sweep refuses to START a venue it cannot finish, rather than only checking the deadline',
+    sweepWhile ? `condition: ${sweepWhile.replace(/\s+/g, ' ').slice(0, 90)}` : 'no while loop found')
+  check(/stoppedBecause/.test(index),
+    'a sweep that stops early says why — throttled, out of requests, or out of time')
+
   const unreachable = cronResources.filter((r) => !accepted.has(r))
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',
