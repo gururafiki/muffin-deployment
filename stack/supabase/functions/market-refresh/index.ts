@@ -1329,6 +1329,10 @@ Deno.serve(async (req: Request) => {
           ticker: l.ticker,
           name: l.name ?? null,
           security_type: l.securityType ?? null,
+          // The FINE type, which is the only one that says "fund". An ETF arrives as
+          // securityType2 'Mutual Fund' / securityType 'ETP'; storing only the coarse value filed
+          // 864 Amsterdam ETFs under the same label as open-end mutual funds on the first sweep.
+          figi_security_type: l.securityTypeDetail ?? null,
           country_iso2: target.country_iso2 ?? null,
           provider_symbol: `${l.ticker}${suffix}`,
           last_seen_at: new Date().toISOString(),

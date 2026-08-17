@@ -765,6 +765,19 @@ console.log('\nresource registry — the cron and the function agree')
     'listExchange sends the type filter under the field it was told to use',
     'without this the ETP filter silently goes out as securityType2 and returns mutual funds')
 
+  // ── AND IT MUST RECORD WHICH KIND OF THING IT FOUND ───────────────────────────────────────
+  //
+  // Filtering on the fine type while STORING the coarse one is not a half-fix, it is a silent
+  // mislabel: the first ETP sweep wrote 1,013 correct Amsterdam listings — ISHARES FTSE ALL WORLD
+  // ETF, VANGUARD FTSE GLB AL-CAP ETF — every one of them recorded as `Mutual Fund`, which is a
+  // different instrument that is not exchange-traded. `security_type = 'ETP'` returned 0 rows
+  // while 864 of them sat there. The resource reported `written: 1013, complete: true` and was
+  // telling the truth.
+  check(/securityTypeDetail: r\.securityType \?/.test(figiSrc),
+    'listExchange captures the FINE securityType, not only the coarse securityType2')
+  check(/figi_security_type: l\.securityTypeDetail/.test(index),
+    'the sweep stores the fine type, so a fund is identifiable as one')
+
   const unreachable = cronResources.filter((r) => !accepted.has(r))
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',

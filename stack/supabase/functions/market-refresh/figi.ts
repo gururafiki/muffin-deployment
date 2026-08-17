@@ -262,7 +262,24 @@ export interface ExchangeListing {
   compositeFigi?: string;
   ticker: string;
   name?: string;
+  /** OpenFIGI's COARSE type (`securityType2`): Common Stock, Depositary Receipt, Mutual Fund. */
   securityType?: string;
+  /**
+   * OpenFIGI's FINE type (`securityType`), which is the only one that identifies a fund.
+   *
+   * The two disagree exactly where it matters. An ETF is `securityType: 'ETP'` inside
+   * `securityType2: 'Mutual Fund'` — so storing only the coarse one files every iShares and
+   * Vanguard ETF under the same label as an open-end mutual fund, which is a different instrument
+   * that is not exchange-traded. Measured 2026-08-17 on the first ETP sweep: 864 Amsterdam rows
+   * landed as `Mutual Fund`, among them ISHARES FTSE ALL WORLD ETF and VANGUARD FTSE GLB AL-CAP
+   * ETF. The data was right and the label was wrong.
+   *
+   * Kept BESIDE the coarse type rather than replacing it: the coarse value is what existing rows
+   * hold, and `securityType` spells a receipt `ADR` where `securityType2` spells it
+   * `Depositary Receipt`, so overwriting the column would silently change the vocabulary of
+   * 102,390 existing rows on their next sweep.
+   */
+  securityTypeDetail?: string;
 }
 
 /**
@@ -425,6 +442,7 @@ export async function listExchange(
         ticker,
         name: r.name ? String(r.name) : undefined,
         securityType: r.securityType2 ? String(r.securityType2) : undefined,
+        securityTypeDetail: r.securityType ? String(r.securityType) : undefined,
       });
     }
     next = body.next;
