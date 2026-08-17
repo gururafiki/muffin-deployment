@@ -345,6 +345,21 @@ export async function listExchange(
   opts: {
     apiKey?: string; maxPages?: number; budgetMs?: number;
     securityType2?: string;
+    /**
+     * WHICH OpenFIGI FIELD THE TYPE FILTER GOES IN, because the two levels are not interchangeable
+     * and ETFs are only reachable through the fine one.
+     *
+     * `securityType2` is the coarse bucket and `securityType` the fine one. For stocks the coarse
+     * bucket is what you want (`Common Stock`, `Depositary Receipt`). For ETFs it is useless:
+     * measured 2026-08-17, SPY is `securityType: 'ETP'` inside `securityType2: 'Mutual Fund'`, and
+     * that bucket returns **44,119** rows for the US — over the 15,000 paging ceiling and almost
+     * entirely open-end mutual funds (FEUCX, WATFX, NPRTX), which are not exchange-traded and have
+     * no place in an exchange directory.
+     *
+     * `securityType: 'ETP'` returns **6,664** for the US — DGP, UWM, EWH, ICLN, MDY — clean, and
+     * comfortably under the ceiling.
+     */
+    figiTypeField?: 'securityType' | 'securityType2';
     /** Ticker prefix, when the venue is too large to enumerate whole. See PAGING_CEILING. */
     query?: string;
   } = {},
@@ -383,7 +398,7 @@ export async function listExchange(
       headers,
       body: JSON.stringify({
         exchCode,
-        securityType2: opts.securityType2 ?? 'Common Stock',
+        [opts.figiTypeField ?? 'securityType2']: opts.securityType2 ?? 'Common Stock',
         ...(opts.query ? { query: opts.query } : {}),
         ...(next ? { start: next } : {}),
       }),

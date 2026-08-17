@@ -747,6 +747,24 @@ console.log('\nresource registry — the cron and the function agree')
     'every declared resource was actually checked — the list has not rotted',
     `${checkedExpressions} expressions vs ${Object.keys(REMAINING_MAY_USE).length} declared`)
 
+  // ── THE SWEEP READS THE TYPE FIELD FROM THE TABLE ──────────────────────────────────────────
+  //
+  // Migration 69 gives `exchange_sweep_type` a `figi_field` column so ETFs can be swept on
+  // OpenFIGI's FINE type (`securityType: 'ETP'`, 6,664 US rows) rather than its coarse bucket
+  // (`securityType2: 'Mutual Fund'`, 44,119 rows of open-end funds, over the paging ceiling).
+  // A column the function never reads is inert — exactly what happened to `provider_country_iso2`
+  // in migration 56, which shipped correct, was written correctly, and sat at 0 rows because the
+  // backlog that drives it could not reach the population that needed it. The SQL test asserts the
+  // row; this asserts the code actually uses it.
+  check(index.includes('figi_field'),
+    'the sweep reads figi_field from exchange_sweep_type')
+  check(/figiTypeField,/.test(index) || /figiTypeField:/.test(index),
+    'the sweep passes the type field through to listExchange')
+  const figiSrc = await Deno.readTextFile(new URL('./figi.ts', import.meta.url))
+  check(/\[opts\.figiTypeField \?\? 'securityType2'\]/.test(figiSrc),
+    'listExchange sends the type filter under the field it was told to use',
+    'without this the ETP filter silently goes out as securityType2 and returns mutual funds')
+
   const unreachable = cronResources.filter((r) => !accepted.has(r))
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',

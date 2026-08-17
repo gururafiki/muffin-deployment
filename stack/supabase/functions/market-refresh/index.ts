@@ -1293,6 +1293,20 @@ Deno.serve(async (req: Request) => {
       // sweep held `BABB`, `BABAF` and `BABYF` but not `BABA` — and the same for TSM, NVO and every
       // other foreign company's US line, the exact names someone expects to find.
       const secType = (target.security_type as string | null) ?? 'Common Stock'
+      // WHICH OpenFIGI FIELD THIS TYPE FILTERS ON — data, not a literal, because the two levels of
+      // OpenFIGI's type vocabulary are not interchangeable. Stocks and ADRs are `securityType2`
+      // values; an ETF is only reachable as `securityType: 'ETP'`, since its coarse bucket
+      // (`securityType2: 'Mutual Fund'`) is 44,119 US rows of mostly open-end funds and blows the
+      // paging ceiling. Kept beside the type in `exchange_sweep_type` so adding a fund class stays
+      // a row in Studio.
+      const { data: typeRow, error: tfErr } = await market
+        .from('exchange_sweep_type')
+        .select('figi_field')
+        .eq('security_type', secType)
+        .maybeSingle()
+      if (tfErr) throw new Error(`exchange_sweep_type read failed: ${tfErr.message}`)
+      const figiTypeField =
+        (typeRow?.figi_field as 'securityType' | 'securityType2' | null) ?? 'securityType2'
       // NULL means "sweep the venue whole"; a prefix means it is too large for one query.
       const prefix = (target.query_prefix as string | null) ?? undefined
       const { listings, next, pages, total, throttled: figiThrottled } = await listExchange(
@@ -1301,6 +1315,7 @@ Deno.serve(async (req: Request) => {
         {
           apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
           securityType2: secType,
+          figiTypeField,
           query: prefix,
         },
       )
@@ -1392,7 +1407,7 @@ Deno.serve(async (req: Request) => {
       // `written: 0, pages: 0, complete: false` reads as "nothing to do" and a sweep that is being
       // refused looks exactly like one that is finished.
       return json({
-        resource, exchange: exch, written, pages, total,
+        resource, exchange: exch, securityType: secType, figiTypeField, written, pages, total,
         complete: !next && !figiThrottled,
         throttled: figiThrottled,
       })
