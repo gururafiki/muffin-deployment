@@ -182,36 +182,62 @@ Deno.serve(async (req: Request) => {
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
-  const EXTRA = [
-    PROFILE_RESOURCE, PRICES_RESOURCE, HOLDINGS_RESOURCE, TICKERS_RESOURCE, DERIVE_RESOURCE,
-    SEC_PROFILE_RESOURCE, SEC_PERF_RESOURCE, LOCAL_SYM_RESOURCE, LISTINGS_RESOURCE,
-    INDUSTRY_RESOURCE, PROMOTE_RESOURCE, ONE_SECURITY_RESOURCE, FUNDAMENTALS_RESOURCE, STATEMENTS_RESOURCE,
-    YAHOO_SYMBOL_RESOURCE, SEC_PRICES_RESOURCE,
-  , ACTIONS_RESOURCE]
+  // EVERY RESOURCE DECLARES ITS TTL HERE, AND THERE IS NO DEFAULT.
+  //
+  // This was a ternary chain ending in `: PROFILE_TTL_MINUTES`, with the set of known resources
+  // kept in a SEPARATE array beside it. The two drifted, and the fallback made the drift silent:
+  // a resource missing from the chain did not fail, it inherited SEVEN DAYS.
+  //
+  // Measured 2026-08-17, three resources had fallen through — and every one of them is an
+  // INCREMENTAL backlog, i.e. exactly the kind the comment below warns must never get a
+  // completion-shaped TTL:
+  //
+  //   security-prices           last ran 08-14 18:09, next allowed 08-21 — `pending_prices`
+  //                             meanwhile grew 2,940 -> 11,348 (92% of all equities) and the
+  //                             newest stored bar stayed frozen at Friday 08-14
+  //   security-yahoo-symbols    last ran 08-14 18:06
+  //   security-corporate-actions last ran 08-15 12:35
+  //
+  // The cron called all three on schedule, eight times a day, and each answered
+  // `{"skipped":true,"reason":"fresh or in flight"}` — which the warm-up correctly counts as a
+  // SUCCESS, because a warm-up finding fresh data is the happy path. So the workflow was green,
+  // `refresh_log.ok` was true, no error was ever raised, and price ingestion was simply stopped.
+  //
+  // A DEFAULT TTL IS A SILENT WRONG ANSWER. Keyed off the map so the two cannot drift again:
+  // `EXTRA` is now derived from it rather than maintained beside it, so adding a resource without
+  // a TTL is not "the default applies", it is `unknown resource` — a loud 400 on the first call.
+  const EXTRA_TTL_MINUTES: Record<string, number> = {
+    // Incremental backlogs: each run drains a SLICE, so the TTL only has to permit the NEXT run.
+    // A completion-shaped TTL here does not slow the resource down, it stalls the backlog for the
+    // length of the TTL.
+    [SEC_PROFILE_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SEC_PERF_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [LOCAL_SYM_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [LISTINGS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [INDUSTRY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    // Whole-universe passes that FINISH what they start in one run, so the TTL is the real
+    // cadence of the underlying data rather than a permit for the next slice.
+    [TICKERS_RESOURCE]: TICKERS_TTL_MINUTES,
+    [PRICES_RESOURCE]: PRICES_TTL_MINUTES,
+    [PROFILE_RESOURCE]: PROFILE_TTL_MINUTES,
+    // Reference data: N-PORT is quarterly, so a short TTL would just re-ask SEC for last
+    // quarter's answer.
+    [HOLDINGS_RESOURCE]: REFERENCE_TTL_MINUTES,
+    [DERIVE_RESOURCE]: REFERENCE_TTL_MINUTES,
+  }
+  const EXTRA = Object.keys(EXTRA_TTL_MINUTES)
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
     return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
   }
-  const ttlMinutes = spec
-    ? spec.ttlMinutes
-    : resource === PRICES_RESOURCE
-      ? PRICES_TTL_MINUTES
-      // Incremental: each run drains a slice of the backlog, so the TTL must be short enough that
-      // the NEXT run is allowed to happen. A completion-shaped TTL here stalls it for a week.
-      // Incremental resources, same reasoning as security-tickers: the TTL must be short enough
-      // that the NEXT run is allowed to continue the backlog.
-      : resource === SEC_PROFILE_RESOURCE || resource === SEC_PERF_RESOURCE || resource === LOCAL_SYM_RESOURCE || resource === LISTINGS_RESOURCE ||
-        resource === INDUSTRY_RESOURCE || resource === PROMOTE_RESOURCE ||
-        resource === ONE_SECURITY_RESOURCE || resource === FUNDAMENTALS_RESOURCE ||
-        resource === STATEMENTS_RESOURCE
-        ? BACKLOG_TTL_MINUTES
-      : resource === TICKERS_RESOURCE
-        ? TICKERS_TTL_MINUTES
-      // Reference data, not prices: N-PORT is quarterly, so a short TTL would just re-ask SEC for
-      // last quarter's answer. Both of these finish what they start in a single run.
-      : resource === HOLDINGS_RESOURCE || resource === DERIVE_RESOURCE
-        ? REFERENCE_TTL_MINUTES
-        : PROFILE_TTL_MINUTES
+  const ttlMinutes = spec ? spec.ttlMinutes : EXTRA_TTL_MINUTES[resource]
 
   // WRITES ARE ADMIN-ONLY. Reads never come through here — the app reads the tables directly over
   // PostgREST — so refusing a non-admin costs a visitor nothing. Previously any valid JWT (i.e.
@@ -671,7 +697,14 @@ Deno.serve(async (req: Request) => {
         // only and the batch size must go back to 1.
         symbolsAnswered: symbolsAnswered.size,
         symbolsAsked: wanted.length,
-        remaining: Math.max(0, wanted.length - written),
+        // SECURITIES, not rows. `written` counts statement ROWS — income/balance/cash across
+        // several periods, about twelve per security — so `wanted.length - written` subtracted
+        // twelve-per-security from a count of securities and hit zero almost immediately.
+        // Measured live 2026-08-17: `written: 276, symbolsAsked: 60, remaining: 0` while
+        // `pending_statements` stood at 3,646. The backlog reported itself drained on every run.
+        // Third instance of this unit confusion (see ACTIONS_RESOURCE, SEC_PERF_RESOURCE); the
+        // guard in logic-check.ts now fails on the shape rather than the instance.
+        remaining: Math.max(0, wanted.length - symbolsAnswered.size - none),
       })
     }
 
@@ -1260,6 +1293,20 @@ Deno.serve(async (req: Request) => {
       // sweep held `BABB`, `BABAF` and `BABYF` but not `BABA` — and the same for TSM, NVO and every
       // other foreign company's US line, the exact names someone expects to find.
       const secType = (target.security_type as string | null) ?? 'Common Stock'
+      // WHICH OpenFIGI FIELD THIS TYPE FILTERS ON — data, not a literal, because the two levels of
+      // OpenFIGI's type vocabulary are not interchangeable. Stocks and ADRs are `securityType2`
+      // values; an ETF is only reachable as `securityType: 'ETP'`, since its coarse bucket
+      // (`securityType2: 'Mutual Fund'`) is 44,119 US rows of mostly open-end funds and blows the
+      // paging ceiling. Kept beside the type in `exchange_sweep_type` so adding a fund class stays
+      // a row in Studio.
+      const { data: typeRow, error: tfErr } = await market
+        .from('exchange_sweep_type')
+        .select('figi_field')
+        .eq('security_type', secType)
+        .maybeSingle()
+      if (tfErr) throw new Error(`exchange_sweep_type read failed: ${tfErr.message}`)
+      const figiTypeField =
+        (typeRow?.figi_field as 'securityType' | 'securityType2' | null) ?? 'securityType2'
       // NULL means "sweep the venue whole"; a prefix means it is too large for one query.
       const prefix = (target.query_prefix as string | null) ?? undefined
       const { listings, next, pages, total, throttled: figiThrottled } = await listExchange(
@@ -1268,6 +1315,7 @@ Deno.serve(async (req: Request) => {
         {
           apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
           securityType2: secType,
+          figiTypeField,
           query: prefix,
         },
       )
@@ -1359,7 +1407,7 @@ Deno.serve(async (req: Request) => {
       // `written: 0, pages: 0, complete: false` reads as "nothing to do" and a sweep that is being
       // refused looks exactly like one that is finished.
       return json({
-        resource, exchange: exch, written, pages, total,
+        resource, exchange: exch, securityType: secType, figiTypeField, written, pages, total,
         complete: !next && !figiThrottled,
         throttled: figiThrottled,
       })
@@ -1497,6 +1545,9 @@ Deno.serve(async (req: Request) => {
       // Bars recovered by asking a symbol on its own after its batch produced nothing. A non-zero
       // value here means a BATCH was hiding an answerable security, which is worth seeing.
       let isolatedWrites = 0
+      // SECURITIES priced this run, as distinct from the BARS written. `remaining` was
+      // `wanted.length` — the page size, which never moved however much work the run did.
+      const securitiesPriced = new Set<string>()
       const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
 
       for (const plan of plans) {
@@ -1622,6 +1673,7 @@ Deno.serve(async (req: Request) => {
         // Keep the window bounded. Without this the table grows forever and the "~400 bars per
         // security" sizing that justified storing this at all stops being true.
         const touched = [...new Set(priceRows.map((r) => r.security_id))]
+        for (const id of touched) securitiesPriced.add(String(id))
         for (let i = 0; i < touched.length; i += 100) {
           const { error } = await market
             .from('security_price')
@@ -1635,7 +1687,10 @@ Deno.serve(async (req: Request) => {
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource, written, emptySeries, isolatedWrites, batchesFailed, lastError, throttledOut,
-        plans: plans.length, remaining: wanted.length,
+        plans: plans.length, securitiesPriced: securitiesPriced.size,
+        // Securities from THIS PAGE still pending afterwards. A security is done when it got bars
+        // or was confirmed empty one at a time; a batch that merely failed leaves it pending.
+        remaining: Math.max(0, wanted.length - securitiesPriced.size - emptySeries),
       })
     }
 
@@ -1858,6 +1913,7 @@ Deno.serve(async (req: Request) => {
       const deadline = Date.now() + 60_000
       const BATCH = 20
       let classified = 0
+      const classifiedSecurities = new Set<string>()
       let noIndustry = 0
       let capped = 0
       let batchesFailed = 0
@@ -2057,7 +2113,11 @@ Deno.serve(async (req: Request) => {
             .upsert(dedupeBy(writes, (w) => `${w.security_id}|${w.node_id}|${w.source_code}`),
               { onConflict: 'security_id,node_id,source_code' })
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
-          classified += writes.length
+          // SECURITIES, not rows. `security_taxonomy` is keyed (security_id, node_id, source_code)
+          // so it holds several rows per security, and `writes` is counted BEFORE `dedupeBy` —
+          // `pending_industry` yields one row per (security, level-1 sector), so a security in two
+          // sectors was counted twice. Same unit confusion as statements and performance.
+          for (const w of writes) classifiedSecurities.add(String(w.security_id))
         }
         // Answered about but with no industry, or no sector to hang it under. Recorded so they
         // stop being re-asked — the fifth time this has been needed here.
@@ -2078,6 +2138,7 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         classified,
+        classifiedSecurities: classifiedSecurities.size,
         capped,
         noIndustry,
         batchesFailed,
@@ -2085,7 +2146,7 @@ Deno.serve(async (req: Request) => {
         // Without it a throttled run is indistinguishable from a drained backlog.
         throttledOut,
         lastError,
-        remaining: Math.max(0, wanted.length - classified - noIndustry),
+        remaining: Math.max(0, wanted.length - classifiedSecurities.size - noIndustry),
       })
     }
 
@@ -2137,6 +2198,7 @@ Deno.serve(async (req: Request) => {
       // fetcher's timeout instead of relying on it.
       const BATCH = 20
       let classified = 0
+      const classifiedSecurities = new Set<string>()
       let unmapped = 0
       let capped = 0
       let noProfile = 0
@@ -2286,7 +2348,11 @@ Deno.serve(async (req: Request) => {
             .upsert(dedupeBy(writes, (w) => `${w.security_id}|${w.node_id}|${w.source_code}`),
               { onConflict: 'security_id,node_id,source_code' })
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
-          classified += writes.length
+          // SECURITIES, not rows. `security_taxonomy` is keyed (security_id, node_id, source_code)
+          // so it holds several rows per security, and `writes` is counted BEFORE `dedupeBy` —
+          // `pending_industry` yields one row per (security, level-1 sector), so a security in two
+          // sectors was counted twice. Same unit confusion as statements and performance.
+          for (const w of writes) classifiedSecurities.add(String(w.security_id))
         }
         // Written per security rather than in one upsert: `security` rows already exist, so this
         // is an UPDATE, and PostgREST has no bulk update by differing values.
@@ -2351,6 +2417,7 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         classified,
+        classifiedSecurities: classifiedSecurities.size,
         capped,
         unmapped,
         // Securities the provider ANSWERED about and had no profile for, now negative-cached.
@@ -2369,7 +2436,7 @@ Deno.serve(async (req: Request) => {
         homed,
         noCountryMarked,
         unresolvedCountries: [...unresolvedCountries],
-        remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
+        remaining: Math.max(0, wanted.length - classifiedSecurities.size - unmapped - noProfile),
       })
     }
 
@@ -2402,6 +2469,10 @@ Deno.serve(async (req: Request) => {
       const deadline = Date.now() + 60_000
       const now = new Date()
       let written = 0
+      // SECURITIES covered, tracked separately from the ROWS written, because a security yields
+      // one performance row PER PERIOD (seven to nine of them). Counting rows and subtracting
+      // them from a count of securities is what made `remaining` report 0 on a backlog 6,909 deep.
+      const symbolsCovered = new Set<string>()
       let batchesFailed = 0
       let throttledOut = false
       let emptyBatches = 0
@@ -2538,15 +2609,21 @@ Deno.serve(async (req: Request) => {
           }
         }
         written += rows.length
+        for (const sym of producedBySymbol.keys()) symbolsCovered.add(sym)
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
         refreshed: written,
+        securitiesCovered: symbolsCovered.size,
         batchesFailed,
         emptyBatches,
         lastError,
-        remaining: Math.max(0, symbols.length - written),
+        // SECURITIES, not rows — see the statements resource for the same defect. A security
+        // yields seven to nine performance rows, so `symbols.length - written` went negative and
+        // clamped. Measured live 2026-08-17: `refreshed: 2751, remaining: 0` (2,751 rows is ~306
+        // securities) while `pending_performance` stood at 6,909.
+        remaining: Math.max(0, symbols.length - symbolsCovered.size),
       })
     }
 

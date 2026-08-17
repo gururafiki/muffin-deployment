@@ -20,7 +20,7 @@ import {
   planPriceFetches,
   type Bar,
 } from './resources.ts'
-import { pickHomeListing } from './yahoo.ts'
+import { pickHomeListing, type YahooHit } from './yahoo.ts'
 import { venuesFromRows, hasLocalExchange, pickLocalSymbol, venueForSymbol } from './exchanges.ts'
 
 let failures = 0
@@ -597,15 +597,173 @@ console.log('\nresource registry — the cron and the function agree')
     ...[...resourcesFile.matchAll(/^\s{2}'([a-z][a-z-]+)':\s*\{/gm)].map((m) => m[1]),
     ...[...index.matchAll(/_RESOURCE = '([a-z][a-z-]+)'/g)].map((m) => m[1]),
   ])
-  const extraBlock = index.match(/const EXTRA = \[[\s\S]*?\]/)?.[0] ?? ''
+  // `EXTRA` is DERIVED from the TTL map (`Object.keys`), so the allow-list and the TTL table are
+  // the same list and cannot drift. Parse the map.
+  const extraBlock = index.match(/const EXTRA_TTL_MINUTES: Record<string, number> = \{[\s\S]*?\n  \}/)?.[0] ?? ''
+  check(extraBlock.length > 0, 'found the TTL map that defines the extra resources')
   const accepted = new Set<string>(
     [...declared].filter((name) => {
       const constName = [...index.matchAll(/(\w+_RESOURCE) = '([a-z][a-z-]+)'/g)]
         .find((m) => m[2] === name)?.[1]
       // A resource is reachable if it is a declared RESOURCES entry, or its constant is in EXTRA.
-      return !constName || extraBlock.includes(constName)
+      return !constName || extraBlock.includes(`[${constName}]`)
     }),
   )
+
+  // ── EVERY RESOURCE DECLARES A TTL, AND NOTHING INHERITS ONE ────────────────────────────────
+  //
+  // This is the guard for the defect measured 2026-08-17. The TTL used to be a ternary chain
+  // ending in `: PROFILE_TTL_MINUTES`, kept BESIDE a separate `EXTRA` array of known resources.
+  // Three resources were in the array and not in the chain, so they silently inherited SEVEN DAYS
+  // — and all three are incremental backlogs that must run every pass:
+  // `security-prices` (frozen 08-14 to 08-21 while `pending_prices` grew 2,940 -> 11,348),
+  // `security-yahoo-symbols`, `security-corporate-actions`.
+  //
+  // NOTHING COULD REPORT IT. The cron called them eight times a day and each answered
+  // `{"skipped":true,"reason":"fresh or in flight"}`, which is a SUCCESS for a warm-up — green
+  // workflow, `ok: true` in `refresh_log`, no error anywhere, and price ingestion stopped dead.
+  //
+  // Asserted against the SOURCE because it is the SHAPE that recurs: a default that silently
+  // supplies a wrong answer is worse than no default, which would have 400'd on the first call.
+  const ttlKeys = [...extraBlock.matchAll(/\[(\w+_RESOURCE)\]:\s*(\w+)/g)]
+  const withoutTtl = [...index.matchAll(/(\w+_RESOURCE) = '([a-z][a-z-]+)'/g)]
+    .map((m) => m[1])
+    .filter((c) => !ttlKeys.some(([, key]) => key === c))
+  check(withoutTtl.length === 0,
+    'every declared resource constant has an explicit TTL',
+    withoutTtl.length ? `no TTL declared for: ${withoutTtl.join(', ')}` : '')
+
+  check(!/:\s*PROFILE_TTL_MINUTES\s*$/m.test(index.replace(/\[PROFILE_RESOURCE\]:.*/g, '')),
+    'there is no fallback TTL for a resource that declares none')
+
+  // The incremental backlogs specifically. A backlog resource drains a slice per run, so anything
+  // longer than the cron interval stalls it for the length of the TTL rather than slowing it.
+  const mustBeBacklog = [
+    'SEC_PRICES_RESOURCE', 'YAHOO_SYMBOL_RESOURCE', 'ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE',
+    'FUNDAMENTALS_RESOURCE', 'INDUSTRY_RESOURCE', 'SEC_PROFILE_RESOURCE', 'SEC_PERF_RESOURCE',
+    'LOCAL_SYM_RESOURCE', 'LISTINGS_RESOURCE',
+  ]
+  const wrongTtl = mustBeBacklog.filter((c) =>
+    !ttlKeys.some(([, key, ttl]) => key === c && ttl === 'BACKLOG_TTL_MINUTES'))
+  check(wrongTtl.length === 0,
+    'every incremental backlog runs on the backlog TTL, not a completion-shaped one',
+    wrongTtl.length ? `wrong TTL: ${wrongTtl.join(', ')}` : '')
+
+  // ── `remaining` COUNTS SECURITIES, AND A ROW IS NOT A SECURITY ──────────────────────────────
+  //
+  // `remaining` is subtracted from a count of SECURITIES (`wanted.length`). Subtract a count of
+  // ROWS from it and it goes negative and clamps to zero, so the resource reports a drained
+  // backlog on every run while thousands of securities are still pending. It is the one number an
+  // operator reads to decide whether a backlog is progressing, and it fails in the believable
+  // direction.
+  //
+  // FIVE instances, four of them found only by measuring production against the reported number:
+  //   security-corporate-actions  written=521 rows vs 60 securities   -> fixed in #140
+  //   security-statements         written=276 rows vs 60 asked, `pending_statements` 3,646
+  //   security-performance        refreshed=2,751 rows (~306 securities), `pending_performance` 6,909
+  //   security-prices             reported the PAGE SIZE, which never moves however much it does
+  //   security-industries/-profiles  counted `writes` BEFORE `dedupeBy`, so a security in two
+  //                               sectors counted twice
+  //
+  // The discriminator is the upsert's conflict key, which says how many rows a security may have:
+  // `security_fundamentals` is keyed on `security_id` alone, so counting its rows IS counting
+  // securities and `written` is correct there. `security_taxonomy` is keyed on
+  // (security_id, node_id, source_code) and `security_price` on (security_id, date), so counting
+  // theirs is not. Rather than re-derive that per site — which is how this survived five times —
+  // every other site now counts distinct securities in a Set, and this asserts it.
+  // THIS IS A WHITELIST PER RESOURCE, and both of those words were arrived at by watching weaker
+  // versions fail:
+  //
+  // - INFERRING the unit (walk back from `counter += arr.length` to the nearest `onConflict`)
+  //   cannot tell whether that upsert is the one that wrote `arr`. It raised three false positives
+  //   on counters that are correct — `emptyIds`, `deadIds` and `batch` are arrays of SECURITIES,
+  //   so their `.length` IS a security count. A guard that cries wolf on correct code gets deleted.
+  //
+  // - A BLACKLIST OF COUNTER NAMES cannot express "legal here, illegal there", and that is exactly
+  //   the situation: `written` is a security count in security-fundamentals (keyed on `security_id`
+  //   alone) and a row count in every other resource. Allow-listing the NAME re-permitted the
+  //   original bug — proven by mutation, which put `written` back into the statements expression
+  //   and passed. It also could not see `classified`, whose increment had changed shape.
+  //
+  // So: each resource declares the exact identifiers its `remaining` may mention. Anything else
+  // fails, including a NEW name. Brittle to refactoring on purpose — renaming a counter fails
+  // loudly and is a two-second fix, while a row count silently replacing a security count is a
+  // backlog that reports itself drained for ever.
+  const REMAINING_MAY_USE: Record<string, string[]> = {
+    ACTIONS_RESOURCE: ['wanted', 'covered', 'none', 'noTicker'],
+    STATEMENTS_RESOURCE: ['wanted', 'symbolsAnswered', 'none'],
+    // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
+    // `security_id` alone, so one row is one security.
+    FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
+    LOCAL_SYM_RESOURCE: ['addressable', 'resolvedCount', 'unresolved'],
+    SEC_PRICES_RESOURCE: ['wanted', 'securitiesPriced', 'emptySeries'],
+    YAHOO_SYMBOL_RESOURCE: ['wanted', 'resolved', 'unresolved', 'failed'],
+    INDUSTRY_RESOURCE: ['wanted', 'classifiedSecurities', 'noIndustry'],
+    SEC_PROFILE_RESOURCE: ['wanted', 'classifiedSecurities', 'unmapped', 'noProfile'],
+    SEC_PERF_RESOURCE: ['symbols', 'symbolsCovered'],
+    TICKERS_RESOURCE: ['wanted', 'resolvedCount', 'unresolved'],
+  }
+  const idxLines = index.split('\n')
+  const resourceAt = (line: number): string | null => {
+    let owner: string | null = null
+    idxLines.forEach((l, i) => {
+      const m = l.match(/resource === (\w+_RESOURCE)\)/)
+      if (m && i + 1 <= line) owner = m[1]
+    })
+    return owner
+  }
+  const offenders: string[] = []
+  let checkedExpressions = 0
+  idxLines.forEach((l, i) => {
+    if (!/^\s*remaining:/.test(l)) return
+    checkedExpressions++
+    const owner = resourceAt(i + 1)
+    const allowed = owner ? REMAINING_MAY_USE[owner] : undefined
+    if (!allowed) {
+      offenders.push(`line ${i + 1}: no declared identifier list for ${owner ?? 'unknown resource'}`)
+      return
+    }
+    // Base identifiers only — a trailing `.length` / `.size` is a property of one of them, not a
+    // separate name, and counting it as one made every line look undeclared.
+    const used = [...l.matchAll(/(?<![.\w])([a-z]\w*)\b/gi)]
+      .map((m) => m[1])
+      .filter((n) => !['remaining', 'Math', 'max'].includes(n))
+    const undeclared = [...new Set(used)].filter((n) => !allowed.includes(n))
+    if (undeclared.length) {
+      offenders.push(`line ${i + 1} (${owner}): undeclared in remaining: ${undeclared.join(', ')}`)
+    }
+    // AND IT MUST ACTUALLY SUBTRACT THE RUN'S PROGRESS. `security-prices` reported
+    // `remaining: wanted.length` — the page it was handed, which is the same number whether the
+    // run priced everything or nothing. That is not caught by the whitelist, because the page size
+    // is a legitimately declared identifier; the defect is the ABSENCE of the subtraction.
+    if (!l.includes(' - ')) {
+      offenders.push(`line ${i + 1} (${owner}): remaining subtracts nothing — it reports the page size`)
+    }
+  })
+  check(offenders.length === 0,
+    'every `remaining` uses only the identifiers its resource declares (rows are not securities)',
+    offenders.join(' | '))
+  check(checkedExpressions === Object.keys(REMAINING_MAY_USE).length,
+    'every declared resource was actually checked — the list has not rotted',
+    `${checkedExpressions} expressions vs ${Object.keys(REMAINING_MAY_USE).length} declared`)
+
+  // ── THE SWEEP READS THE TYPE FIELD FROM THE TABLE ──────────────────────────────────────────
+  //
+  // Migration 69 gives `exchange_sweep_type` a `figi_field` column so ETFs can be swept on
+  // OpenFIGI's FINE type (`securityType: 'ETP'`, 6,664 US rows) rather than its coarse bucket
+  // (`securityType2: 'Mutual Fund'`, 44,119 rows of open-end funds, over the paging ceiling).
+  // A column the function never reads is inert — exactly what happened to `provider_country_iso2`
+  // in migration 56, which shipped correct, was written correctly, and sat at 0 rows because the
+  // backlog that drives it could not reach the population that needed it. The SQL test asserts the
+  // row; this asserts the code actually uses it.
+  check(index.includes('figi_field'),
+    'the sweep reads figi_field from exchange_sweep_type')
+  check(/figiTypeField,/.test(index) || /figiTypeField:/.test(index),
+    'the sweep passes the type field through to listExchange')
+  const figiSrc = await Deno.readTextFile(new URL('./figi.ts', import.meta.url))
+  check(/\[opts\.figiTypeField \?\? 'securityType2'\]/.test(figiSrc),
+    'listExchange sends the type filter under the field it was told to use',
+    'without this the ETP filter silently goes out as securityType2 and returns mutual funds')
 
   const unreachable = cronResources.filter((r) => !accepted.has(r))
   check(unreachable.length === 0,
@@ -668,7 +826,8 @@ console.log('\nplanPriceFetches — a daily refresh should ask for a day')
   ], now, 10)
   const fullPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'NEW1'))
   const incPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'FRESH'))
-  check(fullPlan?.startDate.startsWith('2025-'), 'a never-priced security gets the full window',
+  check(fullPlan?.startDate.startsWith('2025-') === true,
+    'a never-priced security gets the full window',
     fullPlan?.startDate)
   check(incPlan !== undefined && incPlan !== fullPlan,
     'it does NOT drag the incremental ones into a 400-day fetch')

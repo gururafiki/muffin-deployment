@@ -148,7 +148,15 @@ jobs:
         with:
           deno-version: v2.x
       - name: Typecheck
-        run: deno check stack/supabase/functions/market-refresh/index.ts
+        # logic-check.ts is typechecked TOO, and that is not a tidiness point. It is only ever
+        # `deno run`, which STRIPS types rather than checking them — so the one file that holds
+        # every guard in this pipeline was the one file nothing typechecked. Three errors were
+        # sitting on `main` when this was added (a missing `YahooHit` import, an optional chain
+        # returning `boolean | undefined`), and the suite passed anyway. A guard file that does not
+        # compile is a guard nobody can trust.
+        run: |
+          deno check stack/supabase/functions/market-refresh/index.ts \
+                     stack/supabase/functions/market-refresh/logic-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
