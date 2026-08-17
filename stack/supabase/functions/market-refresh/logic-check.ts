@@ -649,6 +649,104 @@ console.log('\nresource registry — the cron and the function agree')
     'every incremental backlog runs on the backlog TTL, not a completion-shaped one',
     wrongTtl.length ? `wrong TTL: ${wrongTtl.join(', ')}` : '')
 
+  // ── `remaining` COUNTS SECURITIES, AND A ROW IS NOT A SECURITY ──────────────────────────────
+  //
+  // `remaining` is subtracted from a count of SECURITIES (`wanted.length`). Subtract a count of
+  // ROWS from it and it goes negative and clamps to zero, so the resource reports a drained
+  // backlog on every run while thousands of securities are still pending. It is the one number an
+  // operator reads to decide whether a backlog is progressing, and it fails in the believable
+  // direction.
+  //
+  // FIVE instances, four of them found only by measuring production against the reported number:
+  //   security-corporate-actions  written=521 rows vs 60 securities   -> fixed in #140
+  //   security-statements         written=276 rows vs 60 asked, `pending_statements` 3,646
+  //   security-performance        refreshed=2,751 rows (~306 securities), `pending_performance` 6,909
+  //   security-prices             reported the PAGE SIZE, which never moves however much it does
+  //   security-industries/-profiles  counted `writes` BEFORE `dedupeBy`, so a security in two
+  //                               sectors counted twice
+  //
+  // The discriminator is the upsert's conflict key, which says how many rows a security may have:
+  // `security_fundamentals` is keyed on `security_id` alone, so counting its rows IS counting
+  // securities and `written` is correct there. `security_taxonomy` is keyed on
+  // (security_id, node_id, source_code) and `security_price` on (security_id, date), so counting
+  // theirs is not. Rather than re-derive that per site — which is how this survived five times —
+  // every other site now counts distinct securities in a Set, and this asserts it.
+  // THIS IS A WHITELIST PER RESOURCE, and both of those words were arrived at by watching weaker
+  // versions fail:
+  //
+  // - INFERRING the unit (walk back from `counter += arr.length` to the nearest `onConflict`)
+  //   cannot tell whether that upsert is the one that wrote `arr`. It raised three false positives
+  //   on counters that are correct — `emptyIds`, `deadIds` and `batch` are arrays of SECURITIES,
+  //   so their `.length` IS a security count. A guard that cries wolf on correct code gets deleted.
+  //
+  // - A BLACKLIST OF COUNTER NAMES cannot express "legal here, illegal there", and that is exactly
+  //   the situation: `written` is a security count in security-fundamentals (keyed on `security_id`
+  //   alone) and a row count in every other resource. Allow-listing the NAME re-permitted the
+  //   original bug — proven by mutation, which put `written` back into the statements expression
+  //   and passed. It also could not see `classified`, whose increment had changed shape.
+  //
+  // So: each resource declares the exact identifiers its `remaining` may mention. Anything else
+  // fails, including a NEW name. Brittle to refactoring on purpose — renaming a counter fails
+  // loudly and is a two-second fix, while a row count silently replacing a security count is a
+  // backlog that reports itself drained for ever.
+  const REMAINING_MAY_USE: Record<string, string[]> = {
+    ACTIONS_RESOURCE: ['wanted', 'covered', 'none', 'noTicker'],
+    STATEMENTS_RESOURCE: ['wanted', 'symbolsAnswered', 'none'],
+    // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
+    // `security_id` alone, so one row is one security.
+    FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
+    LOCAL_SYM_RESOURCE: ['addressable', 'resolvedCount', 'unresolved'],
+    SEC_PRICES_RESOURCE: ['wanted', 'securitiesPriced', 'emptySeries'],
+    YAHOO_SYMBOL_RESOURCE: ['wanted', 'resolved', 'unresolved', 'failed'],
+    INDUSTRY_RESOURCE: ['wanted', 'classifiedSecurities', 'noIndustry'],
+    SEC_PROFILE_RESOURCE: ['wanted', 'classifiedSecurities', 'unmapped', 'noProfile'],
+    SEC_PERF_RESOURCE: ['symbols', 'symbolsCovered'],
+    TICKERS_RESOURCE: ['wanted', 'resolvedCount', 'unresolved'],
+  }
+  const idxLines = index.split('\n')
+  const resourceAt = (line: number): string | null => {
+    let owner: string | null = null
+    idxLines.forEach((l, i) => {
+      const m = l.match(/resource === (\w+_RESOURCE)\)/)
+      if (m && i + 1 <= line) owner = m[1]
+    })
+    return owner
+  }
+  const offenders: string[] = []
+  let checkedExpressions = 0
+  idxLines.forEach((l, i) => {
+    if (!/^\s*remaining:/.test(l)) return
+    checkedExpressions++
+    const owner = resourceAt(i + 1)
+    const allowed = owner ? REMAINING_MAY_USE[owner] : undefined
+    if (!allowed) {
+      offenders.push(`line ${i + 1}: no declared identifier list for ${owner ?? 'unknown resource'}`)
+      return
+    }
+    // Base identifiers only — a trailing `.length` / `.size` is a property of one of them, not a
+    // separate name, and counting it as one made every line look undeclared.
+    const used = [...l.matchAll(/(?<![.\w])([a-z]\w*)\b/gi)]
+      .map((m) => m[1])
+      .filter((n) => !['remaining', 'Math', 'max'].includes(n))
+    const undeclared = [...new Set(used)].filter((n) => !allowed.includes(n))
+    if (undeclared.length) {
+      offenders.push(`line ${i + 1} (${owner}): undeclared in remaining: ${undeclared.join(', ')}`)
+    }
+    // AND IT MUST ACTUALLY SUBTRACT THE RUN'S PROGRESS. `security-prices` reported
+    // `remaining: wanted.length` — the page it was handed, which is the same number whether the
+    // run priced everything or nothing. That is not caught by the whitelist, because the page size
+    // is a legitimately declared identifier; the defect is the ABSENCE of the subtraction.
+    if (!l.includes(' - ')) {
+      offenders.push(`line ${i + 1} (${owner}): remaining subtracts nothing — it reports the page size`)
+    }
+  })
+  check(offenders.length === 0,
+    'every `remaining` uses only the identifiers its resource declares (rows are not securities)',
+    offenders.join(' | '))
+  check(checkedExpressions === Object.keys(REMAINING_MAY_USE).length,
+    'every declared resource was actually checked — the list has not rotted',
+    `${checkedExpressions} expressions vs ${Object.keys(REMAINING_MAY_USE).length} declared`)
+
   const unreachable = cronResources.filter((r) => !accepted.has(r))
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',

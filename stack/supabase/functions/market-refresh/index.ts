@@ -697,7 +697,14 @@ Deno.serve(async (req: Request) => {
         // only and the batch size must go back to 1.
         symbolsAnswered: symbolsAnswered.size,
         symbolsAsked: wanted.length,
-        remaining: Math.max(0, wanted.length - written),
+        // SECURITIES, not rows. `written` counts statement ROWS — income/balance/cash across
+        // several periods, about twelve per security — so `wanted.length - written` subtracted
+        // twelve-per-security from a count of securities and hit zero almost immediately.
+        // Measured live 2026-08-17: `written: 276, symbolsAsked: 60, remaining: 0` while
+        // `pending_statements` stood at 3,646. The backlog reported itself drained on every run.
+        // Third instance of this unit confusion (see ACTIONS_RESOURCE, SEC_PERF_RESOURCE); the
+        // guard in logic-check.ts now fails on the shape rather than the instance.
+        remaining: Math.max(0, wanted.length - symbolsAnswered.size - none),
       })
     }
 
@@ -1523,6 +1530,9 @@ Deno.serve(async (req: Request) => {
       // Bars recovered by asking a symbol on its own after its batch produced nothing. A non-zero
       // value here means a BATCH was hiding an answerable security, which is worth seeing.
       let isolatedWrites = 0
+      // SECURITIES priced this run, as distinct from the BARS written. `remaining` was
+      // `wanted.length` — the page size, which never moved however much work the run did.
+      const securitiesPriced = new Set<string>()
       const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
 
       for (const plan of plans) {
@@ -1648,6 +1658,7 @@ Deno.serve(async (req: Request) => {
         // Keep the window bounded. Without this the table grows forever and the "~400 bars per
         // security" sizing that justified storing this at all stops being true.
         const touched = [...new Set(priceRows.map((r) => r.security_id))]
+        for (const id of touched) securitiesPriced.add(String(id))
         for (let i = 0; i < touched.length; i += 100) {
           const { error } = await market
             .from('security_price')
@@ -1661,7 +1672,10 @@ Deno.serve(async (req: Request) => {
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource, written, emptySeries, isolatedWrites, batchesFailed, lastError, throttledOut,
-        plans: plans.length, remaining: wanted.length,
+        plans: plans.length, securitiesPriced: securitiesPriced.size,
+        // Securities from THIS PAGE still pending afterwards. A security is done when it got bars
+        // or was confirmed empty one at a time; a batch that merely failed leaves it pending.
+        remaining: Math.max(0, wanted.length - securitiesPriced.size - emptySeries),
       })
     }
 
@@ -1884,6 +1898,7 @@ Deno.serve(async (req: Request) => {
       const deadline = Date.now() + 60_000
       const BATCH = 20
       let classified = 0
+      const classifiedSecurities = new Set<string>()
       let noIndustry = 0
       let capped = 0
       let batchesFailed = 0
@@ -2083,7 +2098,11 @@ Deno.serve(async (req: Request) => {
             .upsert(dedupeBy(writes, (w) => `${w.security_id}|${w.node_id}|${w.source_code}`),
               { onConflict: 'security_id,node_id,source_code' })
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
-          classified += writes.length
+          // SECURITIES, not rows. `security_taxonomy` is keyed (security_id, node_id, source_code)
+          // so it holds several rows per security, and `writes` is counted BEFORE `dedupeBy` —
+          // `pending_industry` yields one row per (security, level-1 sector), so a security in two
+          // sectors was counted twice. Same unit confusion as statements and performance.
+          for (const w of writes) classifiedSecurities.add(String(w.security_id))
         }
         // Answered about but with no industry, or no sector to hang it under. Recorded so they
         // stop being re-asked — the fifth time this has been needed here.
@@ -2104,6 +2123,7 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         classified,
+        classifiedSecurities: classifiedSecurities.size,
         capped,
         noIndustry,
         batchesFailed,
@@ -2111,7 +2131,7 @@ Deno.serve(async (req: Request) => {
         // Without it a throttled run is indistinguishable from a drained backlog.
         throttledOut,
         lastError,
-        remaining: Math.max(0, wanted.length - classified - noIndustry),
+        remaining: Math.max(0, wanted.length - classifiedSecurities.size - noIndustry),
       })
     }
 
@@ -2163,6 +2183,7 @@ Deno.serve(async (req: Request) => {
       // fetcher's timeout instead of relying on it.
       const BATCH = 20
       let classified = 0
+      const classifiedSecurities = new Set<string>()
       let unmapped = 0
       let capped = 0
       let noProfile = 0
@@ -2312,7 +2333,11 @@ Deno.serve(async (req: Request) => {
             .upsert(dedupeBy(writes, (w) => `${w.security_id}|${w.node_id}|${w.source_code}`),
               { onConflict: 'security_id,node_id,source_code' })
           if (error) throw new Error(`security_taxonomy upsert failed: ${error.message}`)
-          classified += writes.length
+          // SECURITIES, not rows. `security_taxonomy` is keyed (security_id, node_id, source_code)
+          // so it holds several rows per security, and `writes` is counted BEFORE `dedupeBy` —
+          // `pending_industry` yields one row per (security, level-1 sector), so a security in two
+          // sectors was counted twice. Same unit confusion as statements and performance.
+          for (const w of writes) classifiedSecurities.add(String(w.security_id))
         }
         // Written per security rather than in one upsert: `security` rows already exist, so this
         // is an UPDATE, and PostgREST has no bulk update by differing values.
@@ -2377,6 +2402,7 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         classified,
+        classifiedSecurities: classifiedSecurities.size,
         capped,
         unmapped,
         // Securities the provider ANSWERED about and had no profile for, now negative-cached.
@@ -2395,7 +2421,7 @@ Deno.serve(async (req: Request) => {
         homed,
         noCountryMarked,
         unresolvedCountries: [...unresolvedCountries],
-        remaining: Math.max(0, wanted.length - classified - unmapped - noProfile),
+        remaining: Math.max(0, wanted.length - classifiedSecurities.size - unmapped - noProfile),
       })
     }
 
@@ -2428,6 +2454,10 @@ Deno.serve(async (req: Request) => {
       const deadline = Date.now() + 60_000
       const now = new Date()
       let written = 0
+      // SECURITIES covered, tracked separately from the ROWS written, because a security yields
+      // one performance row PER PERIOD (seven to nine of them). Counting rows and subtracting
+      // them from a count of securities is what made `remaining` report 0 on a backlog 6,909 deep.
+      const symbolsCovered = new Set<string>()
       let batchesFailed = 0
       let throttledOut = false
       let emptyBatches = 0
@@ -2564,15 +2594,21 @@ Deno.serve(async (req: Request) => {
           }
         }
         written += rows.length
+        for (const sym of producedBySymbol.keys()) symbolsCovered.add(sym)
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
         refreshed: written,
+        securitiesCovered: symbolsCovered.size,
         batchesFailed,
         emptyBatches,
         lastError,
-        remaining: Math.max(0, symbols.length - written),
+        // SECURITIES, not rows — see the statements resource for the same defect. A security
+        // yields seven to nine performance rows, so `symbols.length - written` went negative and
+        // clamped. Measured live 2026-08-17: `refreshed: 2751, remaining: 0` (2,751 rows is ~306
+        // securities) while `pending_performance` stood at 6,909.
+        remaining: Math.max(0, symbols.length - symbolsCovered.size),
       })
     }
 
