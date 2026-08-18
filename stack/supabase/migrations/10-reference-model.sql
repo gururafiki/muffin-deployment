@@ -185,6 +185,14 @@ from market.fund_holding h
 join (select fund_id, max(as_of) as as_of from market.fund_holding group by fund_id) latest
   on latest.fund_id = h.fund_id and latest.as_of = h.as_of;
 
+-- service_role TOO, not just the public read path. Nothing reads this view DIRECTLY today — only
+-- `pending_profile` and friends reference it, and a view uses its OWNER's privileges for what it
+-- references, so the omission was invisible. It stops being invisible the moment a resource or a
+-- verification script selects from it, and then it is a 42501 rather than a missing row.
+-- Found by `every-table-is-reachable.sql` after that test was extended to cover service_role on
+-- VIEWS — a hole the previous pair of checks (service_role on TABLES, anon on VIEWS) left exactly.
+grant select on market.fund_holding_current to service_role;
+
 -- ═══════════════════════ 5. Control surface + bookkeeping ═══════════════════════
 
 -- THE control surface. Adding an ETF must be a DATA change, not a migration + deploy: insert a

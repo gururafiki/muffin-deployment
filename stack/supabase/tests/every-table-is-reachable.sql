@@ -86,3 +86,40 @@ begin
 
   raise notice '  ok  anon can read every serving view';
 end $$;
+
+-- AND service_role ON THOSE SAME VIEWS.
+--
+-- The two checks above cover service_role on TABLES and anon on VIEWS, and that pair leaves an
+-- exact hole: a view granted to `anon` and not to `service_role`. Migration 73 fell straight
+-- through it — `fx_rate_current` answered anon and gave service_role
+-- `42501 permission denied for view`, which nothing noticed because nothing reads it as the ingest
+-- role YET. It would have surfaced the first time a resource tried to convert a market cap.
+--
+-- service_role has BYPASSRLS, which is NOT a table privilege and confers nothing here. The ingest
+-- and every verification script run as this role, so a serving view it cannot read is a resource
+-- that fails at runtime with a permission error rather than a missing row.
+do $$
+declare
+  v       text;
+  missing text[] := '{}';
+begin
+  for v in
+    select c.relname
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'market' and c.relkind = 'v'
+  loop
+    if not has_table_privilege('service_role', format('market.%I', v), 'SELECT') then
+      missing := missing || v;
+    end if;
+  end loop;
+
+  if array_length(missing, 1) > 0 then
+    raise exception E'service_role cannot read % market view(s): %\n'
+      'The ingest and every verification script run as this role. A view it cannot read fails at '
+      'runtime with 42501, not with a missing row.',
+      array_length(missing, 1), array_to_string(missing, ', ');
+  end if;
+
+  raise notice '  ok  service_role can read every market view';
+end $$;

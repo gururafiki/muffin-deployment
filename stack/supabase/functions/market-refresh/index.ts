@@ -734,6 +734,16 @@ Deno.serve(async (req: Request) => {
     }
 
     if (resource === FUNDAMENTALS_RESOURCE) {
+      // The venue's own quote currency, read once. See the overrule below for why it exists.
+      const { data: venueRows, error: vcErr } = await market
+        .from('venue_currency')
+        .select('suffix,quote_currency')
+      if (vcErr) throw new Error(`venue_currency read failed: ${vcErr.message}`)
+      const venueCurrency = new Map(
+        (venueRows ?? []).map((v) => [String(v.suffix), String(v.quote_currency)]),
+      )
+      let currencyOverruled = 0
+
       const { data: pending, error: pErr } = await market
         .from('pending_fundamentals')
         .select('security_id,symbol')
@@ -931,10 +941,33 @@ Deno.serve(async (req: Request) => {
             if (curErr) throw new Error(`currency learn failed: ${curErr.message}`)
           }
 
+          // THE VENUE OVERRULES THE PROVIDER, because the provider is demonstrably wrong about this.
+          //
+          // Measured 2026-08-18: `equity/fundamental/metrics` returns `currency: USD` for `BREN.JK`
+          // alongside `market_cap: 442810222247936` — internally inconsistent in one response, and
+          // it made PT Barito the largest company on earth at $442tn once FX conversion existed.
+          // 24 Indonesian listings plus Chilean, Korean and Indian ones arrived the same way.
+          //
+          // Magnitude cannot be the test: NVDA is a REAL $5,464bn and sits BETWEEN two fakes
+          // (241560.KS at $6,087bn, HCLT.NS at $3,707bn). A security trading on Jakarta is quoted
+          // in rupiah, and the suffix says so.
+          //
+          // `venue_currency` is DERIVED by majority from securities we already hold — .JK is 72 IDR
+          // against 24 USD — so a new venue needs no migration and nobody has to remember what
+          // Jakarta trades in. Fetched ONCE per run, above the batch loop: 59 rows that do not
+          // change mid-run, and re-reading them per batch would be a query per 40 securities.
           for (const w of writes) {
             const raw = (w.raw as Record<string, unknown> | undefined)?.currency
             if (typeof raw !== 'string' || !/^[A-Za-z]{3}$/.test(raw)) continue
-            const cur = raw.toUpperCase()
+            let cur = raw.toUpperCase()
+            // A suffixed symbol names a venue. If that venue has a known quote currency and the
+            // provider disagrees, the venue wins — it cannot be wrong about what it trades in.
+            const sym = String((w.raw as Record<string, unknown> | undefined)?.symbol ?? '')
+            const dot = sym.lastIndexOf('.')
+            if (dot > 0) {
+              const venueCur = venueCurrency.get(sym.slice(dot))
+              if (venueCur && venueCur !== cur) { cur = venueCur; currencyOverruled++ }
+            }
             // THE PROVIDER WINS, and this is the one place a filing does not.
             //
             // N-PORT's `curCd` is the currency the FUND valued the position in — for a US-domiciled
@@ -1006,6 +1039,10 @@ Deno.serve(async (req: Request) => {
       // the backlog dead once the answerable ones were done. The counters say what happened.
       return json({
         resource, written, missing, capped, emptyBatches, batchesFailed, lastError, throttledOut,
+        // How often the provider's currency contradicted the venue. A number that climbs is the
+        // provider degrading, not us — and it is the only visible sign, since the corrected value
+        // looks perfectly ordinary once stored.
+        currencyOverruled,
         remaining: Math.max(0, wanted.length - written - missing),
       })
     }

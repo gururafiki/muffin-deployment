@@ -90,8 +90,12 @@ select
 from market.security s
 left join market.fx_rate_current fx on fx.currency_code = s.currency_code;
 
+-- BOTH ROLES ON BOTH VIEWS. Granting the views to `anon` alone left `service_role` with
+-- `permission denied for view fx_rate_current` — measured immediately after this deployed, and
+-- invisible until something read them as the ingest role, which nothing does YET. service_role has
+-- BYPASSRLS, which is not a table privilege and grants nothing here.
 grant select on market.fx_rate, market.fx_rate_current, market.security_market_cap_usd
-  to anon, authenticated;
+  to anon, authenticated, service_role;
 grant select, insert, update, delete on market.fx_rate to service_role;
 
 alter table market.fx_rate enable row level security;

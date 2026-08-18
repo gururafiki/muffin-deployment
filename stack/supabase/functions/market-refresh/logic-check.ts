@@ -887,6 +887,32 @@ console.log('\nfx resource — refuses rather than guesses')
     'the currency list is read from the table, not hardcoded')
 }
 
+// ── THE VENUE OVERRULES THE PROVIDER ON CURRENCY ──────────────────────────────────────────────
+//
+// yfinance returns `currency: USD` for Jakarta-quoted securities. Found 2026-08-18 by building FX
+// and looking at the result: `security_market_cap_usd` ranked PT Barito the largest company on
+// earth at $442 TRILLION, ~4x world GDP. The response is internally inconsistent — `BREN.JK` comes
+// back with `currency: USD`, `market_cap: 442810222247936` and `price_to_book: 662000`.
+//
+// MAGNITUDE CANNOT BE THE TEST, which is the trap this nearly fell into: NVDA is a real $5,464bn
+// and sits BETWEEN two fakes (241560.KS $6,087bn, HCLT.NS $3,707bn). No threshold separates them.
+// The venue does.
+console.log('\ncurrency — the venue overrules a provider that contradicts it')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  check(/from\('venue_currency'\)/.test(index),
+    'the fundamentals path reads the venue currency')
+  check(/if \(venueCur && venueCur !== cur\) \{ cur = venueCur; currencyOverruled\+\+ \}/.test(index),
+    'a provider currency contradicting the venue is REPLACED, not merely counted')
+  check(/currencyOverruled,/.test(index),
+    'the override is reported — a climbing count is the provider degrading, and the corrected '
+    + 'value looks perfectly ordinary once stored')
+  // Read ONCE, not per batch: 59 rows that cannot change mid-run.
+  const loopBody = index.match(/for \(const w of writes\) \{[\s\S]*?\n          \}/)?.[0] ?? ''
+  check(loopBody.length > 0 && !loopBody.includes("from('venue_currency')"),
+    'the venue map is fetched once per run, not once per batch')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
