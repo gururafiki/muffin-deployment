@@ -342,6 +342,20 @@ const PERIOD_DAYS: Record<string, number> = {
 export interface Bar {
   date: string
   close: number
+  /**
+   * Cash dividend with this bar's date as the EX-DATE, when the provider reported one.
+   *
+   * THIS ARRIVES ON A CALL WE ALREADY MAKE. openbb's yfinance provider sets
+   * `include_actions: bool = Field(default=True)` and aliases the column
+   * (`__alias_dict__ = {'dividend': 'dividends'}`), so every price response has carried this field
+   * and `barFrom` discarded it. Verified against Yahoo directly: the chart response returns
+   * `events.dividends` alongside the bars in ONE request.
+   *
+   * Fifth instance of the same lesson — market cap twice, the operating country, the currency, and
+   * now this — and the cheapest of them, because it needs no new request and not even a new
+   * request PARAMETER.
+   */
+  dividend?: number
 }
 
 /**
@@ -371,7 +385,11 @@ export function barFrom(r: Record<string, unknown>, fallbackSymbol: string): { s
   const close = typeof r.close === 'number' ? r.close : Number(r.close)
   const date = String(r.date ?? '').slice(0, 10)
   if (!date || !Number.isFinite(close) || close <= 0) return null
-  return { symbol, bar: { date, close } }
+  // A dividend of 0 is the provider saying "no dividend on this bar", not a zero-value event, so
+  // only a positive number is carried. Guarded rather than trusted: a string would coerce.
+  const div = typeof r.dividend === 'number' ? r.dividend : Number(r.dividend)
+  const dividend = Number.isFinite(div) && div > 0 ? div : undefined
+  return { symbol, bar: dividend === undefined ? { date, close } : { date, close, dividend } }
 }
 
 /** Index of the last bar at or before `iso`; null when the series does not reach back that far. */
