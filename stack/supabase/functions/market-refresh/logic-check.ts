@@ -685,6 +685,54 @@ console.log('\ndebt terms — written to the security, guarded')
     'coupon kinds are LEARNED from the filing, not seeded from memory')
 }
 
+// ── NO LOOP MAY GATE ON A BARE DEADLINE ───────────────────────────────────────────────────────
+//
+// A loop written `while (Date.now() < deadline)` decides whether to START work, not whether it can
+// FINISH. The batch that starts one millisecond under the deadline still has to fetch, write, mark
+// and prune, and the deadline bounds none of it. Measured 2026-08-17: `security-performance` ran
+// **89 seconds against a 90-second worker** and was killed once with `WorkerRequestCancelled` —
+// which is strictly worse than a shorter run, because it loses the in-flight batch AND never calls
+// `finish_refresh`, locking the resource out for the 2-minute in-flight TTL on top.
+//
+// FOUR resources had it, not one. Fixing the one that visibly failed would have left three.
+console.log('\nworker budget — a loop must leave room to finish')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  // COMMENTS STRIPPED FIRST. Scanning the raw file matched the PROSE of the comment describing
+  // this very defect — the third time today a pattern has matched a neighbouring string rather
+  // than code (the sweep reserve matched `stoppedBecause`, the budget guard matched a counter name).
+  // A guard that reports its own documentation as a violation is noise, and noise gets deleted.
+  const code = index
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1')).join('\n')
+  // BOTH FORMS. A loop can gate in its condition (`for (…; Date.now() < deadline; …)`) or with an
+  // early `if (Date.now() >= deadline) break` in the body, and they are equally unbounded. Matching
+  // only the first left the performance loop's own guard unchecked — caught by mutating it.
+  const bare = [
+    ...code.matchAll(/(for|while) *\([^)]*Date\.now\(\) *< *deadline *[;)]/g),
+    ...code.matchAll(/if *\( *Date\.now\(\) *>= *deadline *\)/g),
+  ].map((m) => m[0].replace(/\s+/g, ' '))
+  check(bare.length === 0,
+    'no loop gates on the bare deadline — every one reserves time for its tail',
+    bare.length ? bare.join(' | ') : '')
+
+  // A VALUE CHECK against the REAL limit, not a shape check. The budget guard for the exchange
+  // sweep taught this the hard way: it counted the right quantity, in the right place, against a
+  // ceiling that was wrong by 7.5x, and two shape checks sat beside it and saw nothing.
+  const main = await Deno.readTextFile(new URL('../main/index.ts', import.meta.url))
+  const workerMs = Number(main.match(/workerTimeoutMs = (\d+) \* 1000/)?.[1] ?? NaN) * 1000
+  check(Number.isFinite(workerMs) && workerMs > 0, 'found the real worker timeout', `${workerMs}ms`)
+
+  const budget = Number(index.match(/const WORKER_BUDGET_MS = (\d+)_(\d+)/)?.slice(1).join('') ?? NaN)
+  const reserve = Number(index.match(/const BATCH_RESERVE_MS = (\d+)_(\d+)/)?.slice(1).join('') ?? NaN)
+  check(budget < workerMs,
+    'the performance budget is under the worker timeout, with margin',
+    `budget ${budget}ms vs worker ${workerMs}ms (margin ${workerMs - budget}ms)`)
+  check(budget - reserve > 0 && reserve >= 10_000,
+    'the reserve is big enough for a batch tail to actually finish',
+    `reserve ${reserve}ms, last batch may start at ${budget - reserve}ms`)
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))

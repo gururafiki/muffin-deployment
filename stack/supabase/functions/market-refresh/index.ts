@@ -121,6 +121,25 @@ function isAdmin(req: Request): boolean {
   return app?.role === 'admin' || (Array.isArray(app?.roles) && app.roles.includes('admin'))
 }
 
+/**
+ * How much of a resource's budget to leave unspent so a batch already in flight can FINISH.
+ *
+ * A loop written `while (Date.now() < deadline)` decides whether to START work, not whether it can
+ * complete — and a batch that starts one millisecond under the deadline still has to fetch, write,
+ * mark and prune, none of which the deadline bounds. `security-performance` demonstrated the cost:
+ * measured 2026-08-17 it ran **89 seconds against a 90-second worker**, and was killed outright
+ * once with `WorkerRequestCancelled`.
+ *
+ * A killed worker is strictly worse than a shorter run — it loses the batch in flight AND never
+ * calls `finish_refresh`, so the resource is additionally locked out for the 2-minute in-flight
+ * TTL. Because the binding constraint here is requests per unit TIME rather than per run, giving
+ * up one batch costs nothing real.
+ *
+ * Found in four resources, not one: `security-performance`, `-fundamentals`, `-industries` and
+ * `-profiles` all gated on the bare deadline. The others already reserved 4-6s.
+ */
+const TAIL_RESERVE_MS = 10_000
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok')
 
@@ -736,7 +755,7 @@ Deno.serve(async (req: Request) => {
       // listings `equity/profile` does not.
       let capped = 0
 
-      for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
+      for (let i = 0; i < wanted.length && Date.now() < deadline - TAIL_RESERVE_MS; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const remaining = deadline - Date.now()
         if (remaining < 3_000) break
@@ -2042,7 +2061,7 @@ Deno.serve(async (req: Request) => {
       let throttledOut = false
       let lastError: string | null = null
 
-      for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
+      for (let i = 0; i < wanted.length && Date.now() < deadline - TAIL_RESERVE_MS; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const remaining = deadline - Date.now()
         if (remaining < 3_000) break
@@ -2336,7 +2355,7 @@ Deno.serve(async (req: Request) => {
       // Provider country names no row in `countries` or `country_alias` could resolve. Reported so
       // the alias table is filled from what the provider actually says.
       const unresolvedCountries = new Set<string>()
-      for (let i = 0; i < wanted.length && Date.now() < deadline; i += BATCH) {
+      for (let i = 0; i < wanted.length && Date.now() < deadline - TAIL_RESERVE_MS; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
         // A THROW and an EMPTY ANSWER are different facts and must not be collapsed. If the whole
@@ -2588,7 +2607,23 @@ Deno.serve(async (req: Request) => {
       // 40 symbols x ~400 bars is ~1 MB. The country refresh proves 19 symbols x 1900 bars (~4 MB)
       // is safe, so this stays well inside the worker while still covering a page per batch.
       const BATCH = 40
-      const deadline = Date.now() + 60_000
+      // BOUNDED AGAINST THE WORKER, NOT AGAINST A ROUND NUMBER.
+      //
+      // `workerTimeoutMs` is 90s (functions/main/index.ts). This used to be a flat 60s deadline
+      // that gated only whether to START a batch — and a batch that starts just under it still has
+      // to fetch, isolate, upsert, retract and prune stale periods, and none of that tail is
+      // bounded by the deadline. Measured 2026-08-17: the cron's own run took **89 seconds of the
+      // 90**, and a later manual run was killed outright with `WorkerRequestCancelled`.
+      //
+      // A killed worker is strictly worse than a smaller run: it loses the batch in flight AND
+      // never calls `finish_refresh`, so the resource is locked out for the 2-minute in-flight TTL
+      // on top. Since the binding constraint here is requests per unit TIME rather than per run,
+      // trading one batch for a guaranteed margin costs nothing real.
+      //
+      // Same shape as the fix in the exchange sweep: refuse to START work that cannot finish.
+      const WORKER_BUDGET_MS = 75_000
+      const BATCH_RESERVE_MS = 20_000
+      const deadline = Date.now() + WORKER_BUDGET_MS
       const now = new Date()
       let written = 0
       // SECURITIES covered, tracked separately from the ROWS written, because a security yields
@@ -2599,7 +2634,11 @@ Deno.serve(async (req: Request) => {
       let throttledOut = false
       let emptyBatches = 0
       let lastError: string | null = null
-      for (let i = 0; i < symbols.length && Date.now() < deadline; i += BATCH) {
+      // `deadline - BATCH_RESERVE_MS`, not `deadline`: the loop condition decides whether to
+      // START a batch, so it must leave room for one to FINISH.
+      let stoppedOnBudget = false
+      for (let i = 0; i < symbols.length; i += BATCH) {
+        if (Date.now() >= deadline - BATCH_RESERVE_MS) { stoppedOnBudget = true; break }
         const batch = symbols.slice(i, i + BATCH)
         const remaining = deadline - Date.now()
         if (remaining < 3_000) break
@@ -2738,6 +2777,9 @@ Deno.serve(async (req: Request) => {
         resource,
         refreshed: written,
         securitiesCovered: symbolsCovered.size,
+        // Says WHY a run stopped short, so a budgeted stop is never mistaken for a drained
+        // backlog — the distinction `remaining` alone cannot make.
+        stoppedOnBudget,
         batchesFailed,
         emptyBatches,
         lastError,
