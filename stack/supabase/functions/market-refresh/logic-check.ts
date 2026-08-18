@@ -792,8 +792,16 @@ console.log('\nresource registry — the cron and the function agree')
   //    deadline has not yet passed. That distinction is the difference between stopping cleanly
   //    and a killed worker: `security-performance` runs at 89s of its 90s limit precisely because
   //    its deadline gates whether to start a BATCH while that batch's tail is unbounded.
-  check(/requestsUsed \+= pages/.test(index),
-    'the sweep decrements its OpenFIGI request budget by the pages it used')
+  // BY REQUESTS, NOT BY PAGES — the first version of this budget used `pages` and undercounted by
+  // roughly half. `pages` is incremented by the for-update clause in `listExchange`, so a venue
+  // that answers in ONE request and breaks out reports `pages: 0`. Measured on the first
+  // multi-venue sweep: nine of ten venues reported `pages: 0` while writing rows, and the run
+  // counted 11 requests against ~21 actually made. A rate-limit budget that undercounts by half is
+  // not a budget, and it would have overrun OpenFIGI's 250/min silently.
+  check(/requestsUsed \+= requests/.test(index),
+    'the sweep budgets by REQUESTS MADE, not by pages (a one-request venue reports pages: 0)')
+  check(/requests\+\+;\s*\n\s*const res = await fetch/.test(figiSrc),
+    'listExchange counts a request at the fetch itself, where it cannot be missed')
   // Anchored on the WHILE CONDITION, not on the string appearing anywhere. The first version of
   // this check searched the whole file and passed while broken, because
   // `SWEEP_DEADLINE - VENUE_RESERVE_MS` also appears in the `stoppedBecause` expression a few

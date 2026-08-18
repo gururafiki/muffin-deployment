@@ -1340,7 +1340,7 @@ Deno.serve(async (req: Request) => {
         (typeRow?.figi_field as 'securityType' | 'securityType2' | null) ?? 'securityType2'
       // NULL means "sweep the venue whole"; a prefix means it is too large for one query.
       const prefix = (target.query_prefix as string | null) ?? undefined
-      const { listings, next, pages, total, throttled: figiThrottled } = await listExchange(
+      const { listings, next, pages, requests, total, throttled: figiThrottled } = await listExchange(
         exch,
         (target.next_cursor as string | null) ?? undefined,
         {
@@ -1355,7 +1355,10 @@ Deno.serve(async (req: Request) => {
           budgetMs: Math.max(5_000, SWEEP_DEADLINE - Date.now()),
         },
       )
-      requestsUsed += pages
+      // `requests`, NOT `pages`. A venue answering in one request reports `pages: 0`, so
+      // budgeting on pages counted 11 against ~21 actually made on the first multi-venue sweep —
+      // a rate-limit budget that undercounts by half is not a budget.
+      requestsUsed += requests
       if (figiThrottled) sweepThrottled = true
 
       let written = 0
