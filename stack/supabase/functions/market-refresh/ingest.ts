@@ -75,6 +75,8 @@ export interface IngestResult {
   holdings: number
   securitiesAdded: number
   skipped: number
+  /** Debt holdings whose coupon/maturity landed on the security. 0 for an all-equity fund. */
+  debtTermsWritten: number
 }
 
 /**
@@ -84,6 +86,63 @@ export interface IngestResult {
  * them keeps the tables honest (they only ever contain codes we have actually seen) and means a
  * new asset category never needs a migration.
  */
+/**
+ * Write each debt holding's terms onto the SECURITY.
+ *
+ * Coupon and maturity are properties of the instrument, not of anyone's position in it — two funds
+ * holding the same bond report the same maturity — so they belong on `security`, not
+ * `fund_holding`, where the same fact would be stored once per fund and free to disagree.
+ *
+ * Chunked through one RPC rather than a round trip per bond: AGG alone is 8,867 debt holdings
+ * against a 60-second worker. `update … from jsonb_to_recordset` is what expresses "a different
+ * value per row" in a single statement.
+ *
+ * The RPC refuses to let an OLDER filing overwrite a newer one, which matters because funds are
+ * ingested in whatever order the backlog offers and two funds holding the same bond file at
+ * different quarter-ends.
+ */
+async function writeDebtTerms(
+  db: MarketClient,
+  holdings: NportHolding[],
+  ids: (string | null)[],
+  reportDate: string,
+): Promise<number> {
+  const rows = holdings.flatMap((h, i) => {
+    const id = ids[i]
+    // `maturityDate` is the marker for "this holding had a <debtSec> block". A holding with none
+    // is an equity or a derivative and must not have these columns cleared to null.
+    if (!id || !h.maturityDate) return []
+    return [{
+      security_id: id,
+      maturity_date: h.maturityDate,
+      // `?? null`, NOT `|| null`: a 0.0 coupon is a real zero-coupon bond, and `||` would turn
+      // every one of them into a missing rate.
+      coupon_rate: h.couponRate ?? null,
+      coupon_kind_code: h.couponKind ?? null,
+      in_default: h.inDefault ?? null,
+      as_of: reportDate,
+    }]
+  })
+  if (rows.length === 0) return 0
+
+  // A fund can hold the same bond in two lots, and the same (security_id) twice in one payload
+  // makes the update ambiguous rather than wrong — dedupe for the same reason `fund_holding` does.
+  const seen = new Set<string>()
+  const unique = rows.filter((r) => {
+    if (seen.has(r.security_id)) return false
+    seen.add(r.security_id)
+    return true
+  })
+
+  let written = 0
+  for (let i = 0; i < unique.length; i += WRITE_CHUNK) {
+    const { data, error } = await db.rpc('set_debt_terms', { p_rows: unique.slice(i, i + WRITE_CHUNK) })
+    if (error) throw new Error(`set_debt_terms failed: ${error.message}`)
+    written += Number(data ?? 0)
+  }
+  return written
+}
+
 async function learnLookups(db: MarketClient, holdings: NportHolding[]) {
   const uniq = (vals: (string | undefined)[]) => [...new Set(vals.filter((v): v is string => !!v))]
   const rows = (codes: string[]) => codes.map((code) => ({ code, name: code }))
@@ -91,11 +150,15 @@ async function learnLookups(db: MarketClient, holdings: NportHolding[]) {
   const currencies = uniq(holdings.map((h) => h.currency))
   const assetCats = uniq(holdings.map((h) => h.assetCategory))
   const issuerCats = uniq(holdings.map((h) => h.issuerCategory))
+  // Observed 2026-08-18 on AGG: Fixed, Variable, Floating, None. "None" is a REPORTED KIND — a
+  // bond that pays no coupon — not a missing value, so it earns a row like any other.
+  const couponKinds = uniq(holdings.map((h) => h.couponKind))
 
   for (const [table, data] of [
     ['currency', currencies.map((code) => ({ code }))],
     ['asset_category', rows(assetCats)],
     ['issuer_category', rows(issuerCats)],
+    ['coupon_kind', rows(couponKinds)],
   ] as const) {
     if (data.length === 0) continue
     const { error } = await db.from(table).upsert(data, { onConflict: 'code', ignoreDuplicates: true })
@@ -378,6 +441,7 @@ export async function ingestFund(
   const countries = await loadKnownCountries(db)
   const issuers = await resolveIssuers(db, result.holdings, countries)
   const { ids, added, skipped } = await resolveSecurities(db, result.holdings, issuers, countries)
+  const debtTermsWritten = await writeDebtTerms(db, result.holdings, ids, result.filing.reportDate)
 
   const rows = result.holdings.flatMap((h, i) =>
     ids[i] === null
@@ -437,5 +501,6 @@ export async function ingestFund(
     holdings: deduped.length,
     securitiesAdded: added,
     skipped,
+    debtTermsWritten,
   }
 }

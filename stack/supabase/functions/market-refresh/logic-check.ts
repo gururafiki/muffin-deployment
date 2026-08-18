@@ -621,6 +621,70 @@ console.log('\ndividend capture — attributable by construction')
     'the chart cutoff does not drop dividends — different table, different retention')
 }
 
+// ── DEBT TERMS COME OFF A FILING WE ALREADY PARSE ─────────────────────────────────────────────
+//
+// 15,159 bonds — the largest slice of the universe — had no coupon and no maturity, while every
+// N-PORT debt holding carries a <debtSec> block that `parseHoldings` read around and skipped.
+// Measured on AGG's filing: 8,867 of 8,870 holdings carry one.
+console.log('\nparseHoldings — the debt block')
+{
+  const { parseHoldings } = await import('./edgar.ts')
+  const xml = `<invstOrSec>
+    <name>Highwoods Realty LP</name><cusip>431282AR3</cusip>
+    <identifiers><isin value="US431282AR39"/></identifiers>
+    <balance>1935000</balance><units>PA</units><curCd>USD</curCd>
+    <valUSD>2022965.1</valUSD><pctVal>0.0027</pctVal><assetCat>DBT</assetCat>
+    <invCountry>US</invCountry>
+    <debtSec><maturityDt>2029-04-15</maturityDt><couponKind>Fixed</couponKind>
+      <annualizedRt>4.2</annualizedRt><isDefault>N</isDefault></debtSec>
+  </invstOrSec>`
+  const [h] = parseHoldings(xml)
+  check(h?.maturityDate === '2029-04-15', 'the maturity is read', h?.maturityDate)
+  check(h?.couponRate === 4.2, 'the coupon rate is read', String(h?.couponRate))
+  check(h?.couponKind === 'Fixed', 'the coupon kind is read', h?.couponKind)
+  check(h?.inDefault === false, 'isDefault N becomes false, not undefined', String(h?.inDefault))
+
+  // A ZERO COUPON IS A REAL BOND. The measured range across AGG is 0.0 to 11.5, so a truthiness
+  // test would silently drop every zero-coupon holding. Note this is the OPPOSITE of the dividend
+  // case, where 0 means "no dividend on this bar" — same-looking value, opposite meaning.
+  const [z] = parseHoldings(xml.replace('<annualizedRt>4.2', '<annualizedRt>0.0'))
+  check(z?.couponRate === 0, 'a 0.0 coupon survives — it is a zero-coupon bond, not a missing rate',
+    String(z?.couponRate))
+
+  // "None" IS A REPORTED KIND, not an absence. 5 of AGG's holdings carry it.
+  const [n] = parseHoldings(xml.replace('<couponKind>Fixed', '<couponKind>None'))
+  check(n?.couponKind === 'None', 'couponKind "None" is kept as a value', n?.couponKind)
+
+  // SCOPED TO <debtSec>. A derivative carries its own maturity in a different block, and reading
+  // the first match in the whole holding would attribute a swap's expiry to the security.
+  const withSwap = `<invstOrSec><name>X</name><assetCat>DE</assetCat>
+    <fwdDeriv><maturityDt>2027-01-01</maturityDt></fwdDeriv></invstOrSec>`
+  const [d] = parseHoldings(withSwap)
+  check(d?.maturityDate === undefined,
+    'a derivative maturity outside <debtSec> is NOT read as the security maturity', String(d?.maturityDate))
+
+  // An equity holding has no debt block and must not acquire empty terms.
+  const eq = `<invstOrSec><name>Apple</name><assetCat>EC</assetCat><curCd>USD</curCd></invstOrSec>`
+  const [e] = parseHoldings(eq)
+  check(e?.maturityDate === undefined && e?.couponRate === undefined,
+    'an equity holding carries no debt terms')
+}
+
+console.log('\ndebt terms — written to the security, guarded')
+{
+  const ingest = await Deno.readTextFile(new URL('./ingest.ts', import.meta.url))
+  // `?? null`, never `|| null`: a 0.0 coupon is a real bond and `||` would null every one.
+  check(/coupon_rate: h\.couponRate \?\? null/.test(ingest),
+    'the coupon rate uses ?? so a 0.0 coupon is not nulled by truthiness')
+  // The presence of a maturity is what marks a holding as debt; without that test an equity would
+  // have its (nonexistent) terms written as nulls over whatever a bond filing had set.
+  check(/if \(!id \|\| !h\.maturityDate\) return \[\]/.test(ingest),
+    'only holdings that actually carried a debt block are written')
+  // Learned, not seeded — the rule for every categorical discovered from a filing.
+  check(/\['coupon_kind', rows\(couponKinds\)\]/.test(ingest),
+    'coupon kinds are LEARNED from the filing, not seeded from memory')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
