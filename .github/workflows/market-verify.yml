@@ -389,6 +389,23 @@ jobs:
             fi
           done
 
+          # 9. A UNIT FLIP IS INVISIBLE PER ROW AND OBVIOUS IN THE MEDIAN.
+          #
+          #    `equity/fundamental/metrics` mixes conventions WITHIN ONE RESPONSE: `profit_margin`
+          #    and `return_on_equity` are FRACTIONS while `dividend_yield` is already a PERCENT.
+          #    One shared `pct()` once rendered NVIDIA at a 46% dividend yield — wrong by two
+          #    orders of magnitude and entirely plausible-looking.
+          #
+          #    Checked on the MEDIAN rather than per row, because a per-row band flags REAL
+          #    companies: measured 2026-08-18, `profit_margin > 5` is 11 investment holding
+          #    companies (Tamburi, Priortech) whose net income over tiny revenue genuinely exceeds
+          #    100%, and `dividend_yield > 30` is 9 special dividends and post-collapse yields. A
+          #    guard that cries wolf on correct data gets deleted. A median cannot: a convention
+          #    flip moves every row together and jumps it ~100x.
+          if ! BASE="$BASE" ANON="$ANON" python3 .github/scripts/check_fundamental_units.py; then
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
