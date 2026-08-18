@@ -11,6 +11,15 @@ export interface PerfRow {
   scope_id: string
   period: string
   change_pct: number | null
+  /**
+   * Daily-reinvested TOTAL return for the same period, or null when it could not be computed.
+   *
+   * NULL IS NOT ZERO and must never be coalesced to `change_pct`: that would erase the difference
+   * between "this security paid no income" and "we do not know what it paid". Where a security
+   * genuinely paid nothing in the window the two values are equal anyway, which is exactly why an
+   * overwrite would look correct in the cases where it changes nothing.
+   */
+  total_return_pct?: number | null
   as_of: string
   stale_after: string
   source: string
@@ -465,6 +474,74 @@ const daysBefore = (now: Date, days: number) =>
  * performance is normally headlined, but it understates high-yield markets; the UI
  * labels the source so the number is never presented as more than it is.
  */
+/**
+ * Daily-reinvested TOTAL return alongside the price return, per period.
+ *
+ * Everything this pipeline reports has been a PRICE return, which understates any market that pays
+ * income — and for a 10-year horizon on a high-yield market that is not a rounding error, it is the
+ * majority of the return. The dividends have been arriving on the price response all along
+ * (openbb's yfinance provider defaults `include_actions` to true); #149 started keeping them, and
+ * this is what they were for.
+ *
+ * REINVESTED, not summed. The simple form `(P_end - P_start + ΣD) / P_start` treats a dividend paid
+ * nine years ago as if it sat in cash; the reinvested form compounds it, which is what a total
+ * return index means and what anyone comparing against one will expect:
+ *
+ *     cum[i] = cum[i-1] × (P_i + D_i) / P_{i-1}          TR(j → end) = cum[end] / cum[j] − 1
+ *
+ * One pass to build the cumulative product, then O(1) per period — the same cost as the price
+ * return it sits beside.
+ *
+ * RETURNED SEPARATELY, NEVER INSTEAD. A chart draws prices and a return figure wants total; and if
+ * a security has no dividends in the window the two are identical, so overwriting `change_pct`
+ * would look correct in exactly the cases where it changes nothing and be wrong everywhere else.
+ */
+export function totalReturnsFor(series: Bar[], now: Date): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (series.length < 2) return out
+
+  // The SAME eligibility rules as the price return — staleness, a positive latest close, and the
+  // comparability cut after a redenomination. A total return computed across a break is wrong for
+  // exactly the same reason a price return is, and duplicating the checks loosely is how the two
+  // would drift apart.
+  const latestDate = series[series.length - 1].date
+  if (latestDate < daysBefore(now, 10)) return out
+  const latest = series[series.length - 1].close
+  if (!Number.isFinite(latest) || latest <= 0) return out
+  const comparableFrom = firstComparableIndex(series)
+
+  // cum[i] is the value at bar i of one unit invested at bar 0 with dividends reinvested.
+  const cum = new Array<number>(series.length)
+  cum[0] = 1
+  for (let i = 1; i < series.length; i++) {
+    const prev = series[i - 1].close
+    // A non-positive previous close cannot denominate a return. Carry the factor forward unchanged
+    // rather than poisoning every later period with NaN or Infinity.
+    if (!Number.isFinite(prev) || prev <= 0) { cum[i] = cum[i - 1]; continue }
+    const d = series[i].dividend ?? 0
+    cum[i] = cum[i - 1] * ((series[i].close + d) / prev)
+  }
+
+  const trAt = (idx: number | null) => {
+    if (idx === null || idx < comparableFrom) return null
+    const base = cum[idx]
+    if (!Number.isFinite(base) || base <= 0) return null
+    const v = cum[series.length - 1] / base - 1
+    if (!Number.isFinite(v)) return null
+    return Math.round(v * 1_000_000) / 10_000
+  }
+
+  const prev = trAt(series.length - 2)
+  if (prev !== null) out['1d'] = prev
+  for (const [period, days] of Object.entries(PERIOD_DAYS)) {
+    const v = trAt(indexAtOrBefore(series, daysBefore(now, days)))
+    if (v !== null) out[period] = v
+  }
+  const ytd = trAt(indexAtOrBefore(series, `${now.getUTCFullYear() - 1}-12-31`))
+  if (ytd !== null) out['ytd'] = ytd
+  return out
+}
+
 export function returnsFor(series: Bar[], now: Date): Record<string, number> {
   const out: Record<string, number> = {}
   if (series.length < 2) return out
@@ -616,12 +693,17 @@ async function etfReturns(
       unmapped.push(`${scopeId}:${symbol}`)
       continue
     }
+    // Both, from the same series and the same eligibility rules. `?? null` rather than a fallback
+    // to the price return: a period the total-return pass declines to produce is UNKNOWN, not
+    // income-free.
+    const tr = totalReturnsFor(series, now)
     for (const [period, changePct] of Object.entries(returnsFor(series, now))) {
       rows.push({
         scope,
         scope_id: scopeId,
         period,
         change_pct: changePct,
+        total_return_pct: tr[period] ?? null,
         as_of: asOf,
         stale_after: staleAfter,
         source: 'yfinance',
@@ -694,12 +776,14 @@ export async function loadEquityReturns(
     const series = bySymbol.get(symbol.toUpperCase())
     // A delisted or renamed ticker returns nothing. Skipped rather than written as zero.
     if (!series || series.length < 2) continue
+    const trA = totalReturnsFor(series, now)
     for (const [period, changePct] of Object.entries(returnsFor(series, now))) {
       rows.push({
         scope: 'instrument',
         scope_id: symbol,
         period,
         change_pct: changePct,
+        total_return_pct: trA[period] ?? null,
         as_of: asOf,
         stale_after: staleAfter,
         source: 'yfinance',
@@ -824,12 +908,14 @@ export const RESOURCES: Record<string, Resource> = {
           unmapped.push(symbol)
           continue
         }
+        const trB = totalReturnsFor(series, now)
         for (const [period, changePct] of Object.entries(returnsFor(series, now))) {
           rows.push({
             scope: 'instrument',
             scope_id: scopeId,
             period,
             change_pct: changePct,
+            total_return_pct: trB[period] ?? null,
             as_of: asOf,
             stale_after: staleAfter,
             source: 'yfinance',
