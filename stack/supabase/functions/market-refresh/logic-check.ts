@@ -574,6 +574,53 @@ console.log('\npickHomeListing — a country with no venues still resolves')
     'and refuses a foreign cross-listing rather than taking it')
 }
 
+// ── DIVIDENDS RIDE ON THE PRICE RESPONSE ──────────────────────────────────────────────────────
+//
+// openbb's yfinance provider sets `include_actions: bool = Field(default=True)` and aliases the
+// column (`__alias_dict__ = {'dividend': 'dividends'}`), so every price response has always carried
+// a dividend field — and `barFrom` dropped it, keeping only `{date, close}`. Verified against
+// Yahoo directly: `events.dividends` comes back alongside the bars in ONE request.
+//
+// Fifth instance of the same lesson (market cap twice, operating country, currency) and the
+// cheapest: no new call, and not even a new request parameter.
+console.log('\nbarFrom — a dividend on the bar is kept, not discarded')
+{
+  const withDiv = barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: 0.25 }, 'X')
+  check(withDiv?.bar.dividend === 0.25, 'a dividend on the bar survives the parse',
+    String(withDiv?.bar.dividend))
+  check(withDiv?.bar.close === 100, 'and the close is untouched')
+
+  // A ZERO IS THE PROVIDER SAYING "no dividend", not an event worth a row. Storing it would put a
+  // dividend row on every bar of every security — millions of rows asserting nothing.
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: 0 }, 'X')?.bar.dividend === undefined,
+    'a zero dividend is absence, not a zero-value event')
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100 }, 'X')?.bar.dividend === undefined,
+    'a bar with no dividend field is fine')
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: 'abc' }, 'X')?.bar.dividend === undefined,
+    'a non-numeric dividend is rejected rather than coerced')
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: -1 }, 'X')?.bar.dividend === undefined,
+    'a negative dividend is rejected')
+}
+
+console.log('\ndividend capture — attributable by construction')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  // `observed_symbol` must be the symbol the SERIES was fetched by. That is what makes this path
+  // structurally safer than the Tiingo one, which asks by US ticker while prices come from the
+  // primary listing — 33 of 45 mismatched before #141 added a join to enforce agreement.
+  check(/observed_symbol: parsed\.symbol/.test(index),
+    'a captured dividend records the symbol its own price series was fetched by')
+  // DO NOTHING, not DO UPDATE: the primary key excludes the source, so Tiingo and yfinance rows for
+  // the same event collide. An upsert that overwrote would rewrite the same rows every run.
+  check(/onConflict: 'security_id,ex_date,kind', ignoreDuplicates: true/.test(index),
+    'colliding dividend rows are left alone rather than rewritten every run')
+  // The price window must not filter dividends: `security_price` is a ~400-day downsampled series
+  // and `security_corporate_action` is neither.
+  const divBlock = index.match(/if \(parsed\.bar\.dividend !== undefined\)[\s\S]*?\n          \}/)?.[0] ?? ''
+  check(divBlock.length > 0 && !divBlock.includes('cutoff'),
+    'the chart cutoff does not drop dividends — different table, different retention')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))

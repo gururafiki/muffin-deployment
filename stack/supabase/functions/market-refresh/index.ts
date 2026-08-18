@@ -1626,6 +1626,7 @@ Deno.serve(async (req: Request) => {
       // SECURITIES priced this run, as distinct from the BARS written. `remaining` was
       // `wanted.length` — the page size, which never moved however much work the run did.
       const securitiesPriced = new Set<string>()
+      let dividendsSeen = 0
       const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
 
       for (const plan of plans) {
@@ -1656,12 +1657,54 @@ Deno.serve(async (req: Request) => {
         // securities, and anything keyed on it needed re-keying by hand.
         const toId = new Map(plan.symbols.map((s) => [s.fetchSymbol.toUpperCase(), bySymbolId.get(s.symbol)]))
         const priceRows: { security_id: string; date: string; close: number }[] = []
+        // DIVIDENDS ARRIVE ON THIS SAME RESPONSE and used to be thrown away. openbb's yfinance
+        // provider defaults `include_actions` to true and aliases the column, so no extra call and
+        // not even an extra request parameter is needed — see `Bar.dividend`.
+        //
+        // Two properties this path has that the Tiingo one cannot:
+        //   1. `observed_symbol` is the symbol we fetched the SERIES by, so an action and the
+        //      prices it applies to are attributable to the same listing BY CONSTRUCTION. #141 had
+        //      to add a join to enforce that for Tiingo, which asks by US ticker while prices come
+        //      from the primary listing (33 of 45 mismatched).
+        //   2. It covers every market yfinance covers. Tiingo is US-listed only, so a Japanese or
+        //      Swiss dividend was previously invisible.
+        const divRows: {
+          security_id: string; ex_date: string; kind: string; value: number;
+          source_code: string; observed_symbol: string
+        }[] = []
         for (const r of rows) {
           const parsed = barFrom(r, plan.symbols[0].fetchSymbol)
           if (!parsed) continue
           const id = toId.get(parsed.symbol.toUpperCase())
-          if (!id || parsed.bar.date < cutoff) continue
+          if (!id) continue
+          // Dividends are NOT subject to the price window: `security_price` is a ~400-day
+          // downsampled series and `security_corporate_action` is neither, so filtering these on
+          // the chart cutoff would drop facts for no reason.
+          if (parsed.bar.dividend !== undefined) {
+            divRows.push({
+              security_id: id,
+              ex_date: parsed.bar.date,
+              kind: 'dividend',
+              value: parsed.bar.dividend,
+              source_code: 'yfinance',
+              observed_symbol: parsed.symbol,
+            })
+          }
+          if (parsed.bar.date < cutoff) continue
           priceRows.push({ security_id: id, date: parsed.bar.date, close: parsed.bar.close })
+        }
+
+        if (divRows.length > 0) {
+          // DO NOTHING, not DO UPDATE. The primary key is (security_id, ex_date, kind) and does
+          // NOT include the source, so Tiingo and yfinance rows for the same event collide. They
+          // are reporting the same fact, so the first writer wins and there is no churn — an
+          // upsert that overwrote would rewrite the same rows on every run for ever.
+          const { error } = await market
+            .from('security_corporate_action')
+            .upsert(dedupeBy(divRows, (d) => `${d.security_id}|${d.ex_date}|${d.kind}`),
+              { onConflict: 'security_id,ex_date,kind', ignoreDuplicates: true })
+          if (error) throw new Error(`dividend upsert failed: ${error.message}`)
+          dividendsSeen += divRows.length
         }
 
         if (priceRows.length === 0) {
@@ -1765,6 +1808,7 @@ Deno.serve(async (req: Request) => {
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource, written, emptySeries, isolatedWrites, batchesFailed, lastError, throttledOut,
+        dividendsSeen,
         plans: plans.length, securitiesPriced: securitiesPriced.size,
         // Securities from THIS PAGE still pending afterwards. A security is done when it got bars
         // or was confirmed empty one at a time; a batch that merely failed leaves it pending.
