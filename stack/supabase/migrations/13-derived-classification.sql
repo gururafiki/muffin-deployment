@@ -82,10 +82,36 @@ end $$;
 -- between disagreeing sources rather than an arbitrary one winning.
 -- DROP before CREATE, same as the two views below it: migration 26 redefines this with
 -- `market_cap`, and `create or replace` cannot add a column in the middle or drop one.
--- `instrument_current` (migration 40) is built on `security_current`, so it must go first or this
--- drop fails with "cannot drop view ... because other objects depend on it" on every re-run after
--- 40 has landed. `if exists` keeps it a no-op on a fresh database.
-drop view if exists market.instrument_current;
+--
+-- THE DEPENDENTS ARE DISCOVERED, NOT LISTED. This block used to name `instrument_current` (added by
+-- migration 40) by hand, with a comment explaining that it "must go first or this drop fails on
+-- every re-run". That list was correct for exactly as long as nobody built another view on
+-- `security_current` — and migration 77's `security_facets` broke it, failing on PASS 2 with
+-- `cannot drop view market.security_current because other objects depend on it`, i.e. AFTER a
+-- first pass had already succeeded.
+--
+-- Migration 35 already learned this: "A hand-maintained list was wrong three times in one
+-- afternoon... The list can only ever be as current as the last person who remembered." This is
+-- the fourth time. `pg_depend` knows the answer, so ask it. Everything dropped here is recreated
+-- later in the same pass, which the four-pass migration test is what actually proves.
+do $$
+declare v record;
+begin
+  for v in
+    select distinct dv.relname as name
+    from pg_depend d
+    join pg_rewrite r   on r.oid = d.objid
+    join pg_class dv    on dv.oid = r.ev_class
+    join pg_class src   on src.oid = d.refobjid
+    join pg_namespace n on n.oid = src.relnamespace
+    where n.nspname = 'market'
+      and src.relname = 'security_current'
+      and dv.relname <> 'security_current'
+  loop
+    execute format('drop view if exists market.%I cascade', v.name);
+  end loop;
+end $$;
+
 drop view if exists market.security_current;
 create view market.security_current as
 select
