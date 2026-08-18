@@ -831,6 +831,62 @@ console.log('\ntotal return — wired at EVERY site, not just the visible one')
     'a missing total return stays NULL rather than falling back to the price return')
 }
 
+// ── FX: A WRONG RATE IS SILENT AND ENORMOUS ───────────────────────────────────────────────────
+//
+// 71% of the market caps we hold (8,169 of 11,573) are not in dollars, so nothing can rank the
+// universe by size across markets — which is also why the mega-cap canary is US-only and blind to
+// non-US securities, to anything under $50bn, and to the 34% with no cap at all.
+console.log('\nfx — direction, subunits and the plausibility band')
+{
+  const { SUBUNITS, isPlausibleRate } = await import('./fx.ts')
+
+  // THE BAND EXISTS TO CATCH AN INVERTED PAIR. `USDTWD` and `TWDUSD` are both valid symbols and
+  // exact reciprocals, and BOTH return plausible-looking numbers — 31.9 and 0.0314. Only one of
+  // them turns a TWD figure into dollars.
+  check(isPlausibleRate(3.2573), 'the Kuwaiti dinar (the highest-value currency) is accepted')
+  check(isPlausibleRate(0.0000382), 'the Vietnamese dong (the lowest) is accepted')
+  check(isPlausibleRate(1), 'parity is accepted')
+  check(!isPlausibleRate(31.9), 'an INVERTED TWD pair (31.9 rather than 0.0314) is refused')
+  check(!isPlausibleRate(26200), 'an inverted VND pair is refused')
+  check(!isPlausibleRate(0), 'a zero rate is refused')
+  check(!isPlausibleRate(-1), 'a negative rate is refused')
+  check(!isPlausibleRate(Number.NaN), 'NaN is refused')
+
+  // SUBUNITS ARE NOT CURRENCIES. Yahoo has no pair for agorot, cents or fils — they are a fixed
+  // fraction of a parent, and treating them as currencies is the same mistake that made Tel Aviv
+  // quotes look like a 100x crash.
+  check(SUBUNITS.ILA?.parent === 'ILS' && SUBUNITS.ILA?.per === 100, 'ILA is 1/100 ILS')
+  check(SUBUNITS.ZAC?.parent === 'ZAR' && SUBUNITS.ZAC?.per === 100, 'ZAC is 1/100 ZAR')
+  check(SUBUNITS.KWF?.parent === 'KWD' && SUBUNITS.KWF?.per === 1000, 'KWF is 1/1000 KWD')
+  // The derived rate must be SMALLER than its parent's — a subunit is worth less than the unit.
+  for (const [sub, { per }] of Object.entries(SUBUNITS)) {
+    check(per > 1, `${sub} divides its parent, so the derived rate is smaller`, String(per))
+  }
+}
+
+console.log('\nfx resource — refuses rather than guesses')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const fx = await Deno.readTextFile(new URL('./fx.ts', import.meta.url))
+  // A currency we cannot price must produce NO ROW. Writing 1.0 "because it is probably close" is
+  // how a dong market cap becomes a dollar one.
+  check(/if \(!isPlausibleRate\(q\.usdPerUnit\)\) \{ implausible\.push/.test(index),
+    'an implausible rate is REJECTED, not corrected or stored')
+  check(!/usd_per_unit: 1[,\s]/.test(index.replace(/currency === 'USD'[\s\S]{0,120}/g, '')),
+    'no currency is silently assigned parity')
+  // The subunit must derive from a rate quoted THIS RUN, not from a stored one — mixing a fresh
+  // subunit with a stale parent under one `as_of` would be a lie about the date.
+  check(/const p = bySymbol\.get\(parent\)/.test(index),
+    'a subunit derives from the parent quoted in the same run')
+  // The last NON-NULL close, because a 5-day window over a weekend has trailing nulls and
+  // `closes.at(-1)` would report "no rate" every Saturday.
+  check(/for \(let i = closes\.length - 1; i >= 0; i--\)/.test(fx),
+    'the rate walks back to the last non-null close, so a weekend is not an outage')
+  // The currency list comes from the TABLE, so a new market needs no deploy.
+  check(/from\('currency'\)\.select\('code'\)/.test(index),
+    'the currency list is read from the table, not hardcoded')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))

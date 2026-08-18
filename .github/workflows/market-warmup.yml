@@ -82,6 +82,7 @@ jobs:
               instrument-prices \
               security-local-symbols \
               security-tickers \
+              fx-rates \
               exchange-listings \
               security-yahoo-symbols \
               security-profiles \

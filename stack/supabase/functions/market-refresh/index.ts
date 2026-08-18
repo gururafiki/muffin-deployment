@@ -32,6 +32,7 @@ import {
 } from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
+import { SUBUNITS, fetchUsdPerUnit, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
@@ -201,6 +202,7 @@ Deno.serve(async (req: Request) => {
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
+  const FX_RESOURCE = 'fx-rates'
   // EVERY RESOURCE DECLARES ITS TTL HERE, AND THERE IS NO DEFAULT.
   //
   // This was a ternary chain ending in `: PROFILE_TTL_MINUTES`, with the set of known resources
@@ -250,6 +252,10 @@ Deno.serve(async (req: Request) => {
     // quarter's answer.
     [HOLDINGS_RESOURCE]: REFERENCE_TTL_MINUTES,
     [DERIVE_RESOURCE]: REFERENCE_TTL_MINUTES,
+    // 41 currencies in one pass, so this FINISHES what it starts — a completion-shaped TTL is
+    // correct here, unlike every backlog resource. Daily, because that is the cadence of the
+    // underlying reference rates.
+    [FX_RESOURCE]: PRICES_TTL_MINUTES,
   }
   const EXTRA = Object.keys(EXTRA_TTL_MINUTES)
   const spec = RESOURCES[resource]
@@ -1285,6 +1291,83 @@ Deno.serve(async (req: Request) => {
         securityId,
         symbol: source.provider_symbol ?? source.ticker,
         note: 'sector and returns arrive on the next security-profiles / security-performance run',
+      })
+    }
+
+    if (resource === FX_RESOURCE) {
+      // Every currency we actually hold, not a hardcoded list — a new market brings a new currency
+      // and it must not need a deploy. Same reason `exchange` and `tracked_fund` are tables.
+      const { data: currencies, error: cErr } = await market.from('currency').select('code')
+      if (cErr) throw new Error(`currency read failed: ${cErr.message}`)
+      const codes = (currencies ?? []).map((c) => c.code as string)
+
+      const deadline = Date.now() + 60_000
+      const quotes: { currency_code: string; as_of: string; usd_per_unit: number; source_code: string; derived_from: string | null }[] = []
+      const failed: string[] = []
+      const implausible: string[] = []
+
+      // Quote the real currencies first; subunits are derived from their parents afterwards, so a
+      // parent must be fetched even if no security is quoted in it directly.
+      const parents = new Set(Object.values(SUBUNITS).map((s) => s.parent))
+      const toFetch = [...new Set([...codes.filter((c) => !(c in SUBUNITS)), ...parents])]
+
+      for (const code of toFetch) {
+        if (Date.now() > deadline - 5_000) break
+        let q: FxQuote | null = null
+        try {
+          q = await fetchUsdPerUnit(code, Math.min(8_000, deadline - Date.now()))
+        } catch {
+          failed.push(code)
+          continue
+        }
+        if (!q) { failed.push(code); continue }
+        // A rate we cannot vouch for must not reprice 8,169 market caps. Rejected, not corrected:
+        // the most likely cause is an INVERTED pair, and both directions look plausible.
+        if (!isPlausibleRate(q.usdPerUnit)) { implausible.push(`${code}=${q.usdPerUnit}`); continue }
+        quotes.push({
+          currency_code: code,
+          as_of: q.asOf,
+          usd_per_unit: q.usdPerUnit,
+          source_code: 'yfinance',
+          derived_from: null,
+        })
+      }
+
+      // Subunits, derived from whatever parent this run actually quoted. Not from a stored rate:
+      // a parent that failed today should leave its subunit untouched rather than mixing a fresh
+      // subunit with a stale parent under one `as_of`.
+      const bySymbol = new Map(quotes.map((q) => [q.currency_code, q]))
+      for (const [sub, { parent, per }] of Object.entries(SUBUNITS)) {
+        if (!codes.includes(sub)) continue
+        const p = bySymbol.get(parent)
+        if (!p) { failed.push(`${sub}(no ${parent})`); continue }
+        quotes.push({
+          currency_code: sub,
+          as_of: p.as_of,
+          usd_per_unit: p.usd_per_unit / per,
+          source_code: 'yfinance',
+          derived_from: parent,
+        })
+      }
+
+      if (quotes.length > 0) {
+        const { error } = await market
+          .from('fx_rate')
+          .upsert(dedupeBy(quotes, (q) => `${q.currency_code}|${q.as_of}`),
+            { onConflict: 'currency_code,as_of' })
+        if (error) throw new Error(`fx_rate upsert failed: ${error.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        quoted: quotes.length,
+        derived: quotes.filter((q) => q.derived_from).length,
+        currencies: codes.length,
+        failed,
+        // Reported separately from `failed`: a pair we could not fetch and a pair whose value we
+        // refused are different facts, and only the second one suggests the pair is inverted.
+        implausible,
       })
     }
 
