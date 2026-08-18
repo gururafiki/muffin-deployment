@@ -1278,10 +1278,10 @@ Deno.serve(async (req: Request) => {
       // **35-day** full catalogue pass — and most slices are tiny: Portugal is 50 listings and one
       // request, and it was costing a whole cron slot exactly like a 4,000-listing venue.
       //
-      // Neither limit that matters is per-invocation. OpenFIGI's keyed allowance is 250 requests a
-      // MINUTE and one page is one request, so a run doing twenty venues of one page each spends
-      // twenty of them. The real ceilings are the worker's wall clock and that rate limit, so both
-      // are budgeted explicitly here rather than approximated by "one venue".
+      // Neither limit that matters is per-invocation. One page is one OpenFIGI request, so a run
+      // doing twenty single-page venues spends twenty of them. The real ceilings are the worker's
+      // wall clock and OpenFIGI's rate limit, so both are budgeted explicitly here rather than
+      // approximated by "one venue".
       //
       // WALL CLOCK IS THE HARD ONE. `workerTimeoutMs` is 90s (functions/main/index.ts), and a
       // venue that STARTS just under the deadline still has to page, upsert and advance its cursor
@@ -1292,9 +1292,23 @@ Deno.serve(async (req: Request) => {
       // Enough for one venue's worst case (20 pages) plus its writes, measured against the
       // observed ~1.2s per page.
       const VENUE_RESERVE_MS = 28_000
-      // Keyed OpenFIGI allowance is 250/min; leave room for the other resources in the same cron
-      // pass (`security-tickers` and `security-local-symbols` also call OpenFIGI).
-      const REQUEST_BUDGET = 150
+      // MEASURED, because the documented number is for a DIFFERENT ENDPOINT and using it here was
+      // wrong by 7.5x. OpenFIGI's widely-quoted "250 requests/minute with an API key" is the limit
+      // for `/v3/mapping`. This resource calls `/v3/filter`, which has its own, far smaller
+      // allowance — measured 2026-08-18 against our key, after letting the bucket reset:
+      //
+      //   20 consecutive 200s, first 429 on request 21
+      //
+      // which matches the sweep exactly: it reported `requestsUsed: 21` and stopped with
+      // `openfigi throttled`. The budget was 150, so it could never bind before the provider did.
+      //
+      // 18 leaves a little headroom. A budget is only as good as the ceiling it is sized against,
+      // and counting the right quantity (which #147 fixed) does nothing if the limit is wrong.
+      //
+      // `/v3/mapping` is a SEPARATE bucket — verified by calling it successfully while `/v3/filter`
+      // was returning 429 — so `security-tickers` and `security-local-symbols` are unaffected by
+      // this resource being throttled, and do not need to be budgeted against it.
+      const REQUEST_BUDGET = 18
       let requestsUsed = 0
       const swept: Record<string, unknown>[] = []
       let sweepThrottled = false

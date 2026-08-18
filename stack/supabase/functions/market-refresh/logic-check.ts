@@ -802,6 +802,25 @@ console.log('\nresource registry — the cron and the function agree')
     'the sweep budgets by REQUESTS MADE, not by pages (a one-request venue reports pages: 0)')
   check(/requests\+\+;\s*\n\s*const res = await fetch/.test(figiSrc),
     'listExchange counts a request at the fetch itself, where it cannot be missed')
+
+  // ── AND THE BUDGET MUST BE SIZED AGAINST THE RIGHT ENDPOINT'S LIMIT ────────────────────────
+  //
+  // This is a VALUE check, deliberately, because the two guards above are SHAPE checks and
+  // neither could see the defect they sat next to. The budget counted the right quantity, in the
+  // right place, incremented correctly — against a ceiling that was wrong by 7.5x.
+  //
+  // The widely-quoted "250 requests/minute with an API key" is `/v3/mapping`. This resource calls
+  // `/v3/filter`, whose keyed allowance was measured 2026-08-18 as **20 per minute** (20
+  // consecutive 200s, first 429 on request 21 — matching the sweep, which reported
+  // `requestsUsed: 21` and stopped with `openfigi throttled`).
+  //
+  // A budget above that ceiling can never bind before the provider does, which makes it
+  // decorative in the most convincing possible way: it is counted, reported, and useless.
+  const OPENFIGI_FILTER_LIMIT_PER_MIN = 20
+  const budget = Number(index.match(/const REQUEST_BUDGET = (\d+)/)?.[1] ?? NaN)
+  check(Number.isFinite(budget) && budget <= OPENFIGI_FILTER_LIMIT_PER_MIN,
+    'the sweep request budget is at or below the MEASURED /v3/filter limit',
+    `REQUEST_BUDGET = ${budget}, measured ceiling = ${OPENFIGI_FILTER_LIMIT_PER_MIN}/min`)
   // Anchored on the WHILE CONDITION, not on the string appearing anywhere. The first version of
   // this check searched the whole file and passed while broken, because
   // `SWEEP_DEADLINE - VENUE_RESERVE_MS` also appears in the `stoppedBecause` expression a few
