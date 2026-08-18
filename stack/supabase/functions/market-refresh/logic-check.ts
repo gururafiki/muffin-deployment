@@ -600,6 +600,21 @@ console.log('\nbarFrom — a dividend on the bar is kept, not discarded')
     'a non-numeric dividend is rejected rather than coerced')
   check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: -1 }, 'X')?.bar.dividend === undefined,
     'a negative dividend is rejected')
+
+  // SPLITS ride on the same response, aliased `split_ratio`. RECORDED, NOT APPLIED: the bars are
+  // already split-adjusted (`adjustment` defaults to `splits_only`, verified on NFLX's 10-for-1 of
+  // 2025-11-17, whose stored series is smooth across the ex-date), so feeding these back into a
+  // price would divide it a second time.
+  const sp = barFrom({ symbol: 'X', date: '2025-11-17', close: 110, split_ratio: 10 }, 'X')
+  check(sp?.bar.splitRatio === 10, 'a split ratio survives the parse', String(sp?.bar.splitRatio))
+  // A RATIO OF 1 IS "no split", the provider's way of saying nothing happened — the same shape as
+  // a 0 dividend. Storing it would put a split row on every bar of every security.
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, split_ratio: 1 }, 'X')?.bar.splitRatio === undefined,
+    'a ratio of 1 is absence, not a split')
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, split_ratio: 0 }, 'X')?.bar.splitRatio === undefined,
+    'a ratio of 0 is nonsense and is rejected')
+  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, split_ratio: 0.1 }, 'X')?.bar.splitRatio === 0.1,
+    'a REVERSE split (ratio < 1) is kept — it is a real event, not a rejected value')
 }
 
 console.log('\ndividend capture — attributable by construction')
@@ -619,6 +634,13 @@ console.log('\ndividend capture — attributable by construction')
   const divBlock = index.match(/if \(parsed\.bar\.dividend !== undefined\)[\s\S]*?\n          \}/)?.[0] ?? ''
   check(divBlock.length > 0 && !divBlock.includes('cutoff'),
     'the chart cutoff does not drop dividends — different table, different retention')
+  // The dedupe key MUST include `kind`. A security can pay a dividend and split on the SAME
+  // ex-date (a split is usually announced with one), and a key of (security, date) alone would
+  // silently drop one of the two — the primary key is (security_id, ex_date, kind) precisely
+  // because both can exist.
+  check(/dedupeBy\(divRows, \(d\) => `\$\{d\.security_id\}\|\$\{d\.ex_date\}\|\$\{d\.kind\}`\)/.test(index),
+    'the action dedupe key includes kind, so a same-day split and dividend cannot collide')
+  check(/kind: 'split',/.test(index), 'splits are captured from the price response too')
 }
 
 // ── DEBT TERMS COME OFF A FILING WE ALREADY PARSE ─────────────────────────────────────────────
