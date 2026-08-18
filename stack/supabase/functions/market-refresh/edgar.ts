@@ -17,8 +17,18 @@
 //   * SEC IGNORES `Range` headers (it returns 200 and the whole body), so reading "just the
 //     header" means streaming and cancelling client-side, which is what probeSeriesId does
 
-const UA = Deno.env.get('SEC_USER_AGENT') ?? 'muffin-market-data (contact: admin@rafiki.guru)';
-const HEADERS = { 'User-Agent': UA, 'Accept-Encoding': 'gzip' };
+/**
+ * SEC's fair-access policy REQUIRES a descriptive User-Agent with contact details.
+ *
+ * Read LAZILY rather than at module scope. A top-level `Deno.env.get` executes on import, so
+ * merely importing this module to test its pure XML parser demanded `--allow-env` — which the
+ * network-free `logic-check.ts` deliberately does not grant, and widening its permissions to reach
+ * a parser would defeat the point of a check that touches nothing.
+ */
+function headers(): Record<string, string> {
+  const ua = Deno.env.get('SEC_USER_AGENT') ?? 'muffin-market-data (contact: admin@rafiki.guru)';
+  return { 'User-Agent': ua, 'Accept-Encoding': 'gzip' };
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -38,7 +48,7 @@ async function secFetch(url: string, attempts = 3): Promise<Response> {
   let last = '';
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(400 * 2 ** (i - 1)); // 400ms, 800ms
-    const res = await fetch(url, { headers: HEADERS }).catch((e) => {
+    const res = await fetch(url, { headers: headers() }).catch((e) => {
       last = String(e);
       return null;
     });
@@ -234,6 +244,16 @@ export interface NportHolding {
   assetCategory?: string;
   issuerCategory?: string;
   country?: string;
+  /**
+   * The `<debtSec>` block, present on every debt holding and parsed from a file we ALREADY
+   * download. Measured 2026-08-18 on AGG's filing: **8,867 of 8,870 holdings carry it**, and the
+   * pipeline discarded all of it — which is why 15,159 bonds, the largest single slice of the
+   * universe, had no coupon and no maturity.
+   */
+  maturityDate?: string;
+  couponKind?: string;
+  couponRate?: number;
+  inDefault?: boolean;
 }
 
 const tag = (block: string, name: string): string | undefined => {
@@ -257,6 +277,40 @@ const num = (v: string | undefined): number | undefined => {
  * NOTE identifiers are ATTRIBUTES, not text: `<identifiers><isin value="US0378331005"/></…>`.
  * Reading them as element text yields empty strings and silently loses every ISIN.
  */
+/**
+ * The debt terms of one holding, SCOPED TO ITS `<debtSec>` BLOCK.
+ *
+ * The scoping is not decoration. A holding can carry several date fields — a derivative's
+ * `<fwdDeriv>`/`<optionSwaption>` blocks have their own maturities — so reading `maturityDt` from
+ * the whole holding would attribute a swap's expiry to the security. Measured on AGG's filing:
+ * 8,867 `maturityDt` inside `<debtSec>` and **0 outside**, with no holding carrying more than one.
+ * That is exactly the kind of "true today on the file I happened to look at" that the Taiwan bug
+ * was made of, so it is scoped rather than trusted.
+ *
+ * TWO VALUES THAT LOOK MISSING AND ARE NOT, both measured rather than assumed:
+ *
+ *  - `couponKind` is literally the string `"None"` on 5 of AGG's holdings. That is a REPORTED
+ *    KIND, not an absence, and collapsing it to null loses the distinction between "no coupon" and
+ *    "not stated".
+ *  - `annualizedRt` of **0.0 is a real zero-coupon bond** (the range across the filing is 0.0 to
+ *    11.5). Treating 0 as absent would silently drop every zero-coupon holding — the exact
+ *    OPPOSITE of the dividend case, where a 0 means "no dividend on this bar". Same-looking value,
+ *    opposite meaning, and only the source can say which.
+ */
+function debtTerms(block: string): Partial<NportHolding> {
+  const debt = block.match(/<debtSec>[\s\S]*?<\/debtSec>/)?.[0];
+  if (!debt) return {};
+  const rate = num(tag(debt, 'annualizedRt'));
+  const isDefault = tag(debt, 'isDefault');
+  return {
+    maturityDate: tag(debt, 'maturityDt'),
+    couponKind: tag(debt, 'couponKind'),
+    // `!== undefined`, NOT a truthiness test: 0.0 is a zero-coupon bond, not a missing rate.
+    couponRate: rate !== undefined && Number.isFinite(rate) ? rate : undefined,
+    inDefault: isDefault === 'Y' ? true : isDefault === 'N' ? false : undefined,
+  };
+}
+
 export function parseHoldings(xml: string): NportHolding[] {
   const out: NportHolding[] = [];
   const blocks = xml.match(/<invstOrSec>[\s\S]*?<\/invstOrSec>/g) ?? [];
@@ -281,6 +335,7 @@ export function parseHoldings(xml: string): NportHolding[] {
       assetCategory: tag(b, 'assetCat'),
       issuerCategory: tag(b, 'issuerCat'),
       country: tag(b, 'invCountry'),
+      ...debtTerms(b),
     });
   }
   return out;
