@@ -985,6 +985,29 @@ Deno.serve(async (req: Request) => {
             // `.neq()` alone would skip every row where the column is NULL — SQL comparisons
             // against NULL are never true, and NULL is the majority case here. `.or()` covers both
             // "never set" and "set to something the provider disagrees with".
+            // THE CURRENCY GOES ON THE LISTING THE SYMBOL IDENTIFIES.
+            //
+            // A currency is a property of a listing, not of a security: Camtek is USD on Nasdaq and
+            // ILS on Tel Aviv, and both are true. `security.currency_code` holds ONE value, so
+            // whichever fetch ran last won — which is how yfinance's `currency: USD` for `BREN.JK`
+            // could overwrite the rupiah of a Jakarta listing and make PT Barito the largest
+            // company on earth at $442tn.
+            //
+            // We fetched by `sym`, so `sym` names the listing this claim is about. Writing it there
+            // makes the collision impossible rather than detectable.
+            if (sym) {
+              const { error: lErr } = await market
+                .from('listing')
+                .update({ currency_code: cur })
+                .eq('security_id', w.security_id as string)
+                .eq('provider_symbol', sym)
+              if (lErr) throw new Error(`listing currency update failed: ${lErr.message}`)
+            }
+
+            // AND STILL ON THE SECURITY, because 15,159 bonds have no listing at all (12,379
+            // listings against 27,629 securities) and their currency has nowhere else to live.
+            // `security_currency` prefers the listing and falls back here, so this is the answer
+            // only when there is no venue row — it is not a duplicate, it is the other case.
             const { error: cErr } = await market
               .from('security')
               .update({ currency_code: cur })
