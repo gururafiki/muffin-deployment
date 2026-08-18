@@ -1709,6 +1709,19 @@ Deno.serve(async (req: Request) => {
               observed_symbol: parsed.symbol,
             })
           }
+          // Splits ride on the same response. RECORDED, NOT APPLIED — the bars are already
+          // split-adjusted, so these correct nothing and must never be fed back into a price.
+          // Their value is coverage: Tiingo is US-only, so a Tokyo or Zurich split was invisible.
+          if (parsed.bar.splitRatio !== undefined) {
+            divRows.push({
+              security_id: id,
+              ex_date: parsed.bar.date,
+              kind: 'split',
+              value: parsed.bar.splitRatio,
+              source_code: 'yfinance',
+              observed_symbol: parsed.symbol,
+            })
+          }
           if (parsed.bar.date < cutoff) continue
           priceRows.push({ security_id: id, date: parsed.bar.date, close: parsed.bar.close })
         }

@@ -356,6 +356,18 @@ export interface Bar {
    * request PARAMETER.
    */
   dividend?: number
+  /**
+   * Split RATIO with this bar's date as the ex-date (2 = two-for-one, 0.1 = a one-for-ten
+   * reverse), when the provider reported one. Arrives on the same response as `dividend` —
+   * openbb aliases it `split_ratio` from yfinance's `stock_splits`.
+   *
+   * RECORDED, NOT APPLIED. Bars come back already split-adjusted (`adjustment` defaults to
+   * `splits_only`), so nothing here corrects a price and nothing should: applying these to
+   * already-adjusted closes would divide them a second time. Verified on NFLX's 10-for-1 of
+   * 2025-11-17, whose stored series is smooth across the ex-date. This is a fact worth having —
+   * a stock page can say a split happened — not an input to the return maths.
+   */
+  splitRatio?: number
 }
 
 /**
@@ -389,7 +401,14 @@ export function barFrom(r: Record<string, unknown>, fallbackSymbol: string): { s
   // only a positive number is carried. Guarded rather than trusted: a string would coerce.
   const div = typeof r.dividend === 'number' ? r.dividend : Number(r.dividend)
   const dividend = Number.isFinite(div) && div > 0 ? div : undefined
-  return { symbol, bar: dividend === undefined ? { date, close } : { date, close, dividend } }
+  // A ratio of 1 is "no split on this bar" — the provider's way of saying nothing happened, the
+  // same as a 0 dividend. A ratio of 0 would be nonsense and is rejected rather than stored.
+  const sr = typeof r.split_ratio === 'number' ? r.split_ratio : Number(r.split_ratio)
+  const splitRatio = Number.isFinite(sr) && sr > 0 && Math.abs(sr - 1) > 1e-9 ? sr : undefined
+  const bar: Bar = { date, close }
+  if (dividend !== undefined) bar.dividend = dividend
+  if (splitRatio !== undefined) bar.splitRatio = splitRatio
+  return { symbol, bar }
 }
 
 /** Index of the last bar at or before `iso`; null when the series does not reach back that far. */
