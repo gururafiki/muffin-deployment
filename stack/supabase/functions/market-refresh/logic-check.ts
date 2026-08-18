@@ -755,6 +755,82 @@ console.log('\nworker budget — a loop must leave room to finish')
     `reserve ${reserve}ms, last batch may start at ${budget - reserve}ms`)
 }
 
+// ── A PRICE RETURN IS NOT THE RETURN ──────────────────────────────────────────────────────────
+//
+// Every figure this system has shown is a PRICE return, which is not absent-but-wrong, it is
+// SHOWN-and-wrong: it renders as "+4.2%" and is believed. For an income-paying market it
+// understates, and over a decade the income is most of the answer.
+console.log('\ntotalReturnsFor — reinvested, and never a substitute')
+{
+  const { totalReturnsFor, returnsFor } = await import('./resources.ts')
+  const now = new Date('2026-08-18T00:00:00Z')
+  const day = (n: number) => new Date(Date.UTC(2026, 7, 18 - n)).toISOString().slice(0, 10)
+  // 60 bars so the monthly window has an anchor to reach back to.
+  const N = 60
+  // Flat at 100, with one 2.00 dividend two days before the end.
+  const series: Bar[] = Array.from({ length: N }, (_, i) => ({ date: day(N - 1 - i), close: 100 }))
+  series[N - 2] = { date: series[N - 2].date, close: 100, dividend: 2 }
+
+  const pr = returnsFor(series, now)
+  const tr = totalReturnsFor(series, now)
+  // The price return over a flat series is suppressed (a window that never moved is not a 0.00%
+  // return), but the TOTAL return is real: the holder received income.
+  check(tr['1w'] !== undefined && tr['1w'] > 1.9 && tr['1w'] < 2.1,
+    'a dividend on a flat series produces a real total return', String(tr['1w']))
+  check(pr['1w'] === undefined,
+    'while the PRICE return over that same flat window is still suppressed', String(pr['1w']))
+
+  // NO DIVIDEND ANYWHERE => the two must AGREE. This is the case that makes an overwrite look
+  // correct, which is exactly why the column is kept separate.
+  const rising: Bar[] = Array.from({ length: N }, (_, i) => ({ date: day(N - 1 - i), close: 100 + i }))
+  const pr2 = returnsFor(rising, now)
+  const tr2 = totalReturnsFor(rising, now)
+  for (const p of Object.keys(pr2)) {
+    check(Math.abs((tr2[p] ?? NaN) - pr2[p]) < 0.01,
+      `with no income, total and price agree on ${p}`, `${tr2[p]} vs ${pr2[p]}`)
+  }
+
+  // REINVESTED, not summed: a dividend early in a rising series compounds, so the total return
+  // must EXCEED price return plus the raw dividend yield at the start.
+  // INSIDE the 1m window, deliberately. A dividend paid BEFORE a window's anchor must not affect
+  // that window's return — placing it at index 1 tested nothing and (correctly) changed nothing,
+  // which read as a broken computation and was a broken fixture.
+  const withEarly: Bar[] = rising.map((b, i) => (i === N - 5 ? { ...b, dividend: 5 } : b))
+  const trEarly = totalReturnsFor(withEarly, now)
+  // `1m`, chosen because the 60-bar series actually spans it — a period the series cannot reach
+  // yields `undefined` on BOTH sides and the comparison passes vacuously, which is how a guard
+  // ends up asserting nothing.
+  check(trEarly['1m'] !== undefined && pr2['1m'] !== undefined,
+    'the fixture spans the period being compared — otherwise this asserts nothing',
+    `tr=${trEarly['1m']} pr=${pr2['1m']}`)
+  check((trEarly['1m'] ?? 0) > (pr2['1m'] ?? 0),
+    'income raises the total return above the price return', `${trEarly['1m']} vs ${pr2['1m']}`)
+
+  // The same eligibility rules as the price return. A stale series produces neither.
+  const stale = Array.from({ length: 5 }, (_, i) => ({ date: `2025-01-0${i + 1}`, close: 100 + i }))
+  check(Object.keys(totalReturnsFor(stale, now)).length === 0,
+    'a stale series produces no total return, exactly as it produces no price return')
+  check(Object.keys(totalReturnsFor([{ date: day(1), close: 100 }], now)).length === 0,
+    'a one-bar series produces nothing')
+}
+
+console.log('\ntotal return — wired at EVERY site, not just the visible one')
+{
+  const rs = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
+  // THREE call sites build performance rows and only one is the per-security path. Wiring the
+  // obvious one and leaving two is the recurring failure in this file — six marking sites, four
+  // `remaining` units, four unbounded loops. Counted, not eyeballed.
+  const sites = [...rs.matchAll(/Object\.entries\(returnsFor\(series, now\)\)/g)].length
+  const wired = [...rs.matchAll(/total_return_pct: tr/g)].length
+  check(sites > 0 && sites === wired,
+    'every returnsFor row-building site also emits a total return',
+    `${sites} sites, ${wired} wired`)
+  // NULL IS NOT ZERO, and must never fall back to the price return: that would erase the
+  // difference between "paid no income" and "we do not know".
+  check(!/total_return_pct: tr\w*\[period\] \?\? changePct/.test(rs),
+    'a missing total return stays NULL rather than falling back to the price return')
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
