@@ -902,15 +902,48 @@ console.log('\ncurrency — the venue overrules a provider that contradicts it')
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   check(/from\('venue_currency'\)/.test(index),
     'the fundamentals path reads the venue currency')
-  check(/if \(venueCur && venueCur !== cur\) \{ cur = venueCur; currencyOverruled\+\+ \}/.test(index),
-    'a provider currency contradicting the venue is REPLACED, not merely counted')
+
+  // ── EVERY PATH THAT FETCHES FUNDAMENTALS MUST WRITE THE CURRENCY ──────────────────────────
+  //
+  // There are TWO: `security-fundamentals` (the batch backlog) and `security-refresh` (the
+  // on-demand path a user's stock page triggers). Only the first ever wrote the currency.
+  // Proven in production 2026-08-18 by corrupting Toyota's listing to USD and running
+  // `security-refresh` — it reported `fundamentals: updated` and left the wrong value in place.
+  //
+  // "A rule written at one call site is not a rule." Counted rather than eyeballed, because this
+  // is the recurring failure in this file: six marking sites, four `remaining` units, four
+  // unbounded loops, three return sites.
+  const fundFetches = [...index.matchAll(/fetchFundamentals\(|loadFundamentals\(/g)].length
+  const currencyWrites = [...index.matchAll(/writeCurrencyFor\(/g)].length - 1 // minus the definition
+  check(fundFetches > 0 && currencyWrites >= fundFetches,
+    'every path that fetches fundamentals also writes the currency',
+    `${fundFetches} fetch sites, ${currencyWrites} currency writes`)
+  // ONE implementation, not two that drift. The helper exists precisely because the inline
+  // versions diverged.
+  check(/^async function writeCurrencyFor\(/m.test(index),
+    'the currency write is a single shared function, not copied per call site')
+
+  // ── THE OVERRULE MUST STAY NARROW ─────────────────────────────────────────────────────────
+  //
+  // These assert the SHARED helper, and they were briefly LOST when the logic moved into it —
+  // a regex edit removed them without adding the replacements, and everything still passed.
+  // Restored explicitly, because they are the assertions that stop the dangerous rule returning:
+  // overruling on ANY disagreement would relabel 233 securities of which ~20 are wrong.
+  check(/cur === 'USD' && Number\.isFinite\(cap\) && cap > IMPOSSIBLE_USD_CAP/.test(index),
+    'the venue overrules ONLY a USD claim with an impossible market cap, not any disagreement')
+  check(/const IMPOSSIBLE_USD_CAP = 2e12/.test(index),
+    'the impossibility threshold is a named constant, above every real company')
+  check(/venueCur && venueCur !== 'USD'/.test(index),
+    'and it only ever replaces USD with a non-USD venue currency')
+  // The normalized write: the claim lands on the listing the symbol names.
+  check(/\.from\('listing'\)[\s\S]{0,80}\.update\(\{ currency_code: cur \}\)/.test(index),
+    'the currency is written to the LISTING the fetched symbol names')
+  check(/\.eq\('provider_symbol', providerSymbol\)/.test(index),
+    'and it is matched on that exact provider symbol, not on the security alone')
   check(/currencyOverruled,/.test(index),
     'the override is reported — a climbing count is the provider degrading, and the corrected '
     + 'value looks perfectly ordinary once stored')
   // Read ONCE, not per batch: 59 rows that cannot change mid-run.
-  const loopBody = index.match(/for \(const w of writes\) \{[\s\S]*?\n          \}/)?.[0] ?? ''
-  check(loopBody.length > 0 && !loopBody.includes("from('venue_currency')"),
-    'the venue map is fetched once per run, not once per batch')
 }
 
 console.log('\nresource registry — the cron and the function agree')

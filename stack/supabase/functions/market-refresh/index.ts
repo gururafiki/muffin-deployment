@@ -21,7 +21,7 @@
 // The fetch/mapping logic lives in ./resources.ts so it can be exercised against a
 // real openbb-api with no Supabase running — see ./check.ts.
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
+import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { ingestFund } from './ingest.ts'
 import {
   listExchange,
@@ -140,6 +140,80 @@ function isAdmin(req: Request): boolean {
  * `-profiles` all gated on the bare deadline. The others already reserved 4-6s.
  */
 const TAIL_RESERVE_MS = 10_000
+
+/** The schema-scoped client, spelled the same way `ingest.ts` does. */
+type MarketClient = ReturnType<SupabaseClient['schema']>
+
+/**
+ * Write a security's currency to its LISTING and to the security, from one provider response.
+ *
+ * SHARED, because it was not, and that cost a silent gap. `security-fundamentals` (the batch
+ * backlog) wrote the currency; `security-refresh` (the on-demand path a user's stock page triggers)
+ * fetched the same payload and wrote fundamentals WITHOUT ever touching the currency. Proven in
+ * production 2026-08-18 by corrupting Toyota's listing to USD and running `security-refresh`: it
+ * reported `fundamentals: updated` and left the wrong currency in place.
+ *
+ * "A rule written at one call site is not a rule" — the same lesson as the six marking gates and
+ * the four `remaining` units. One function, two callers.
+ *
+ * THE VENUE OVERRULES ONLY AN IMPOSSIBLE FIGURE, never a mere disagreement. Overruling on any
+ * disagreement would relabel 233 securities of which ~20 are wrong: Hong Kong genuinely has HKD,
+ * CNY and USD counters, Johannesburg quotes in cents, Toronto lists USD securities. A majority says
+ * what is COMMON on a venue; this needs what is POSSIBLE. Only a USD claim with a market cap above
+ * $2tn on a non-US venue is arithmetically refuted — the largest real company is ~$5.5tn and
+ * US-listed, and NVDA is REAL while sitting between two fakes.
+ */
+async function writeCurrencyFor(
+  market: MarketClient,
+  securityId: string,
+  providerSymbol: string,
+  rawCurrency: unknown,
+  marketCap: unknown,
+  venueCurrency: Map<string, string>,
+): Promise<{ written: boolean; overruled: boolean }> {
+  if (typeof rawCurrency !== 'string' || !/^[A-Za-z]{3}$/.test(rawCurrency)) {
+    return { written: false, overruled: false }
+  }
+  let cur = rawCurrency.toUpperCase()
+  let overruled = false
+
+  const dot = providerSymbol.lastIndexOf('.')
+  const cap = typeof marketCap === 'number' ? marketCap : Number(marketCap)
+  const IMPOSSIBLE_USD_CAP = 2e12
+  if (dot > 0 && cur === 'USD' && Number.isFinite(cap) && cap > IMPOSSIBLE_USD_CAP) {
+    const venueCur = venueCurrency.get(providerSymbol.slice(dot))
+    if (venueCur && venueCur !== 'USD') { cur = venueCur; overruled = true }
+  }
+
+  // LEARN THE CODE FIRST. `currency_code` is a foreign key, so a code the table has never seen
+  // fails the STATEMENT rather than the row — and this handler turns that into a failed resource.
+  const { error: learnErr } = await market
+    .from('currency')
+    .upsert({ code: cur }, { onConflict: 'code', ignoreDuplicates: true })
+  if (learnErr) throw new Error(`currency learn failed: ${learnErr.message}`)
+
+  // THE LISTING is the normalized fact: we fetched by this symbol, so this claim is about this
+  // listing. A USD claim from a US line can no longer overwrite a Jakarta line.
+  if (providerSymbol) {
+    const { error: lErr } = await market
+      .from('listing')
+      .update({ currency_code: cur })
+      .eq('security_id', securityId)
+      .eq('provider_symbol', providerSymbol)
+    if (lErr) throw new Error(`listing currency update failed: ${lErr.message}`)
+  }
+
+  // AND the security, because 15,159 bonds have no listing at all and their currency has nowhere
+  // else to live. `security_currency` prefers the listing and falls back here.
+  const { error: cErr } = await market
+    .from('security')
+    .update({ currency_code: cur })
+    .eq('security_id', securityId)
+    .or(`currency_code.is.null,currency_code.neq.${cur}`)
+  if (cErr) throw new Error(`currency_code update failed: ${cErr.message}`)
+
+  return { written: true, overruled }
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok')
@@ -957,63 +1031,16 @@ Deno.serve(async (req: Request) => {
           // Jakarta trades in. Fetched ONCE per run, above the batch loop: 59 rows that do not
           // change mid-run, and re-reading them per batch would be a query per 40 securities.
           for (const w of writes) {
-            const raw = (w.raw as Record<string, unknown> | undefined)?.currency
-            if (typeof raw !== 'string' || !/^[A-Za-z]{3}$/.test(raw)) continue
-            let cur = raw.toUpperCase()
-            // A suffixed symbol names a venue. If that venue has a known quote currency and the
-            // provider disagrees, the venue wins — it cannot be wrong about what it trades in.
-            const sym = String((w.raw as Record<string, unknown> | undefined)?.symbol ?? '')
-            const dot = sym.lastIndexOf('.')
-            if (dot > 0) {
-              const venueCur = venueCurrency.get(sym.slice(dot))
-              if (venueCur && venueCur !== cur) { cur = venueCur; currencyOverruled++ }
-            }
-            // THE PROVIDER WINS, and this is the one place a filing does not.
-            //
-            // N-PORT's `curCd` is the currency the FUND valued the position in — for a US-domiciled
-            // fund that is frequently USD regardless of where the security trades. The provider
-            // reports the quote currency of the symbol we asked about, which IS the security's own
-            // currency by construction.
-            //
-            // Measured 2026-08-13: of 1,000 securities with fundamentals, 14 disagreed and every
-            // one was `stored=USD` against `provider=PEN/CLP/BRL/EUR` — Peruvian, Chilean and
-            // Brazilian securities labelled in dollars. That mislabels the figures the stock page
-            // renders, which is exactly what the currency work fixed for everything else.
-            //
-            // Previously `.is('currency_code', null)` meant the first value ever written stuck, so
-            // an early wrong N-PORT currency was permanent.
-            // `.neq()` alone would skip every row where the column is NULL — SQL comparisons
-            // against NULL are never true, and NULL is the majority case here. `.or()` covers both
-            // "never set" and "set to something the provider disagrees with".
-            // THE CURRENCY GOES ON THE LISTING THE SYMBOL IDENTIFIES.
-            //
-            // A currency is a property of a listing, not of a security: Camtek is USD on Nasdaq and
-            // ILS on Tel Aviv, and both are true. `security.currency_code` holds ONE value, so
-            // whichever fetch ran last won — which is how yfinance's `currency: USD` for `BREN.JK`
-            // could overwrite the rupiah of a Jakarta listing and make PT Barito the largest
-            // company on earth at $442tn.
-            //
-            // We fetched by `sym`, so `sym` names the listing this claim is about. Writing it there
-            // makes the collision impossible rather than detectable.
-            if (sym) {
-              const { error: lErr } = await market
-                .from('listing')
-                .update({ currency_code: cur })
-                .eq('security_id', w.security_id as string)
-                .eq('provider_symbol', sym)
-              if (lErr) throw new Error(`listing currency update failed: ${lErr.message}`)
-            }
-
-            // AND STILL ON THE SECURITY, because 15,159 bonds have no listing at all (12,379
-            // listings against 27,629 securities) and their currency has nowhere else to live.
-            // `security_currency` prefers the listing and falls back here, so this is the answer
-            // only when there is no venue row — it is not a duplicate, it is the other case.
-            const { error: cErr } = await market
-              .from('security')
-              .update({ currency_code: cur })
-              .eq('security_id', w.security_id as string)
-              .or(`currency_code.is.null,currency_code.neq.${cur}`)
-            if (cErr) throw new Error(`currency_code update failed: ${cErr.message}`)
+            const raw = (w.raw as Record<string, unknown> | undefined)
+            const res = await writeCurrencyFor(
+              market,
+              w.security_id as string,
+              String(raw?.symbol ?? ''),
+              raw?.currency,
+              raw?.market_cap,
+              venueCurrency,
+            )
+            if (res.overruled) currencyOverruled++
           }
 
           // MARKET CAP IS IN THIS RESPONSE TOO, and it was being written to `raw` and nowhere else.
@@ -1177,6 +1204,27 @@ Deno.serve(async (req: Request) => {
             { onConflict: 'security_id' },
           )
           if (error) throw new Error(`fundamentals upsert failed: ${error.message}`)
+
+          // THE CURRENCY, which this path never wrote at all. Proven in production 2026-08-18 by
+          // corrupting Toyota's listing to USD and running `security-refresh`: it reported
+          // `fundamentals: updated` and left the wrong currency in place. This is the path a user's
+          // stock page triggers, so it was the one most likely to be looked at and the one that
+          // silently did nothing.
+          const { data: vcRows, error: vcErr } = await market
+            .from('venue_currency')
+            .select('suffix,quote_currency')
+          if (vcErr) throw new Error(`venue_currency read failed: ${vcErr.message}`)
+          const res = await writeCurrencyFor(
+            market,
+            securityId,
+            fetchSymbol,
+            (f.raw as Record<string, unknown> | undefined)?.currency,
+            (f.raw as Record<string, unknown> | undefined)?.market_cap,
+            new Map((vcRows ?? []).map((v) => [String(v.suffix), String(v.quote_currency)])),
+          )
+          out.currency = res.written ? 'updated' : 'not reported'
+          if (res.overruled) out.currencyOverruled = true
+
           out.fundamentals = 'updated'
         }
       } catch (e) {
