@@ -902,8 +902,16 @@ console.log('\ncurrency — the venue overrules a provider that contradicts it')
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   check(/from\('venue_currency'\)/.test(index),
     'the fundamentals path reads the venue currency')
-  check(/if \(venueCur && venueCur !== cur\) \{ cur = venueCur; currencyOverruled\+\+ \}/.test(index),
-    'a provider currency contradicting the venue is REPLACED, not merely counted')
+  // NARROW, and this is the correction to my own first attempt. Overruling on ANY disagreement
+  // would have relabelled 233 securities of which only 20 were wrong — Hong Kong's genuine HKD
+  // counters, Johannesburg's cents, Toronto's USD listings. A majority says what is COMMON on a
+  // venue; this needs what is POSSIBLE.
+  check(/cur === 'USD' && Number\.isFinite\(cap\) && cap > IMPOSSIBLE_USD_CAP/.test(index),
+    'the venue overrules ONLY a USD claim with an impossible market cap, not any disagreement')
+  check(/const IMPOSSIBLE_USD_CAP = 2e12/.test(index),
+    'the impossibility threshold is a named constant, above every real company')
+  check(/venueCur && venueCur !== 'USD'/.test(index),
+    'and it only replaces USD with a non-USD venue currency')
   check(/currencyOverruled,/.test(index),
     'the override is reported — a climbing count is the provider degrading, and the corrected '
     + 'value looks perfectly ordinary once stored')

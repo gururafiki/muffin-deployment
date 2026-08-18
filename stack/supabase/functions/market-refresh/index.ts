@@ -960,13 +960,29 @@ Deno.serve(async (req: Request) => {
             const raw = (w.raw as Record<string, unknown> | undefined)?.currency
             if (typeof raw !== 'string' || !/^[A-Za-z]{3}$/.test(raw)) continue
             let cur = raw.toUpperCase()
-            // A suffixed symbol names a venue. If that venue has a known quote currency and the
-            // provider disagrees, the venue wins — it cannot be wrong about what it trades in.
+            // THE VENUE OVERRULES ONLY WHEN THE FIGURE IS IMPOSSIBLE, not whenever it disagrees.
+            //
+            // The first version of this overruled on ANY disagreement, and measuring it before it
+            // landed showed it would relabel **233 securities of which only 20 were wrong**. Two
+            // whole classes of legitimate data fail a majority vote:
+            //
+            //   732.HK   HKD -> CNY   Hong Kong genuinely has HKD, CNY and USD counters
+            //   SSW.JO   ZAC -> ZAR   Johannesburg quotes in CENTS; this is a 100x error
+            //   BBD/B.TO USD -> CAD   Toronto genuinely lists USD-denominated securities
+            //
+            // A majority says what is COMMON on a venue. The question here is what is POSSIBLE,
+            // and those are not the same. So the venue may only overrule a claim the arithmetic
+            // already refutes: a market cap above $2tn on a non-US venue. The largest real company
+            // is ~$5.5tn and US-listed — NVDA is real and sits BETWEEN two fakes, which is why
+            // magnitude alone cannot be the test either. Both signals together can be.
             const sym = String((w.raw as Record<string, unknown> | undefined)?.symbol ?? '')
             const dot = sym.lastIndexOf('.')
-            if (dot > 0) {
+            const capRaw = (w.raw as Record<string, unknown> | undefined)?.market_cap
+            const cap = typeof capRaw === 'number' ? capRaw : Number(capRaw)
+            const IMPOSSIBLE_USD_CAP = 2e12
+            if (dot > 0 && cur === 'USD' && Number.isFinite(cap) && cap > IMPOSSIBLE_USD_CAP) {
               const venueCur = venueCurrency.get(sym.slice(dot))
-              if (venueCur && venueCur !== cur) { cur = venueCur; currencyOverruled++ }
+              if (venueCur && venueCur !== 'USD') { cur = venueCur; currencyOverruled++ }
             }
             // THE PROVIDER WINS, and this is the one place a filing does not.
             //
