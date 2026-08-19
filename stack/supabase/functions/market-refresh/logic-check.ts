@@ -12,6 +12,7 @@
 import {
   barFrom,
   dedupeBy,
+  extractMacroPoints,
   fetchWithIsolation,
   firstComparableIndex,
   returnsFor,
@@ -1282,6 +1283,71 @@ console.log('\nplanPriceFetches — a daily refresh should ask for a day')
     'a gap wider than the window refetches the whole window rather than leaving a hole')
 
   check(planPriceFetches([], now, 10).length === 0, 'an empty backlog plans nothing')
+}
+
+// ── extractMacroPoints — five providers, five shapes, none of them agree ─────
+//
+// WHY THIS IS CHECKED OFFLINE. Every shape below was measured against the deployed openbb-api, and
+// getting one wrong is SILENT: the extractor returns no points, the resource reports "no data",
+// and the series looks like one the provider has retired. The FRED shape is the trap — its value
+// sits under a key NAMED AFTER THE SERIES, so a fixed `r.value` read returns undefined for every
+// row and a working series reads as a dead one.
+console.log('\nextractMacroPoints — one shape per provider')
+{
+  const oecd = extractMacroPoints(
+    [{ date: '2026-01-01', country: 'united_states', value: 0.0239, expenditure: 'total' }], 'us-cpi')
+  check(oecd.length === 1 && oecd[0].value === 0.0239, 'oecd cpi -> value', JSON.stringify(oecd))
+  check(oecd[0]?.dimension === '', 'oecd cpi has no dimension', JSON.stringify(oecd[0]))
+
+  const curve = extractMacroPoints([
+    { date: '2026-08-17', maturity: 'month_1', rate: 0.0379, maturity_years: 0.083 },
+    { date: '2026-08-17', maturity: 'year_10', rate: 0.0422, maturity_years: 10 },
+  ], 'us-yield-curve')
+  check(curve.length === 2, 'yield curve keeps BOTH maturities', JSON.stringify(curve))
+  check(curve.map((p) => p.dimension).join(',') === 'month_1,year_10', 'maturity becomes the dimension', JSON.stringify(curve))
+  check(new Set(curve.map((p) => p.as_of)).size === 1, 'a curve shares one date')
+
+  const effr = extractMacroPoints([{ date: '2026-08-15', rate: 0.0433 }], 'us-effr')
+  check(effr.length === 1 && effr[0].value === 0.0433, 'effr -> rate', JSON.stringify(effr))
+
+  const ohlc = extractMacroPoints(
+    [{ date: '2026-08-15', open: 3400, high: 3450, low: 3380, close: 3421, volume: 12 }], 'gold')
+  check(ohlc.length === 1 && ohlc[0].value === 3421, 'yfinance -> CLOSE, not open', JSON.stringify(ohlc))
+
+  // THE FRED TRAP: the value key is the series id.
+  const fred = extractMacroPoints([{ date: '2026-06-01', LRHUTTTTDEM156S: 3.9 }], 'de-unemployment-fred')
+  check(fred.length === 1 && fred[0].value === 3.9, 'fred -> the value under its SERIES-NAMED key', JSON.stringify(fred))
+
+  // …and it must not hijack a shape that HAS a real value field.
+  // THE STRAY NUMBER COMES FIRST, deliberately: the fallback walks Object.entries in insertion
+  // order, so putting `value` first makes the assertion pass whether or not the precedence exists.
+  const both = extractMacroPoints([{ date: '2026-01-01', some_other_number: 99, value: 1.5 }], 'x')
+  check(both[0]?.value === 1.5, 'a real `value` field wins over a stray number', JSON.stringify(both))
+}
+
+console.log('\nextractMacroPoints — the duplicate key that would fail the WHOLE upsert')
+{
+  // OECD returns several `expenditure` breakdowns per date. Carrying a key twice makes Postgres
+  // fail the statement with 21000 and take the resource with it — the documented dedupeBy trap.
+  const dupes = extractMacroPoints([
+    { date: '2026-01-01', value: 1, expenditure: 'total' },
+    { date: '2026-01-01', value: 2, expenditure: 'food' },
+  ], 'us-cpi')
+  check(dupes.length === 1, 'one point per (date, dimension)', JSON.stringify(dupes))
+
+  const curveDupes = extractMacroPoints([
+    { date: '2026-08-17', maturity: 'year_10', rate: 0.04 },
+    { date: '2026-08-17', maturity: 'year_10', rate: 0.05 },
+  ], 'c')
+  check(curveDupes.length === 1, 'a repeated maturity is deduped too', JSON.stringify(curveDupes))
+}
+
+console.log('\nextractMacroPoints — junk is dropped, not coerced')
+{
+  check(extractMacroPoints([{ value: 5 }], 'x').length === 0, 'a row with no date is dropped')
+  check(extractMacroPoints([{ date: '2026-01-01', note: 'n/a' }], 'x').length === 0, 'a row with no numeric value is dropped')
+  check(extractMacroPoints([{ date: '2026-01-01', value: 'abc' }], 'x').length === 0, 'a non-finite value is dropped')
+  check(extractMacroPoints([], 'x').length === 0, 'an empty response yields no points')
 }
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)

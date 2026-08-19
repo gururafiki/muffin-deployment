@@ -1206,3 +1206,72 @@ export function planPriceFetches(
   }
   return out
 }
+
+// ── macro series: one shape per provider, and none of them agree ─────────────
+//
+// FIVE response shapes reach this function, which is why the extraction is a named, tested helper
+// rather than an inline `r.value` at the call site. Measured against the deployed openbb-api:
+//
+//   oecd cpi / gdp / unemployment   { date, country, value, expenditure }
+//   federal_reserve yield_curve     { date, maturity, rate, maturity_years }   <- TERM STRUCTURE
+//   federal_reserve effr / sofr     { date, rate }
+//   yfinance futures / crypto / index { date, open, high, low, close, volume }
+//   fred fred_series                { date, "<SYMBOL>": value }                <- key IS the symbol
+//
+// The FRED one is the trap: the value is under a key named after the series, so there is no fixed
+// field to read and `r.value` returns undefined for every row — which would look exactly like a
+// series the provider has nothing for.
+export interface MacroPoint {
+  as_of: string
+  /** The term-structure axis (a yield curve's maturity); '' for a scalar series. */
+  dimension: string
+  value: number
+}
+
+export function extractMacroPoints(rows: Record<string, unknown>[], code: string): MacroPoint[] {
+  const out: MacroPoint[] = []
+  for (const r of rows ?? []) {
+    const date = typeof r.date === 'string' ? r.date.slice(0, 10) : null
+    if (!date) continue
+
+    // A yield curve is (date, maturity) -> rate. Emitted as several points sharing a date.
+    if (r.maturity !== undefined && r.rate !== undefined) {
+      const v = Number(r.rate)
+      if (Number.isFinite(v)) out.push({ as_of: date, dimension: String(r.maturity), value: v })
+      continue
+    }
+
+    // Scalar shapes, in precedence order. `close` last so an OHLC row is read as its close rather
+    // than its open.
+    let v: unknown =
+      r.value !== undefined ? r.value
+      : r.rate !== undefined ? r.rate
+      : r.close !== undefined ? r.close
+      : undefined
+
+    // FRED: the value hides under a key named after the series. Only reached when no known field
+    // matched, so it cannot shadow a real `value` column.
+    if (v === undefined) {
+      for (const [k, val] of Object.entries(r)) {
+        if (k === 'date' || typeof val !== 'number') continue
+        v = val
+        break
+      }
+    }
+
+    const n = Number(v)
+    if (v !== undefined && Number.isFinite(n)) out.push({ as_of: date, dimension: '', value: n })
+  }
+
+  // ONE POINT PER (date, dimension). OECD returns several `expenditure` breakdowns for the same
+  // date and we keep the first; without this the upsert carries a key twice and Postgres fails the
+  // WHOLE statement with 21000 — the documented `dedupeBy` trap, which costs the entire resource
+  // rather than one row.
+  const seen = new Set<string>()
+  return out.filter((p) => {
+    const k = `${p.as_of}|${p.dimension}`
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+}

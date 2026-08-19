@@ -94,6 +94,7 @@ jobs:
               security-prices \
               fund-holdings \
               derive-classifications \
+              macro-indicators \
               facets-refresh)
           fi
 

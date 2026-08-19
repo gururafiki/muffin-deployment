@@ -45,6 +45,7 @@ import {
   loadEquityReturns,
   loadPricesBatched,
   loadProfiles,
+  extractMacroPoints,
   openbbFetcher,
   planPriceFetches,
   PRICE_WINDOW_DAYS,
@@ -265,6 +266,7 @@ Deno.serve(async (req: Request) => {
   const TICKERS_RESOURCE = 'security-tickers'
   const DERIVE_RESOURCE = 'derive-classifications'
   const FACETS_RESOURCE = 'facets-refresh'
+  const MACRO_RESOURCE = 'macro-indicators'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const INDUSTRY_RESOURCE = 'security-industries'
   const SEC_PERF_RESOURCE = 'security-performance'
@@ -334,6 +336,10 @@ Deno.serve(async (req: Request) => {
     // rows the other resources already wrote, so the cost of running it often is ~2s of database
     // time and no provider quota at all.
     [FACETS_RESOURCE]: 60,
+    // Macro series move on a MONTHLY-to-DAILY cadence depending on the series (CPI monthly, EFFR
+    // daily), and the resource re-reads all of them in one pass. Six hours is well inside the
+    // slowest series' publication rhythm and far outside any provider's patience.
+    [MACRO_RESOURCE]: 6 * 60,
     // 41 currencies in one pass, so this FINISHES what it starts — a completion-shaped TTL is
     // correct here, unlike every backlog resource. Daily, because that is the cadence of the
     // underlying reference rates.
@@ -509,6 +515,77 @@ Deno.serve(async (req: Request) => {
     // anon (57014) the moment two filters were combined, because the planner's estimates collapse
     // under conjunction. The RPC is SECURITY DEFINER (refresh requires ownership) and refreshes
     // CONCURRENTLY, so readers are never blocked.
+    // Macro series, driven ENTIRELY by `market.macro_indicator`. There is no hardcoded list here:
+    // adding a series is a row, which is the whole reason that table is a control table. The route,
+    // provider and extra params all come from the row.
+    if (resource === MACRO_RESOURCE) {
+      const { data: series, error: sErr } = await market
+        .from('macro_indicator')
+        .select('code,route,provider,params,provider_country,unit')
+        .eq('enabled', true)
+        .order('sort_order')
+      if (sErr) throw new Error(`macro_indicator read failed: ${sErr.message}`)
+      const rows = series ?? []
+      if (rows.length === 0) throw new Error('no enabled macro series — the catalogue is empty')
+
+      const out: Record<string, string> = {}
+      let wrote = 0
+      let answered = 0
+      let lastError = ''
+      for (const s of rows) {
+        try {
+          const qs = new URLSearchParams({ provider: s.provider })
+          if (s.provider_country) qs.set('country', s.provider_country)
+          for (const [k, v] of Object.entries((s.params ?? {}) as Record<string, string>)) {
+            qs.set(k, String(v))
+          }
+          // A bounded window: these are latest-value panels, not chart history, and an unbounded
+          // request on a daily series is the difference between 30 rows and 20,000.
+          const since = new Date(Date.now() - 400 * 86_400_000).toISOString().slice(0, 10)
+          qs.set('start_date', since)
+          const res = await fetcher(`${s.route}?${qs.toString()}`)
+          const points = extractMacroPoints(res as Record<string, unknown>[], s.code)
+          if (points.length === 0) {
+            // AN EMPTY ANSWER IS NOT A FAILURE, and it is not success either. FRED retires series
+            // (JPNCPIALLMINMEI returns 0 rows), and a retired id must not sit as a silently blank
+            // panel forever — it is reported per series so the catalogue can be corrected.
+            out[s.code] = 'no data'
+            continue
+          }
+          answered += 1
+          const { error } = await market.from('macro_observation').upsert(
+            dedupeBy(
+              points.map((pt) => ({
+                indicator_code: s.code,
+                as_of: pt.as_of,
+                dimension: pt.dimension,
+                value: pt.value,
+                fetched_at: new Date().toISOString(),
+              })),
+              (r) => `${r.indicator_code}|${r.as_of}|${r.dimension}`,
+            ),
+            { onConflict: 'indicator_code,as_of,dimension' },
+          )
+          if (error) throw new Error(`macro_observation upsert failed: ${error.message}`)
+          wrote += points.length
+          out[s.code] = `${points.length} points`
+        } catch (e) {
+          // Per SERIES, so one dead route cannot take the other eleven with it — the same rule as
+          // batching provider calls everywhere else in this file.
+          lastError = e instanceof Error ? e.message : String(e)
+          out[s.code] = `failed: ${lastError.slice(0, 120)}`
+        }
+      }
+      // A run where NOTHING answered is a provider or network event, not twelve dead series.
+      // Reported as a failure so it cannot look like a quiet success.
+      if (answered === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false })
+        return json({ resource, ok: false, series: rows.length, wrote, detail: out, lastError }, 200)
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, series: rows.length, answered, wrote, detail: out })
+    }
+
     if (resource === FACETS_RESOURCE) {
       const { data, error } = await market.rpc('refresh_facets')
       if (error) throw new Error(`refresh_facets failed: ${error.message}`)
