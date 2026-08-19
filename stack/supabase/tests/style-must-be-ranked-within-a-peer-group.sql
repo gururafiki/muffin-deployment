@@ -243,6 +243,12 @@ insert into market.security_fundamentals (security_id, price_to_book, as_of, sou
   ('00000000-0000-0000-0000-000000007954', 0.5, now(), 'yfinance')
 on conflict (security_id) do update set price_to_book = excluded.price_to_book;
 
+-- THE SPINE IS A SNAPSHOT (migration 80). Fixtures inserted in this transaction are not in it
+-- until it is rebuilt, so every assertion below would read an empty view and "pass" or fail for
+-- the wrong reason. The NON-concurrent form is used deliberately: `refresh ... concurrently`
+-- cannot run inside a transaction block, and a test that cannot roll back is not a test.
+refresh materialized view market.security_facets;
+
 do $$
 declare n integer;
 begin

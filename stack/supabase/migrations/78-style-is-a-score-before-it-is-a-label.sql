@@ -180,7 +180,23 @@ notify pgrst, 'reload schema';
 -- 77 creates `security_facets` before `security_style` exists, and this replaces it with the style
 -- columns attached. Migration 13's pg_depend block drops it on every re-run, so both definitions
 -- are re-applied in order every pass.
-drop view if exists market.security_facets;
+-- DROP WHICHEVER FORM EXISTS. `IF EXISTS` does NOT protect against a relkind mismatch: measured
+-- 2026-08-19, `drop view if exists` on a materialized view raises `"x" is not a view`, and
+-- `drop materialized view if exists` on a plain view raises `"x" is not a materialized view` — so
+-- neither ordering of the two statements is safe, and the object survives both. Migration 80 turns
+-- this relation into a matview, so on every deploy after the first it arrives here as one.
+do $$
+declare k "char";
+begin
+  select c.relkind into k from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'market' and c.relname = 'security_facets';
+  if k = 'm' then
+    execute 'drop materialized view if exists market.security_facets cascade';
+  elsif k is not null then
+    execute 'drop view if exists market.security_facets cascade';
+  end if;
+end $$;
 
 create view market.security_facets as
 with country_lens as (

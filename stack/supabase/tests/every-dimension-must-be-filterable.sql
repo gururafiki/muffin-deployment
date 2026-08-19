@@ -52,6 +52,12 @@ insert into market.fx_rate (currency_code, as_of, usd_per_unit, source_code) val
   ('USD', current_date, 1, 'yfinance')
 on conflict (currency_code, as_of) do nothing;
 
+-- THE SPINE IS A SNAPSHOT (migration 80). Fixtures inserted in this transaction are not in it
+-- until it is rebuilt, so every assertion below would read an empty view and "pass" or fail for
+-- the wrong reason. The NON-concurrent form is used deliberately: `refresh ... concurrently`
+-- cannot run inside a transaction block, and a test that cannot roll back is not a test.
+refresh materialized view market.security_facets;
+
 -- 1. ALL SIX LENSES land on the security, from country membership alone.
 do $$
 declare r record;
@@ -105,6 +111,8 @@ insert into market.countries (iso2, name, flag, drillable) values ('ZB','Unclass
 insert into market.security (security_id, name, security_type_code, country_iso2, currency_code, market_cap) values
   ('00000000-0000-0000-0000-000000007704', 'T77 Unclassified', 'equity', 'ZB', 'USD', 5e9)
 on conflict (security_id) do nothing;
+
+refresh materialized view market.security_facets;   -- the ZB fixtures above are new
 
 do $$
 declare n integer; t text;
