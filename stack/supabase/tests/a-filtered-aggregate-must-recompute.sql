@@ -74,6 +74,12 @@ insert into market.performance (scope, scope_id, period, change_pct, total_retur
 on conflict (scope, scope_id, period) do update
   set change_pct = excluded.change_pct, total_return_pct = excluded.total_return_pct;
 
+-- THE SPINE IS A SNAPSHOT (migration 80). Fixtures inserted in this transaction are not in it
+-- until it is rebuilt, so every assertion below would read an empty view and "pass" or fail for
+-- the wrong reason. The NON-concurrent form is used deliberately: `refresh ... concurrently`
+-- cannot run inside a transaction block, and a test that cannot roll back is not a test.
+refresh materialized view market.security_facets;
+
 -- 1. THE UNFILTERED NUMBER, cap-weighted over the three priced names.
 --    (30*10 + 10*20 + 20*-5) / 60 = (300 + 200 - 100)/60 = 400/60 = 6.6667
 --    Equal-weighted: (10 + 20 - 5)/3 = 8.3333 — DIFFERENT, which is why both are returned.

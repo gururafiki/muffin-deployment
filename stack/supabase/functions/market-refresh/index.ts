@@ -264,6 +264,7 @@ Deno.serve(async (req: Request) => {
   const HOLDINGS_RESOURCE = 'fund-holdings'
   const TICKERS_RESOURCE = 'security-tickers'
   const DERIVE_RESOURCE = 'derive-classifications'
+  const FACETS_RESOURCE = 'facets-refresh'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const INDUSTRY_RESOURCE = 'security-industries'
   const SEC_PERF_RESOURCE = 'security-performance'
@@ -326,6 +327,13 @@ Deno.serve(async (req: Request) => {
     // quarter's answer.
     [HOLDINGS_RESOURCE]: REFERENCE_TTL_MINUTES,
     [DERIVE_RESOURCE]: REFERENCE_TTL_MINUTES,
+    // THE FILTER SPINE IS A SNAPSHOT (migration 80) and its TTL is the staleness the app inherits.
+    // Every column in it is reference data written by the backlogs, which the cron drives ~8x a
+    // day, so an hour bounds how long a newly ingested security can be missing from a filtered
+    // list. NOT a reference-length TTL: this resource does not fetch anything, it rebuilds from
+    // rows the other resources already wrote, so the cost of running it often is ~2s of database
+    // time and no provider quota at all.
+    [FACETS_RESOURCE]: 60,
     // 41 currencies in one pass, so this FINISHES what it starts — a completion-shaped TTL is
     // correct here, unlike every backlog resource. Daily, because that is the cadence of the
     // underlying reference rates.
@@ -497,6 +505,24 @@ Deno.serve(async (req: Request) => {
     // Standalone so a mapping edited in Studio (tracked_fund.represents_code) takes effect without
     // re-ingesting 38 filings — and so classification can be re-run when the holdings themselves are
     // still inside their 7-day TTL, which is what blocked the first production run.
+    // Rebuild the denormalised filter spine. See migration 80: as a plain view it timed out for
+    // anon (57014) the moment two filters were combined, because the planner's estimates collapse
+    // under conjunction. The RPC is SECURITY DEFINER (refresh requires ownership) and refreshes
+    // CONCURRENTLY, so readers are never blocked.
+    if (resource === FACETS_RESOURCE) {
+      const { data, error } = await market.rpc('refresh_facets')
+      if (error) throw new Error(`refresh_facets failed: ${error.message}`)
+      const row = Array.isArray(data) ? data[0] : data
+      const rows = Number(row?.rows_refreshed ?? 0)
+      // A spine with no rows is not a successful refresh — it is the Markets tab showing an empty
+      // universe. Fail loudly rather than recording ok on a snapshot of nothing.
+      if (!Number.isFinite(rows) || rows === 0) {
+        throw new Error('refresh_facets returned 0 rows — the filter spine would serve an empty universe')
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, rows_refreshed: rows, refreshed_at: row?.refreshed_at ?? null })
+    }
+
     if (resource === DERIVE_RESOURCE) {
       const { data: classified, error } = await market.rpc('derive_classifications')
       if (error) throw new Error(`derive_classifications failed: ${error.message}`)

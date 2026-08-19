@@ -98,7 +98,7 @@ do $$
 declare v record;
 begin
   for v in
-    select distinct dv.relname as name
+    select distinct dv.relname as name, dv.relkind as kind
     from pg_depend d
     join pg_rewrite r   on r.oid = d.objid
     join pg_class dv    on dv.oid = r.ev_class
@@ -108,7 +108,15 @@ begin
       and src.relname = 'security_current'
       and dv.relname <> 'security_current'
   loop
-    execute format('drop view if exists market.%I cascade', v.name);
+    -- DROP BY RELKIND. A MATERIALIZED view also has a `pg_rewrite` entry, so it is discovered by
+    -- the query above — and `drop view` on one raises `is not a view`, failing the whole deploy.
+    -- `security_facets` became a matview in migration 80 and broke this on the SECOND pass, after
+    -- the first had already succeeded.
+    if v.kind = 'm' then
+      execute format('drop materialized view if exists market.%I cascade', v.name);
+    else
+      execute format('drop view if exists market.%I cascade', v.name);
+    end if;
   end loop;
 end $$;
 
