@@ -6,20 +6,31 @@
 --
 -- ── WHAT IS ACTUALLY AVAILABLE, MEASURED 2026-08-19 ──────────────────────────────────────────
 --
--- The plan this implements recorded "4,506 indicators / 192 countries / 174 types — econdb — all
--- keyless and working". That is WRONG, and the correction is the reason this table is seeded the
--- way it is. Measured against the deployed openbb-api:
+-- ECONDB IS FREE. An earlier revision of this header said its data was not, inferring a paywall
+-- from a 204 and "no key configured". That was wrong, and the correction is worth more than the
+-- original claim.
 --
---   economy/available_indicators?provider=econdb   200, 4,506 rows   <- the CATALOGUE
---   economy/indicators?provider=econdb&symbol=...  204 NO CONTENT    <- the DATA, every symbol
+-- What actually happens: `openbb_econdb` declares an `econdb_api_key` credential but
+-- SELF-PROVISIONS when none is set — `helpers.create_token()` fetches a free 24-hour token, no
+-- account required. From this node that call returns 403 on every User-Agent, `create_token`
+-- SWALLOWS the failure and returns an empty string, the data request goes out with `token=`, and
+-- the result surfaces as a bare 204. From another IP the same endpoint returns 200 with a token.
 --
--- with and without a date range, single- and multi-country, and with no ECONDB key configured on
--- the container. What the earlier session verified was the catalogue; a catalogue endpoint
--- answering 200 says nothing about the series behind it. Two parameter facts cost time getting
--- there and are recorded so nobody re-derives them: the query wants `symbol_root` + `country`
--- (the composite `RGDPUS` 400s with "No valid combination of indicator symbols and countries were
--- supplied" — a far more useful error than the 204), and `country` is the lower-underscore form,
--- so the catalogue's own "United States" produces an unencoded space and never leaves curl.
+-- The block is one ENDPOINT, not the domain and not the data. From the node:
+-- `econdb.com/` -> 200, `/user/create_token/` -> 403, and `api/series/?token=<minted elsewhere>`
+-- -> 200 with `count: 5170`. So setting ECONDB_API_KEY unblocks the whole catalogue; the node can
+-- talk to econdb perfectly well, it just cannot mint its own credential. A free econdb account
+-- yields a permanent key. The temporary token also works and expires daily, which is not a
+-- deployment strategy.
+--
+-- The seed below therefore carries what needs NO credential at all. Adding econdb series is a
+-- ROW once a key is set — which is the entire point of this being a control table, and why the
+-- key question does not block the schema.
+--
+-- Two parameter facts recorded so nobody re-derives them: the query wants `symbol_root` +
+-- `country` (the composite `RGDPUS` 400s with "No valid combination of indicator symbols and
+-- countries were supplied" — far more useful than the 204), and `country` is the lower-underscore
+-- form, so the catalogue's own "United States" produces an unencoded space and never leaves curl.
 --
 -- So the seed below is ONLY series measured to return rows, not merely a 200:
 --
@@ -32,10 +43,10 @@
 --   crypto/price/historical        yfinance          BTC-USD
 --   index/price/historical         yfinance          ^GSPC
 --
--- Confirmed NOT working and therefore NOT seeded: econdb indicator data, and yield_curve via ecb
--- (500). Seeding a series that cannot answer would put a permanently empty panel on a country page
--- and make the resource look broken — the same reason the period picker only offers periods the
--- provider actually serves.
+-- NOT seeded: econdb series (they need ECONDB_API_KEY set first — see above; they are a row away,
+-- not a redesign) and yield_curve via ecb (500). Seeding a series that cannot answer would put a
+-- permanently empty panel on a country page and make the resource look broken — the same reason
+-- the period picker only offers periods the provider actually serves.
 --
 -- ── WHY OBSERVATIONS CARRY A `dimension` ─────────────────────────────────────────────────────
 --
