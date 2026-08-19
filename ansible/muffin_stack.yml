@@ -29,6 +29,54 @@
   # can fill the Always-Free boot volume and brick the whole run
   # ("No space left on device" from apt).
   pre_tasks:
+    # A DEAD APT MIRROR LOOKS LIKE A TRANSIENT NETWORK FAULT AND IS PERMANENT.
+    #
+    # Oracle's cloud-init pins a REGIONAL Ubuntu mirror in the image
+    # (uk-london-1-ad-3.clouds.ports.ubuntu.com). Canonical has since retired those names, so it
+    # NXDOMAINs, `apt-get update` fails, and the very first role dies with
+    # "Failed to update apt cache after 5 retries: " — a message with no cause in it, which reads
+    # exactly like a flaky repo and is not. It killed two deploys on 2026-08-19 before anyone
+    # looked at the node; the second was run purely because the first looked transient.
+    #
+    # Measured on the node: `uk-london-1-ad-3.clouds.ports.ubuntu.com` and the bare
+    # `uk-london-1.clouds.ports.ubuntu.com` both NXDOMAIN, while `ports.ubuntu.com` resolves and
+    # is already listed as a second entry in the same file. DNS itself is fine — download.docker.com
+    # resolves — so this cannot be diagnosed by testing connectivity.
+    #
+    # Repaired here rather than in the image because it must hold for a REPLACED node too, and
+    # because a mirror that resolves today can be retired tomorrow: the check is "does the
+    # configured mirror resolve", not "is it the one hostname we know about".
+    - name: Find apt mirrors that no longer resolve
+      ansible.builtin.shell: |
+        set -uo pipefail
+        found=$(grep -rhoE "[A-Za-z0-9.-]+\.clouds\.ports\.ubuntu\.com" \
+                  /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | sort -u || true)
+        for h in $found; do
+          getent hosts "$h" >/dev/null 2>&1 || echo "$h"
+        done
+      args:
+        executable: /bin/bash
+      register: dead_apt_mirrors
+      changed_when: false
+      check_mode: false
+
+    - name: Repoint dead mirrors at the canonical ports.ubuntu.com
+      # Idempotent by construction: after the rewrite the dead hostname is gone, so the detection
+      # above returns nothing on the next run and this task does not fire. `grep -rl` finds the
+      # files itself, which is why there is no path list to keep in sync and no `failed_when:
+      # false` masking a real error — noble uses the deb822 `ubuntu.sources` and may have no
+      # `sources.list` at all.
+      ansible.builtin.shell: |
+        set -uo pipefail
+        for h in {{ dead_apt_mirrors.stdout_lines | map('quote') | join(' ') }}; do
+          grep -rlF "$h" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null \
+            | xargs -r sed -i "s|$h|ports.ubuntu.com|g"
+        done
+      args:
+        executable: /bin/bash
+      when: dead_apt_mirrors.stdout_lines | length > 0
+      changed_when: true
+
     - name: Clear the apt package cache
       command: apt-get clean
       changed_when: true
