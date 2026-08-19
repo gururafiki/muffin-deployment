@@ -92,6 +92,17 @@ select
     where st2.security_id = s.security_id
     order by ds2.priority desc, st2.as_of desc
     limit 1) as industry,
+  -- MUST SIT HERE, matching migration 35's column ORDER exactly. `create or replace view` can only
+  -- APPEND: it cannot rename, reorder or drop. Adding `industry_code` to 35 and not to 56 makes
+  -- this statement try to DROP it, and putting it after the two country columns makes 35's
+  -- definition try to rename them. Both fail the deploy on the FIRST pass, which is at least loud.
+  (select n.code
+     from market.security_taxonomy st2
+     join market.taxonomy_node n on n.node_id = st2.node_id and n.taxonomy_id = 'muffin' and n.level = 2
+     join market.data_source ds2  on ds2.code = st2.source_code
+    where st2.security_id = s.security_id
+    order by ds2.priority desc, st2.as_of desc
+    limit 1) as industry_code,
   -- Appended, so nothing that reads this view by position breaks.
   s.country_iso2          as filed_country_iso2,
   s.provider_country_iso2 as provider_country_iso2

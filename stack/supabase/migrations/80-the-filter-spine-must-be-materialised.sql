@@ -92,6 +92,7 @@ select
   sc.security_type_code,
   sc.sector_id,
   sc.industry,
+  sc.industry_code,
   sc.country_iso2,
   sc.country_name,
   c.region_id                     as app_region_id,
@@ -143,6 +144,7 @@ create unique index if not exists security_facets_pk on market.security_facets (
 -- is precisely the property the un-materialised view did not have.
 create index if not exists security_facets_sector_idx    on market.security_facets (sector_id);
 create index if not exists security_facets_industry_idx  on market.security_facets (industry);
+create index if not exists security_facets_ind_code_idx   on market.security_facets (industry_code);
 create index if not exists security_facets_country_idx   on market.security_facets (country_iso2);
 create index if not exists security_facets_msci_tier_idx on market.security_facets (msci_tier);
 create index if not exists security_facets_msci_reg_idx  on market.security_facets (msci_region);
