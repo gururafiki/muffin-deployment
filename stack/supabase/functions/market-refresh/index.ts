@@ -267,6 +267,7 @@ Deno.serve(async (req: Request) => {
   const DERIVE_RESOURCE = 'derive-classifications'
   const FACETS_RESOURCE = 'facets-refresh'
   const MACRO_RESOURCE = 'macro-indicators'
+  const PROMOTE_WAVE_RESOURCE = 'promote-wave'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const INDUSTRY_RESOURCE = 'security-industries'
   const SEC_PERF_RESOURCE = 'security-performance'
@@ -340,6 +341,10 @@ Deno.serve(async (req: Request) => {
     // daily), and the resource re-reads all of them in one pass. Six hours is well inside the
     // slowest series' publication rhythm and far outside any provider's patience.
     [MACRO_RESOURCE]: 6 * 60,
+    // A BACKLOG, so a backlog-shaped TTL: each run drains a bounded slice of 92,826 candidates and
+    // the TTL only has to permit the next run. A completion-shaped TTL here would not slow the
+    // resource down, it would stall the queue for its length.
+    [PROMOTE_WAVE_RESOURCE]: BACKLOG_TTL_MINUTES,
     // 41 currencies in one pass, so this FINISHES what it starts — a completion-shaped TTL is
     // correct here, unlike every backlog resource. Daily, because that is the cadence of the
     // underlying reference rates.
@@ -518,6 +523,99 @@ Deno.serve(async (req: Request) => {
     // Macro series, driven ENTIRELY by `market.macro_indicator`. There is no hardcoded list here:
     // adding a series is a row, which is the whole reason that table is a control table. The route,
     // provider and extra params all come from the row.
+    // Promote a BOUNDED WAVE of listings. `pending_promotion` (migration 84) already applies the
+    // order, the per-venue opt-in and the name dedupe against securities we hold — this resource
+    // only has to spend the budget carefully.
+    //
+    // WHY A CAP AT ALL. Every security promoted here becomes work for `security-profiles`,
+    // `security-prices`, `security-statements`, `security-industries` and `security-fundamentals`,
+    // every one of which is limited by the SAME provider budget. Promoting faster than they drain
+    // does not add coverage, it starves the securities people are already looking at.
+    if (resource === PROMOTE_WAVE_RESOURCE) {
+      // Default deliberately small, and capped at 100 REGARDLESS of `limit`. The shared
+      // `scopeLimit` already clamps to 1,000, which is the right ceiling for reading a backlog and
+      // the wrong one for CREATING securities: 1,000 new rows is a month of downstream provider
+      // budget committed by one call.
+      const cap = Math.min(scopeLimit ?? 25, 100)
+
+      const { data: queue, error: qErr } = await market
+        .from('pending_promotion')
+        .select('figi,composite_figi,exch_code,ticker,name,country_iso2,provider_symbol')
+        .limit(cap)
+      if (qErr) throw new Error(`pending_promotion read failed: ${qErr.message}`)
+      const rows = queue ?? []
+      if (rows.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({
+          resource, promoted: 0,
+          note: 'nothing eligible — every venue is opt-out by default, see market.exchange.promotion_enabled',
+        })
+      }
+
+      // DEDUPE WITHIN THE WAVE. `pending_promotion` excludes names we already hold, but it cannot
+      // exclude a name appearing TWICE in the same wave — the London and Frankfurt lines of one new
+      // company are two untracked listings of one issuer, and promoting both mints two securities
+      // that then each consume profile, price and statement calls.
+      const seen = new Set<string>()
+      const wave = rows.filter((r) => {
+        const k = String(r.name ?? '').trim().toUpperCase()
+        if (!k || seen.has(k)) return false
+        seen.add(k)
+        return true
+      })
+
+      const securities: Record<string, unknown>[] = []
+      const identifiers: Record<string, unknown>[] = []
+      const providerSymbols: Record<string, unknown>[] = []
+      for (const r of wave) {
+        const id = crypto.randomUUID()
+        securities.push({
+          security_id: id,
+          name: r.name,
+          security_type_code: 'equity',
+          country_iso2: r.country_iso2 ?? null,
+          is_tradeable: true,
+        })
+        identifiers.push({ kind_code: 'figi', value: r.composite_figi ?? r.figi, security_id: id, source_code: 'openfigi' })
+        if (r.ticker) {
+          identifiers.push({ kind_code: 'ticker', value: r.ticker, security_id: id, source_code: 'openfigi' })
+        }
+        if (r.provider_symbol) {
+          providerSymbols.push({ security_id: id, provider_code: 'yfinance', symbol: r.provider_symbol })
+        }
+      }
+
+      const { error: sErr } = await market.from('security').insert(securities)
+      if (sErr) throw new Error(`security insert failed: ${sErr.message}`)
+
+      // FIGI FIRST — it is what stops these listings being offered as untracked again, so a partial
+      // failure after this point leaves the wave promoted rather than duplicated on the next run.
+      // `dedupeBy` because one ticker can appear on two venues in a single wave, and the same key
+      // twice fails the WHOLE statement with 21000.
+      const { error: iErr } = await market.from('security_identifier').upsert(
+        dedupeBy(identifiers, (r) => `${r.kind_code}|${r.value}`),
+        { onConflict: 'kind_code,value', ignoreDuplicates: true },
+      )
+      if (iErr) throw new Error(`identifier insert failed: ${iErr.message}`)
+
+      if (providerSymbols.length > 0) {
+        const { error: pErr } = await market.from('security_provider_symbol').upsert(
+          dedupeBy(providerSymbols, (r) => `${r.security_id}|${r.provider_code}`),
+          { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
+        )
+        if (pErr) throw new Error(`provider symbol insert failed: ${pErr.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        promoted: wave.length,
+        skipped_same_name_in_wave: rows.length - wave.length,
+        cap,
+        venues: [...new Set(wave.map((r) => r.exch_code))],
+      })
+    }
+
     if (resource === MACRO_RESOURCE) {
       const { data: series, error: sErr } = await market
         .from('macro_indicator')
