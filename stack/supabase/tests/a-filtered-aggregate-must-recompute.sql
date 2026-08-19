@@ -210,4 +210,109 @@ begin
   end if;
 end $$;
 
+-- 10. CONCENTRATION IS REPORTED, AND IT IS A DIFFERENT QUESTION FROM COVERAGE.
+--     Measured on production 2026-08-19: developed large-cap value IT returned +327.40% with
+--     `weight_covered` 0.98 — every completeness guard satisfied — and 240 of those 327 points
+--     came from TWO companies (MU +670.8% at $1,088.7bn, SNDK +3,471.6% at $185.6bn). The returns
+--     were real; the omission was that nothing in the response said the number was two names.
+--
+--     In this fixture AAA is $30bn at +10% (contribution 300) and BBB $10bn at +20% (200) and CCC
+--     $20bn at -5% (-100). Absolute contributions are 300/200/100, summing to 600, so AAA leads
+--     with 0.5. Note CCC counts as 100, not -100: a large NEGATIVE mover is as much "what this
+--     number is made of" as a positive one.
+do $$
+declare who text; share numeric; wc numeric;
+begin
+  select top_contributor, top_contributor_share, weight_covered into who, share, wc
+    from market.aggregate_performance(p_period => '1y', p_group_by => 'sector_id')
+   where bucket = 'financials';
+  if who is distinct from 'AAA' then
+    raise exception 'top_contributor is % (expected AAA, |30bn*10| = 300, the largest influence)', coalesce(who,'<null>');
+  end if;
+  if share is distinct from 0.5000 then
+    raise exception
+      'top_contributor_share is % (expected 0.5000 = 300 of |300|+|200|+|-100|) — if this is 0.6 the negative contribution was signed rather than absolute, and a big faller would hide behind the risers', coalesce(share::text,'<null>');
+  end if;
+  -- The point of the whole assertion: coverage and concentration disagree, and both are reported.
+  if wc is null or wc >= 1 then
+    raise exception 'coverage should be below 1 here (%) — the two measures must be independently visible', wc;
+  end if;
+end $$;
+
+-- 11. A BUCKET WITH ONE PRICED SECURITY IS 100% CONCENTRATED, and must say so rather than
+--     reporting a confident sector return built from a single company.
+do $$
+declare share numeric; k integer;
+begin
+  select top_contributor_share, constituents into share, k
+    from market.aggregate_performance(p_period => '1y', p_group_by => 'country_iso2',
+                                      p_country => array['ZH'])
+   where bucket = 'ZH';
+  if k <> 1 then raise exception 'fixture: expected 1 priced security in ZH, got %', k; end if;
+  if share is distinct from 1.0000 then
+    raise exception 'a single-security bucket reported top_contributor_share % (expected 1.0000)', coalesce(share::text,'<null>');
+  end if;
+end $$;
+
+-- 12. THE THREE PLAUSIBLE RANKINGS MUST PICK DIFFERENT SECURITIES, or the test cannot tell them
+--     apart. The first version of this test could not: its top contributor was also its largest
+--     holding, so ranking by market cap and ranking by influence gave the same answer and the
+--     mutation "rank by weight instead" passed clean. Production is exactly where they diverge —
+--     SNDK is 3.2% of its bucket by cap and supplies 112 of its 327 points.
+--
+--       WHALE  $100bn  +1%    -> contribution   +100   (largest by WEIGHT)
+--       RISER   $10bn  +30%   -> contribution   +300   (largest by SIGNED contribution)
+--       CRASH   $20bn  -50%   -> contribution  -1,000  (largest by ABSOLUTE influence)
+--
+--     Only the absolute ranking is right: a company that halved is the biggest single thing this
+--     average is made of.
+insert into market.security (security_id, name, security_type_code, country_iso2, currency_code, market_cap) values
+  ('00000000-0000-0000-0000-000000008011', 'T80 Whale', 'equity', 'ZG', 'USD', 100e9),
+  ('00000000-0000-0000-0000-000000008012', 'T80 Riser', 'equity', 'ZG', 'USD',  10e9),
+  ('00000000-0000-0000-0000-000000008013', 'T80 Crash', 'equity', 'ZG', 'USD',  20e9)
+on conflict (security_id) do nothing;
+insert into market.listing (security_id, exch_code, symbol, provider_symbol, is_primary, source_code) values
+  ('00000000-0000-0000-0000-000000008011','ZG','WHALE','WHALE',true,'yfinance'),
+  ('00000000-0000-0000-0000-000000008012','ZG','RISER','RISER',true,'yfinance'),
+  ('00000000-0000-0000-0000-000000008013','ZG','CRASH','CRASH',true,'yfinance')
+on conflict do nothing;
+insert into market.security_taxonomy (security_id, node_id, source_code, as_of)
+select sid, node_id, 'yfinance', now()
+  from market.taxonomy_node,
+       (values ('00000000-0000-0000-0000-000000008011'::uuid),
+               ('00000000-0000-0000-0000-000000008012'::uuid),
+               ('00000000-0000-0000-0000-000000008013'::uuid)) as v(sid)
+ where taxonomy_id = 'muffin' and level = 1 and code = 'energy'
+on conflict do nothing;
+insert into market.performance (scope, scope_id, period, change_pct, total_return_pct, as_of, stale_after, source) values
+  ('instrument','WHALE','1y',   1.0, null, now(), now() + interval '1 day','yfinance'),
+  ('instrument','RISER','1y',  30.0, null, now(), now() + interval '1 day','yfinance'),
+  ('instrument','CRASH','1y', -50.0, null, now(), now() + interval '1 day','yfinance')
+on conflict (scope, scope_id, period) do update set change_pct = excluded.change_pct;
+
+refresh materialized view market.security_facets;
+
+do $$
+declare who text; share numeric;
+begin
+  select top_contributor, top_contributor_share into who, share
+    from market.aggregate_performance(p_period => '1y', p_group_by => 'sector_id')
+   where bucket = 'energy';
+  if who = 'WHALE' then
+    raise exception
+      'top_contributor is WHALE — that is the largest HOLDING ($100bn), not the largest influence. Concentration in a weighted mean lives in weight x return, and WHALE moved 1%%';
+  end if;
+  if who = 'RISER' then
+    raise exception
+      'top_contributor is RISER — that is the largest POSITIVE contribution. CRASH is -1,000 against RISER''s +300, so signed ordering hides the biggest single driver behind the risers';
+  end if;
+  if who is distinct from 'CRASH' then
+    raise exception 'top_contributor is % (expected CRASH, |20bn * -50| = 1,000)', coalesce(who,'<null>');
+  end if;
+  -- |−1000| / (|100| + |300| + |−1000|) = 1000/1400 = 0.7143
+  if share is distinct from 0.7143 then
+    raise exception 'top_contributor_share is % (expected 0.7143 = 1000/1400)', coalesce(share::text,'<null>');
+  end if;
+end $$;
+
 rollback;
