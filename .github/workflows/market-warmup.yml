@@ -95,6 +95,7 @@ jobs:
               fund-holdings \
               derive-classifications \
               macro-indicators \
+              promote-wave \
               facets-refresh)
           fi
 

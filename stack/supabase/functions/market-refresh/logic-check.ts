@@ -1350,5 +1350,39 @@ console.log('\nextractMacroPoints — junk is dropped, not coerced')
   check(extractMacroPoints([], 'x').length === 0, 'an empty response yields no points')
 }
 
+
+// ── promote-wave — a bounded, deduped drain ──────────────────────────────────
+//
+// Source checks rather than behavioural ones, because this resource CREATES SECURITIES and every
+// one it creates becomes work for five rate-limited backlogs. The two properties that matter are
+// both silent when broken: a cap that does not bind, and a wave that mints one company twice.
+console.log('\npromote-wave — spending a fixed provider budget')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const fn = idx.slice(idx.indexOf("resource === PROMOTE_WAVE_RESOURCE"))
+  const body = fn.slice(0, fn.indexOf('if (resource === MACRO_RESOURCE)'))
+
+  check(
+    /Math\.min\(scopeLimit \?\? \d+, 100\)/.test(body),
+    'the wave is capped at 100 REGARDLESS of `limit` — scopeLimit alone clamps to 1000, which is the right ceiling for READING a backlog and the wrong one for creating securities',
+  )
+  check(
+    body.includes('seen.has(k)') && body.includes('toUpperCase()'),
+    'the wave dedupes by NAME within itself — pending_promotion excludes names we already hold, but not a name appearing twice in one wave (the London and Frankfurt lines of one new company)',
+  )
+  check(
+    body.includes('dedupeBy(identifiers'),
+    'identifiers go through dedupeBy — one ticker on two venues in a single wave carries the same key twice and fails the WHOLE statement with 21000',
+  )
+  check(
+    body.indexOf("from('security_identifier')") > body.indexOf("from('security')"),
+    'the FIGI is written AFTER the security and before anything else — it is what stops these listings being offered as untracked again, so a partial failure leaves the wave promoted rather than duplicated next run',
+  )
+  check(
+    body.includes('every venue is opt-out by default'),
+    'an empty queue says WHY rather than reporting a bare zero — with 92,826 candidates, "promoted 0" is otherwise indistinguishable from a broken resource',
+  )
+}
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
