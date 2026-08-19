@@ -174,7 +174,20 @@ select
      join market.data_source ds2  on ds2.code = st2.source_code
     where st2.security_id = s.security_id
     order by ds2.priority desc, st2.as_of desc
-    limit 1) as industry
+    limit 1) as industry,
+  -- THE STABLE KEY FOR THE SAME FACT. `sector_id` above is a CODE and `industry` was a NAME — an
+  -- asymmetry with real consequences once industry became filterable: a filter keyed on
+  -- "Specialty Chemicals" is keyed on a yfinance display string, so a provider rename silently
+  -- matches nothing and a shared URL quietly returns an empty list. The code
+  -- (`information-technology--semiconductors`) is ours and does not move. Added beside the name
+  -- rather than replacing it, because the name is what a person reads.
+  (select n.code
+     from market.security_taxonomy st2
+     join market.taxonomy_node n on n.node_id = st2.node_id and n.taxonomy_id = 'muffin' and n.level = 2
+     join market.data_source ds2  on ds2.code = st2.source_code
+    where st2.security_id = s.security_id
+    order by ds2.priority desc, st2.as_of desc
+    limit 1) as industry_code
 from market.security s
 left join market.security_symbol sym      on sym.security_id = s.security_id
 left join market.security_identifier isin on isin.security_id = s.security_id and isin.kind_code = 'isin'

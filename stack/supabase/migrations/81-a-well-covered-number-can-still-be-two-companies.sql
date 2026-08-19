@@ -87,6 +87,7 @@ with filtered as (
     case p_group_by
       when 'sector_id'      then f.sector_id
       when 'industry'       then f.industry
+      when 'industry_code'  then f.industry_code
       when 'country_iso2'   then f.country_iso2
       when 'msci_tier'      then f.msci_tier
       when 'msci_region'    then f.msci_region
@@ -105,7 +106,9 @@ with filtered as (
   where (p_security_type      is null or f.security_type_code = any(p_security_type))
     and (p_country            is null or f.country_iso2       = any(p_country))
     and (p_sector             is null or f.sector_id          = any(p_sector))
-    and (p_industry           is null or f.industry           = any(p_industry))
+    -- Matches EITHER spelling: the stable code is what a saved filter should carry, but a
+    -- caller holding a display name must not silently get an empty bucket.
+    and (p_industry           is null or f.industry = any(p_industry) or f.industry_code = any(p_industry))
     and (p_msci_tier          is null or f.msci_tier          = any(p_msci_tier))
     and (p_msci_region        is null or f.msci_region        = any(p_msci_region))
     and (p_ftse_tier          is null or f.ftse_tier          = any(p_ftse_tier))
