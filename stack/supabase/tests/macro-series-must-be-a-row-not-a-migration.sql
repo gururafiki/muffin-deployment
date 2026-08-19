@@ -23,8 +23,10 @@ begin
   select count(*) into n from market.macro_indicator;
   if n < 8 then raise exception 'expected the macro catalogue to be seeded, got % rows', n; end if;
 
-  -- econdb indicator DATA returns 204 for every symbol (measured 2026-08-19); its catalogue is
-  -- free but the series are not. Seeding one would put a permanently empty panel on a page.
+  -- econdb series need ECONDB_API_KEY: the node is 403d from econdb's token-minting endpoint, so
+  -- the provider self-provisions an EMPTY token and every request 204s. econdb itself is free —
+  -- this is a missing credential, not a paywall — but until one is set, seeding an econdb series
+  -- would put a permanently empty panel on a page. Delete this guard when the key is configured.
   select count(*) into bad from market.macro_indicator where provider = 'econdb';
   if bad <> 0 then
     raise exception
