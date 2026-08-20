@@ -972,6 +972,14 @@ export const PRICE_WINDOW_DAYS = 400
  * it changes what the deployment costs, so it should be changed here and nowhere else.
  */
 export const PRICE_HISTORY_YEARS = 20
+
+/**
+ * How long an article is kept. The provider only reaches back about a month, so a weekly refresh
+ * adds roughly a quarter of a fresh set each time — unbounded, that compounds for ever for data
+ * whose value decays in days. 90 days is deep enough for a stock page and shallow enough that the
+ * table settles rather than grows.
+ */
+export const NEWS_RETENTION_DAYS = 90
 /** Inside this many days the series is kept DAILY; before it, weekly. */
 export const PRICE_DAILY_DAYS = 90
 /**

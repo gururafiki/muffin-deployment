@@ -93,6 +93,7 @@ jobs:
               sec-cik-map \
               security-xbrl \
               security-share-stats \
+              security-news \
               security-corporate-actions \
               security-dividends \
               security-performance \
