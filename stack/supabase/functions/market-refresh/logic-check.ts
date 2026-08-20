@@ -1073,6 +1073,7 @@ console.log('\nresource registry — the cron and the function agree')
     XBRL_RESOURCE: [],
     SHARE_STATS_RESOURCE: [],
     NEWS_RESOURCE: [],
+    SYMBOL_REPAIR_RESOURCE: [],
     // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
     // `security_id` alone, so one row is one security.
     FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
@@ -1747,6 +1748,36 @@ console.log('\nmigration filenames sort numerically')
     firstDiff === -1,
     'a plain string sort of the migrations equals a numeric sort',
     firstDiff === -1 ? '' : `diverges at ${firstDiff}: string sort has ${lexical[firstDiff]}, numeric has ${numeric[firstDiff]}`,
+  )
+}
+
+
+// ── security-symbol-repair ───────────────────────────────────────────────────────────────────
+console.log('\nsecurity-symbol-repair')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const seg = idx.slice(idx.indexOf('resource === SYMBOL_REPAIR_RESOURCE'))
+  const body = seg.slice(0, seg.indexOf('resource === NEWS_RESOURCE')).replace(/\/\/[^\n]*/g, '')
+
+  check(
+    /if \(rows\.length > 0\) \{ adopted = candidate; break \}/.test(body),
+    'a candidate is adopted ONLY when the provider answers — the rules match company names as well as class shares, so silence is the provider saying the spelling is wrong',
+  )
+  check(
+    /clear_symbol_caches/.test(body),
+    'a corrected symbol clears every symbol-keyed cache — fixing the spelling and leaving the marks set keeps the security excluded for 30 days by the flags that recorded the wrong name',
+  )
+  check(
+    /symbol_repair_at/.test(body) && (body.match(/symbol_repair_at/g) ?? []).length >= 2,
+    'the attempt is stamped whether or not a repair was found, in BOTH exits — otherwise a security whose spelling is already right is re-examined every run for ever',
+  )
+  check(
+    /encodeURIComponent\(candidate\)/.test(body),
+    'the candidate is URL-encoded — these symbols contain the characters that make an unencoded one truncate the query silently',
+  )
+  check(
+    /if \(throttled\(msg\)\) \{ failed\+\+; break \}/.test(body),
+    'a throttle stops the probing rather than concluding every remaining spelling is wrong',
   )
 }
 

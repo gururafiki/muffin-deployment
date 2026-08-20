@@ -94,6 +94,7 @@ jobs:
               security-xbrl \
               security-share-stats \
               security-news \
+              security-symbol-repair \
               security-corporate-actions \
               security-dividends \
               security-performance \
