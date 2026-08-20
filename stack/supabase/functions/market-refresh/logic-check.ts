@@ -1439,5 +1439,79 @@ console.log('\nsecurity-dividends — the 400 that means "this company pays none
   )
 }
 
+
+// ── security-statements — the filing is the better record ────────────────────
+//
+// 0 of 104,972 statement rows carried a reporting currency, while the `currency` column and the
+// code that reads `reported_currency` had both existed since migration 29 — yfinance simply never
+// sends it. SEC does, along with 18 annual periods against yfinance's 4. Both properties are
+// silent when lost: the rows still arrive, just shallower and unlabelled.
+console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const seg = idx.slice(idx.indexOf('resource === STATEMENTS_RESOURCE'))
+  const withComments = seg.slice(0, seg.indexOf('if (resource === FUNDAMENTALS_RESOURCE)'))
+  // Comments stripped: every string below also appears in the prose explaining it, and matching
+  // the prose is how three guards passed a mutation earlier in this session.
+  const body = withComments.replace(/\/\/[^\n]*/g, '')
+
+  check(
+    /provider=sec/.test(body),
+    'SEC is called at all — it is the only provider here that returns reported_currency',
+  )
+  check(
+    /period=annual/.test(body),
+    'SEC is asked for ANNUAL periods — period=quarter answers 422, measured',
+  )
+  // BOTH indexes must exist. `indexOf` returns -1 for a missing needle and -1 is less than any
+  // real index, so a bare `sec < yfinance` PASSES when SEC is gone — an ordering guard that is
+  // satisfied by absence of the thing being ordered.
+  check(
+    body.indexOf('provider=sec') > -1 &&
+      body.indexOf('provider=yfinance') > -1 &&
+      body.indexOf('provider=sec') < body.indexOf('provider=yfinance'),
+    'SEC is tried BEFORE yfinance — the filing carries the currency and 18 periods, the fallback carries 4 and none',
+  )
+  // SCOPED TO THE SEC HALF, and that is the whole point of the guard. The yfinance branch below
+  // writes the identical line, so an unscoped `/currency: r.reported_currency/` matched even with
+  // the SEC write deleted — it passed a mutation and certified nothing. Position is what
+  // distinguishes them: the SEC write must land BEFORE the fallback's call.
+  check(
+    body.indexOf('currency: r.reported_currency') > -1 &&
+      body.indexOf('currency: r.reported_currency') < body.indexOf('provider=yfinance'),
+    'reported_currency is written to the currency COLUMN IN THE SEC BRANCH — the column has existed since migration 29 and is 0 of 104,972 because the fallback provider never sends it',
+  )
+  check(
+    /source_code:\s*'sec'/.test(body),
+    "rows from the filing are attributed to 'sec', so a later disagreement can be resolved by source priority",
+  )
+  check(
+    /item\.usTicker/.test(body) && /if \(!item\.usTicker\) continue/.test(body),
+    'SEC is skipped when there is no US ticker rather than asked with a symbol it cannot resolve (SAP works, SAP.DE does not)',
+  )
+  check(
+    /group\.every\(\(g\) => rowsFor\.has/.test(body),
+    'yfinance is not called when the filing already answered — a 4-period series must not overwrite an 18-period one',
+  )
+  check(
+    /secFailed\+\+/.test(body) && !/usTicker[\s\S]{0,400}statements_missing_at/.test(body),
+    'a SEC failure is counted, NOT marked — yfinance is the fallback, and a foreign filer legitimately has nothing there',
+  )
+  // The widening needs its own exit, or the `no_currency` half re-asks for ever — the shape that
+  // has now cost this pipeline five separate resources.
+  check(
+    /update\(\{\s*statement_currency_missing_at:/.test(body),
+    'a company SEC has no filings for is recorded, so the no_currency half of the backlog can drain',
+  )
+  check(
+    /if \(secAsked && secRows === 0 && secOk/.test(body),
+    'that mark requires the security to have been asked to completion AND the endpoint to have answered for someone — a failure, a throttle or a deadline is not evidence it does not file',
+  )
+  check(
+    /secOk = true/.test(body),
+    'secOk is actually set when SEC returns rows — an success flag that is never raised marks nothing, and one that is never checked marks everything',
+  )
+}
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

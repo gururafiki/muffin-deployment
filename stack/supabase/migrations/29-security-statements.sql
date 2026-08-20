@@ -32,7 +32,13 @@ alter table market.security add column if not exists statements_missing_at times
 
 -- The backlog: has a symbol, has no statements yet. Ordered by fund weight, like every other one,
 -- so the names a page actually renders are filled first.
-create or replace view market.pending_statements as
+-- DROPPED FIRST, NOT `create or replace`. Migration 88 widens this view with `us_ticker` and
+-- `want`, and migrations re-run in order on EVERY deploy — so on the second pass this file meets
+-- 88's five-column view and `create or replace` fails with "cannot drop columns from view". The
+-- later file wins; this one must be able to shrink it back.
+drop view if exists market.pending_statements;
+
+create view market.pending_statements as
 select
   s.security_id,
   coalesce(ps.symbol, t.value) as symbol,

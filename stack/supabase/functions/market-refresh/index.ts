@@ -943,7 +943,7 @@ Deno.serve(async (req: Request) => {
     if (resource === STATEMENTS_RESOURCE) {
       const { data: pending, error: pErr } = await market
         .from('pending_statements')
-        .select('security_id,symbol')
+        .select('security_id,symbol,us_ticker,want')
         .order('best_weight', { ascending: false })
         // 60, because it is three calls PER SECURITY — 180 requests a run, which fills the worker.
         // It was briefly 300 on the assumption that batching worked; it does not (see STMT_BATCH).
@@ -952,11 +952,20 @@ Deno.serve(async (req: Request) => {
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
         symbol: r.symbol as string,
+        usTicker: (r.us_ticker as string | null) ?? null,
+        want: (r.want as string | null) ?? 'missing',
       }))
       if (wanted.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
         return json({ resource, written: 0, remaining: 0, note: 'every security has statements' })
       }
+      let fromSec = 0
+      let secFailed = 0
+      let secNone = 0
+      // Proof the SEC endpoint produced rows for SOMEONE this run. Without it, a throttled or
+      // broken provider marks every security it touches as "does not file" — the defect that put
+      // `statements_missing_at` on 5,613 securities in one afternoon.
+      let secOk = false
 
       const deadline = Date.now() + 60_000
       let written = 0
@@ -1003,9 +1012,86 @@ Deno.serve(async (req: Request) => {
         const rowsFor = new Map<string, Record<string, unknown>[]>()
         const answered = new Set<string>()
 
+        // SEC FIRST, WHERE THERE IS A US TICKER TO ASK WITH.
+        //
+        // It is the only provider here that returns `reported_currency`, and it returns 18 annual
+        // periods against yfinance's 4 — measured on AAPL, 2008-09-27 .. 2025-09-27. Asked one
+        // symbol at a time because SEC is per-filer; that is the same shape this resource already
+        // has (STMT_BATCH is 1 — the batched version was measured returning nothing).
+        //
+        // ANNUAL ONLY: `period=quarter` answers 422. So this deepens history without changing
+        // frequency, and anything wanting 20 years of quarters needs companyfacts directly.
+        for (const item of group) {
+          if (!item.usTicker) continue
+          if (Date.now() > deadline - 8_000) break
+          const sym = item.symbol.toUpperCase()
+          // Per-security, not per-run. A tally cannot be evidence about one symbol: `secOk` says
+          // the endpoint produced rows for SOMEONE, `secAsked` that we finished asking about THIS
+          // one, and only both together justify recording that SEC has nothing for it.
+          let secAsked = true
+          let secRows = 0
+          for (const kind of ['income', 'balance', 'cash'] as const) {
+            const remaining = deadline - Date.now()
+            if (remaining < 5_000) break
+            try {
+              const got = await fetcher(
+                `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(item.usTicker)}` +
+                  `&provider=sec&period=annual&limit=25`,
+                Math.min(20_000, remaining),
+              )
+              for (const r of got) {
+                const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
+                if (!period) continue
+                answered.add(sym)
+                symbolsAnswered.add(sym)
+                const list = rowsFor.get(sym) ?? []
+                list.push({
+                  security_id: item.securityId,
+                  statement: kind,
+                  period_ending: period,
+                  period_type: r.fiscal_period ? String(r.fiscal_period) : null,
+                  // THE POINT OF THIS PROVIDER. 0 of 104,972 rows carried a currency before it.
+                  currency: r.reported_currency ? String(r.reported_currency) : null,
+                  data: r,
+                  source_code: 'sec',
+                  as_of: new Date().toISOString(),
+                })
+                rowsFor.set(sym, list)
+              }
+              if (got.length > 0) { fromSec++; secRows += got.length; secOk = true }
+            } catch (e) {
+              // A SEC failure is NOT a statement failure — yfinance below is the fallback, and a
+              // foreign filer with a US line legitimately has nothing here. Counted, not marked.
+              secFailed++
+              secAsked = false
+              const msg = e instanceof Error ? e.message : String(e)
+              if (throttled(msg)) { throttledOut = true; break }
+            }
+          }
+          // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the `no_currency` half of the backlog
+          // can never drain. A US OTC line belonging to a foreign private issuer that files nothing
+          // would otherwise be re-queued every run: yfinance re-writes the same four currency-less
+          // periods, the view re-admits it, forever. Marked ONLY when this security was asked to
+          // completion AND the endpoint answered for someone in this run — a failure or a deadline
+          // is not evidence.
+          if (secAsked && secRows === 0 && secOk && item.want === 'no_currency') {
+            secNone++
+            const { error } = await market
+              .from('security')
+              .update({ statement_currency_missing_at: new Date().toISOString() })
+              .eq('security_id', item.securityId)
+            if (error) throw new Error(`statement_currency_missing_at update failed: ${error.message}`)
+          }
+          if (throttledOut) break
+        }
+        if (throttledOut) break
+
         for (const kind of ['income', 'balance', 'cash'] as const) {
           const remaining = deadline - Date.now()
           if (remaining < 5_000) break
+          // Already answered by the filing, which is the better record — do not spend a call
+          // overwriting an 18-period series with a 4-period one.
+          if (group.every((g) => rowsFor.has(g.symbol.toUpperCase()))) break
           try {
             const got = await fetcher(
               `/api/v1/equity/fundamental/${kind}?symbol=${symbolList(group.map((g) => g.symbol))}` +
@@ -1081,6 +1167,12 @@ Deno.serve(async (req: Request) => {
       return json({
         resource,
         written,
+        // Which provider actually answered. `fromSec` is the number the whole change
+        // exists for: it is how many securities now carry a reporting currency and 18 periods
+        // rather than 4 and none.
+        fromSec,
+        secFailed,
+        secNone,
         none,
         failed,
         throttledOut,
