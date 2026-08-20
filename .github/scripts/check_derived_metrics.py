@@ -54,14 +54,28 @@ def main() -> int:
         print("::error::metric_source_field is EMPTY — every metric would silently produce nothing")
         return 1
 
-    # Sample the most recently derived rows: they are the ones a mapping change would break first,
-    # and a stale sample would keep passing long after a rename.
+    # STATEMENT-DERIVED ROWS ONLY, and that exclusion is the point of this comment.
+    #
+    # `security-xbrl` writes `security_metric` straight from SEC company facts — it never touches
+    # `security_statement`, so there is no jsonb to compare against and no `metric_source_field`
+    # entry for `sec-xbrl`. Sampling by recency alone, this check began reporting
+    # "compared 0 values" the day the XBRL resource started running: the newest 300 rows were all
+    # XBRL, none resolved a field, and the guard fired on its own blind spot rather than on drift.
+    #
+    # Failing loudly there was correct — a check that verified nothing must never read as one that
+    # passed — but the fix is to compare what this check is actually about. XBRL rows have their
+    # own provenance and their own offline checks (`xbrl-check.ts`); these are the rows derived
+    # FROM A STATEMENT DOCUMENT, which is what `metric_source_field` describes.
+    sources = ",".join(sorted({s for _, s, _ in mapping}))
     rows = get(
         "security_metric?select=security_id,metric_code,period_type,as_of,value,source_code"
-        "&source_code=neq.derived&order=fetched_at.desc&limit=300"
+        f"&source_code=in.({sources})&order=fetched_at.desc&limit=300"
     )
     if not rows:
-        print("::error::security_metric holds no reported rows — the derivation has produced nothing")
+        print(
+            "::error::security_metric holds no rows derived from a statement document "
+            f"(sources: {sources}) — the derivation has produced nothing"
+        )
         return 1
 
     checked = 0
