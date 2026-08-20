@@ -175,6 +175,11 @@ jobs:
           # duration yields a plausible wrong number. Driven offline, no network.
           deno run --allow-read stack/supabase/functions/market-refresh/xbrl-check.ts
           deno run --allow-read stack/supabase/functions/market-refresh/symbol-repair-check.ts
+          # `fetchWithIsolation` decides whether a security may be recorded as unanswerable. Both
+          # failure directions are silent: too eager writes a rate limit down as thousands of dead
+          # companies (it once cost 1,369), too cautious stalls a backlog for ever on a batch it
+          # refuses to judge. Driven offline against a stub fetcher.
+          deno run --allow-read stack/supabase/functions/market-refresh/isolation-check.ts
 
   terraform:
     runs-on: ubuntu-latest

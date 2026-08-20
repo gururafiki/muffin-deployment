@@ -166,12 +166,52 @@ export async function fetchWithIsolation(
   symbols: string[],
   timeoutMs: number,
   deadline: number,
+  /**
+   * A symbol the provider is known to answer for, used to tell an OUTAGE from a batch in which
+   * every symbol is genuinely uncovered. Pass null to skip the probe.
+   *
+   * WHY THIS EXISTS. The count rule below — "if every symbol failed alone, blame the provider" —
+   * is an INFERENCE, and it becomes wrong in exactly the situation a draining backlog produces:
+   * the answerable securities leave, the unanswerable ones concentrate, and eventually a whole
+   * batch is legitimately uncovered. Measured 2026-08-20, the head of `pending_price_history` was
+   * ICT.PS, FAB.AE, EAND.AE, BDO.PS, WARBABAN.KW, ANDINAB.SN — the Philippines, UAE, Kuwait and
+   * Chile, all outside keyless yfinance. Nothing could be marked, so the same 24 came back every
+   * run and the resource reported `written: 0` for ever while the provider was demonstrably
+   * healthy (AAPL returned 1,077 weekly bars in the same minute).
+   *
+   * A control symbol replaces the inference with evidence: if it answers, the provider is up and
+   * the symbols that failed alone are genuinely bad.
+   */
+  control: string | null = 'AAPL',
 ): Promise<{ rows: Record<string, unknown>[]; dead: string[]; error: string | null }> {
   try {
-    return { rows: await fetcher(buildPath(symbols), timeoutMs), dead: [], error: null }
+    const rows = await fetcher(buildPath(symbols), timeoutMs)
+    // A 200 WITH NO ROWS IS NOT A SUCCESS. yfinance answers a throttle this way, and a batch of
+    // uncovered symbols answers it this way too — indistinguishable here, and the difference is
+    // whether the caller may mark them. Falling through to the isolation path below is what lets
+    // the control symbol decide.
+    if (rows.length > 0 || symbols.length <= 1) return { rows, dead: [], error: null }
   } catch (e) {
-    const error = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+    return await isolate(fetcher, buildPath, symbols, timeoutMs, deadline, control,
+      e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200))
+  }
+  return await isolate(fetcher, buildPath, symbols, timeoutMs, deadline, control,
+    'batch answered with no rows')
+}
+
+async function isolate(
+  fetcher: Fetcher,
+  buildPath: (symbols: string[]) => string,
+  symbols: string[],
+  timeoutMs: number,
+  deadline: number,
+  control: string | null,
+  error: string,
+): Promise<{ rows: Record<string, unknown>[]; dead: string[]; error: string | null }> {
+  {
     // A single symbol that fails alone is genuinely bad; one that succeeds alone was collateral.
+    // An EMPTY answer counts as failing: the question is whether this symbol yields data, and a
+    // 200 with no rows is a no.
     const rows: Record<string, unknown>[] = []
     const dead: string[] = []
     for (const symbol of symbols) {
@@ -180,7 +220,9 @@ export async function fetchWithIsolation(
       // because we ran out of time would be the negative-cache equivalent of blaming the victim.
       if (remaining < 2_000) break
       try {
-        rows.push(...(await fetcher(buildPath([symbol]), Math.min(timeoutMs, remaining))))
+        const got = await fetcher(buildPath([symbol]), Math.min(timeoutMs, remaining))
+        if (got.length > 0) rows.push(...got)
+        else dead.push(symbol)
       } catch {
         dead.push(symbol)
       }
@@ -229,8 +271,29 @@ export async function fetchWithIsolation(
     // 195 securities and then start refusing, and "it answered earlier" is not evidence it is up
     // now. It would have blamed innocent securities in exactly the situation that once
     // negative-cached 1,369 of them.
+    // AND THE CONTROL SYMBOL TURNS THAT INFERENCE INTO EVIDENCE.
+    //
+    // The count rule is right when the provider is refusing, and wrong when a draining backlog has
+    // concentrated genuinely uncovered securities into one batch — a state this pipeline reaches
+    // by design, and did: `pending_price_history` stalled on 24 Philippine, Emirati, Kuwaiti and
+    // Chilean symbols for which yfinance has nothing, reporting `written: 0` for ever while AAPL
+    // returned 1,077 bars in the same minute.
+    //
+    // So ask something known to work. If it answers, the provider is up and these symbols really
+    // are unanswerable; if it does not, mark nothing. One extra call, and only for a batch that
+    // produced nothing at all.
     if (rows.length === 0 && dead.length > 0) {
-      return { rows, dead: [], error: `${error} (all ${dead.length} failed individually — treated as a provider outage, not bad symbols)` }
+      if (control && deadline - Date.now() > 4_000) {
+        try {
+          const probe = await fetcher(buildPath([control]), Math.min(timeoutMs, deadline - Date.now()))
+          if (probe.length > 0) {
+            return { rows, dead, error: `${error} (control ${control} answered — the provider is up and these symbols are unanswerable)` }
+          }
+        } catch {
+          // The control failed too; fall through to treating this as an outage.
+        }
+      }
+      return { rows, dead: [], error: `${error} (all ${dead.length} failed individually and the control did not answer — treated as a provider outage, not bad symbols)` }
     }
     return { rows, dead, error }
   }
