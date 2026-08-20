@@ -1069,6 +1069,7 @@ console.log('\nresource registry — the cron and the function agree')
     // listed so the "has the list rotted" tally keeps meaning "every resource was looked at".
     STATEMENTS_RESOURCE: [],
     METRICS_RESOURCE: [],
+    PRICE_HISTORY_RESOURCE: [],
     // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
     // `security_id` alone, so one row is one security.
     FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
@@ -1585,6 +1586,71 @@ console.log('\nevery source_code written by a function is seeded by a migration'
       `'${code}' is written by a function AND seeded by a migration — an unseeded source is a foreign key violation on the resource's first real run, not a typecheck error`,
     )
   }
+}
+
+
+// ── the price prune must not eat twenty years of history ─────────────────────────────────────
+//
+// `security-prices` bounds its rolling window by deleting everything below a 400-day cutoff. With
+// a weekly series in the same table that delete destroys the entire backfill the first time the
+// resource touches a security — no error, no count, nothing in `refresh_log`, just a chart that
+// shortens back to 400 days and reads as "the backfill never ran".
+console.log('\nthe daily prune leaves weekly history alone')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  // SEC_PRICES_RESOURCE — `security-prices`, the fund-derived series. `PRICES_RESOURCE` is the
+  // 47-row curated instrument one, which has no weekly series and no backfill to destroy.
+  // Bounded by the NEXT resource block, not by the first `finish_refresh` — this handler has an
+  // early return that calls it, so cutting there put the prune outside the window entirely and
+  // two guards failed for a reason unrelated to what they test.
+  const seg = idx.slice(idx.indexOf('resource === SEC_PRICES_RESOURCE'))
+  const nextBlock = seg.indexOf('if (resource ===', 10)
+  const body = (nextBlock > 0 ? seg.slice(0, nextBlock) : seg).replace(/\/\/[^\n]*/g, '')
+
+  const del = body.slice(body.indexOf(".from('security_price')\n            .delete()"))
+  check(
+    del.length > 0 && /\.eq\('grain', 'daily'\)/.test(del.slice(0, 400)),
+    "the window prune is qualified by grain — an unqualified delete below the daily cutoff wipes the 20-year weekly series, silently",
+  )
+  check(
+    !/onConflict: 'security_id,date'/.test(body),
+    'no price upsert still names the two-column conflict target — `grain` joined the primary key, and the old target matches no constraint',
+  )
+  // BOTH WRITERS, counted. `security-prices` writes daily bars twice — once for the batch and
+  // once for the per-symbol isolation retry — and a single-match test was satisfied by either, so
+  // deleting one passed clean. Same weakness the statements currency guard had.
+  const dailyWriters = (body.match(/grain: 'daily'/g) ?? []).length
+  check(
+    dailyWriters >= 2,
+    `both the batch and the isolation write declare grain: 'daily' (found ${dailyWriters}) — a row that relies on the column default is fine today and ambiguous the moment the default changes`,
+  )
+}
+
+// ── the backfill marks only what the provider actually refused ───────────────────────────────
+console.log('\nsecurity-price-history')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const seg = idx.slice(idx.indexOf('resource === PRICE_HISTORY_RESOURCE'))
+  const body = seg.slice(0, seg.indexOf('resource === METRICS_RESOURCE'))
+    .replace(/\/\/[^\n]*/g, '')
+
+  check(/interval=1W/.test(body), 'the backfill asks for WEEKLY bars — 20 years daily is 5,190 bars a security')
+  check(
+    /start_date=\$\{start\}/.test(body) && /PRICE_HISTORY_YEARS/.test(body),
+    'the depth comes from the PRICE_HISTORY_YEARS constant, because it is a disk budget rather than a preference',
+  )
+  check(
+    /grain: 'weekly'/.test(body),
+    'the backfill writes weekly-grained rows, or the prune will treat them as a stale daily window',
+  )
+  check(
+    /if \(anySucceeded\)/.test(body),
+    'a security is marked as having no history only when the endpoint answered for SOMEONE this run — a throttled yfinance returns 200-with-no-rows and would otherwise mark thousands',
+  )
+  check(
+    /fetchWithIsolation/.test(body),
+    'a batch failure is isolated rather than blamed on every symbol in it',
+  )
 }
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)

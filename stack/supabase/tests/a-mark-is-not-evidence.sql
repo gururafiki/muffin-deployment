@@ -42,7 +42,9 @@ insert into market.security_price (security_id, date, close) values
   ('00000000-0000-0000-0000-0000000055a1', current_date - 2, 10.5),
   ('00000000-0000-0000-0000-0000000055a3', current_date - 40, 7.25),
   ('00000000-0000-0000-0000-0000000055a4', current_date - 1, 3.0)
-on conflict (security_id, date) do nothing;
+-- `grain` joined the primary key in migration 94, so a two-column conflict target no
+-- longer matches any constraint. These are daily bars, which is the column default.
+on conflict (security_id, grain, date) do nothing;
 
 -- The repair has already run for real rows by the time this test executes, so its one_shot key is
 -- present and re-applying the file is a no-op. Clear the key to exercise the body against the rows

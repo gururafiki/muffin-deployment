@@ -94,6 +94,7 @@ jobs:
               security-dividends \
               security-performance \
               security-prices \
+              security-price-history \
               fund-holdings \
               derive-classifications \
               macro-indicators \

@@ -964,6 +964,14 @@ export interface PriceRow {
 
 /** Calendar days of history kept for the chart — see 08-instrument-prices.sql. */
 export const PRICE_WINDOW_DAYS = 400
+
+/**
+ * How far back the WEEKLY series goes. One constant, because it is a disk budget rather than a
+ * preference: 1,077 bars per security at ~186 bytes (measured, 568 MB over 3,056,435 rows) is
+ * ~2.3 GB across 11,347 equities, against 14 GB free on the node when this was written. Changing
+ * it changes what the deployment costs, so it should be changed here and nowhere else.
+ */
+export const PRICE_HISTORY_YEARS = 20
 /** Inside this many days the series is kept DAILY; before it, weekly. */
 export const PRICE_DAILY_DAYS = 90
 /**
