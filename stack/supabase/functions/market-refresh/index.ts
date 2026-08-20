@@ -48,6 +48,7 @@ import {
   extractMacroPoints,
   openbbFetcher,
   planPriceFetches,
+  PRICE_HISTORY_YEARS,
   PRICE_WINDOW_DAYS,
   PRICES_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
@@ -293,6 +294,7 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
+const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
@@ -335,6 +337,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -962,6 +965,132 @@ const STATEMENTS_RESOURCE = 'security-statements'
     // do: no batching, no isolation, no negative cache, no deadline arithmetic. The work is a JOIN
     // over statements we already hold, and `market.derive_security_metrics` does all of it in one
     // statement — which is why it cannot be throttled and re-running it is free.
+    // TWENTY YEARS OF WEEKLY BARS, ONCE PER SECURITY.
+    //
+    // A one-off backfill, not a refresh: `pending_price_history` empties as it goes and a security
+    // that has weekly bars never comes back. The recent end keeps being extended by the ordinary
+    // daily resource, so this does not need to re-run to stay current at the DAILY grain — but the
+    // weekly series does drift stale at its own end, which is why the resource stays scheduled
+    // rather than being a one-time script someone has to remember.
+    if (resource === PRICE_HISTORY_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_price_history')
+        .select('security_id,symbol,fetch_symbol')
+        .limit(scopeLimit ?? 120)
+      if (pErr) throw new Error(`pending_price_history read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: String(r.symbol),
+        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every equity has weekly history' })
+      }
+
+      const start = `${new Date().getUTCFullYear() - PRICE_HISTORY_YEARS}-01-01`
+      let written = 0
+      let batches = 0
+      let batchesFailed = 0
+      let noHistory = 0
+      let anySucceeded = false
+      let throttledOut = false
+      let lastError: string | null = null
+
+      // TWELVE, the same batch size the daily resource uses. Measured: three symbols of 20-year
+      // weekly bars is 3,231 rows, so twelve is ~13,000 rows and a few MB — comfortably inside a
+      // 256 MB worker, and far from the URL length that makes `in.()` answer a bare 502.
+      const BATCH = 12
+      for (let i = 0; i < wanted.length && Date.now() < deadline - 12_000; i += BATCH) {
+        const group = wanted.slice(i, i + BATCH)
+        batches++
+        try {
+          const isolated = await fetchWithIsolation(
+            fetcher,
+            (syms: string[]) =>
+              `/api/v1/equity/price/historical?symbol=${symbolList(syms)}` +
+              `&provider=yfinance&interval=1W&start_date=${start}`,
+            group.map((g) => g.fetchSymbol),
+            Math.min(45_000, deadline - Date.now()),
+            deadline,
+          )
+          const rows = isolated.rows
+          if (isolated.error) lastError = isolated.error
+          // A symbol the provider rejects ALONE is genuinely bad; one that failed only inside a
+          // batch was collateral, and `fetchWithIsolation` already tells them apart. Marking is
+          // still gated on the endpoint having answered for someone this run.
+          const deadSymbols = new Set(isolated.dead.map((d) => d.toUpperCase()))
+          if (rows.length > 0) anySucceeded = true
+
+          const bySymbol = new Map<string, { date: string; close: number }[]>()
+          for (const r of rows) {
+            // The provider adds a `symbol` column only when SEVERAL are requested, so a
+            // single-symbol batch has to be told which symbol it asked about.
+            const parsed = barFrom(r, group[0].fetchSymbol)
+            if (!parsed) continue
+            const key = parsed.symbol.toUpperCase()
+            const list = bySymbol.get(key) ?? []
+            list.push(parsed.bar)
+            bySymbol.set(key, list)
+          }
+
+          const priceRows: { security_id: string; date: string; close: number; grain: string }[] = []
+          for (const g of group) {
+            const bars = bySymbol.get(g.fetchSymbol.toUpperCase()) ?? []
+            if (bars.length === 0) {
+              // A symbol the deadline stopped us asking about is not a symbol with no history.
+              if (!anySucceeded && !deadSymbols.has(g.fetchSymbol.toUpperCase())) continue
+              // MARKED ONLY IF THE ENDPOINT ANSWERED FOR SOMEONE. A throttled yfinance returns a
+              // 200 with no rows rather than erroring, and marking on that recorded "this security
+              // has no history" for thousands of perfectly answerable ones in a single afternoon.
+              if (anySucceeded) {
+                noHistory++
+                const { error } = await market
+                  .from('security')
+                  .update({ price_history_missing_at: new Date().toISOString() })
+                  .eq('security_id', g.securityId)
+                if (error) throw new Error(`price_history_missing_at update failed: ${error.message}`)
+              }
+              continue
+            }
+            for (const b of bars) {
+              priceRows.push({ security_id: g.securityId, date: b.date, close: b.close, grain: 'weekly' })
+            }
+          }
+
+          for (let j = 0; j < priceRows.length; j += 500) {
+            const { error } = await market
+              .from('security_price')
+              .upsert(
+                dedupeBy(priceRows.slice(j, j + 500), (r) => `${r.security_id}|${r.grain}|${r.date}`),
+                { onConflict: 'security_id,grain,date' },
+              )
+            if (error) throw new Error(`security_price weekly upsert failed: ${error.message}`)
+          }
+          written += priceRows.length
+        } catch (e) {
+          batchesFailed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          lastError = msg
+          if (throttled(msg)) { throttledOut = true; break }
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        written,
+        batches,
+        batchesFailed,
+        noHistory,
+        throttledOut,
+        lastError,
+        remaining: await backlogSize(market, 'pending_price_history'),
+      })
+    }
+
     if (resource === METRICS_RESOURCE) {
       // PAGED, AND THE PAGE SIZE IS NOT NEGOTIABLE UPWARD. Unlimited, this exceeded the statement
       // timeout on the role PostgREST uses (105,927 statements) and did NOTHING while correctly
@@ -2326,7 +2455,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
         // symbol is not a stable key: migration 39 changed the display symbol for 41% of non-US
         // securities, and anything keyed on it needed re-keying by hand.
         const toId = new Map(plan.symbols.map((s) => [s.fetchSymbol.toUpperCase(), bySymbolId.get(s.symbol)]))
-        const priceRows: { security_id: string; date: string; close: number }[] = []
+        const priceRows: { security_id: string; date: string; close: number; grain: string }[] = []
         // DIVIDENDS ARRIVE ON THIS SAME RESPONSE and used to be thrown away. openbb's yfinance
         // provider defaults `include_actions` to true and aliases the column, so no extra call and
         // not even an extra request parameter is needed — see `Bar.dividend`.
@@ -2374,7 +2503,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
             })
           }
           if (parsed.bar.date < cutoff) continue
-          priceRows.push({ security_id: id, date: parsed.bar.date, close: parsed.bar.close })
+          priceRows.push({ security_id: id, date: parsed.bar.date, close: parsed.bar.close, grain: 'daily' })
         }
 
         if (divRows.length > 0) {
@@ -2435,8 +2564,13 @@ const STATEMENTS_RESOURCE = 'security-statements'
                 emptyIds.push(id)
               } else {
                 const { error } = await market.from('security_price').upsert(
-                  bars.map((b) => ({ security_id: id, date: b.bar.date, close: b.bar.close })),
-                  { onConflict: 'security_id,date' },
+                  bars.map((b) => ({
+                    security_id: id, date: b.bar.date, close: b.bar.close, grain: 'daily',
+                  })),
+                  // THREE columns. `grain` joined the primary key in migration 94 so a date can
+                  // carry both a daily and a weekly bar; naming the old two-column target would
+                  // conflict on a key the table no longer has.
+                  { onConflict: 'security_id,grain,date' },
                 )
                 if (error) throw new Error(`security_price upsert failed: ${error.message}`)
                 written += bars.length
@@ -2469,13 +2603,19 @@ const STATEMENTS_RESOURCE = 'security-statements'
           const { error } = await market
             .from('security_price')
             .upsert(dedupeBy(priceRows.slice(i, i + 500), (r) => `${r.security_id}|${r.date}`),
-              { onConflict: 'security_id,date' })
+              { onConflict: 'security_id,grain,date' })
           if (error) throw new Error(`security_price upsert failed: ${error.message}`)
         }
         written += priceRows.length
 
-        // Keep the window bounded. Without this the table grows forever and the "~400 bars per
-        // security" sizing that justified storing this at all stops being true.
+        // Keep the DAILY window bounded. Without this the table grows forever and the "~400 bars
+        // per security" sizing that justified storing this at all stops being true.
+        //
+        // `.eq('grain', 'daily')` IS LOAD-BEARING AND SILENT IF LOST. The weekly series is twenty
+        // years long, so an unqualified delete below the daily cutoff destroys all of it the first
+        // time this resource touches a security — no error, no count, nothing in `refresh_log`,
+        // just a chart that shortens back to 400 days. Proven by mutation in
+        // `an-old-bar-is-not-stale.sql`, which deletes the qualifier and watches the history go.
         const touched = [...new Set(priceRows.map((r) => r.security_id))]
         for (const id of touched) securitiesPriced.add(String(id))
         for (let i = 0; i < touched.length; i += 100) {
@@ -2483,6 +2623,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
             .from('security_price')
             .delete()
             .in('security_id', touched.slice(i, i + 100))
+            .eq('grain', 'daily')
             .lt('date', cutoff)
           if (error) throw new Error(`price window prune failed: ${error.message}`)
         }
