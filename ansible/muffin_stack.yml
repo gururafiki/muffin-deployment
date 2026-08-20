@@ -318,6 +318,14 @@
       # filesystem order. Measured 2026-08-09: the migrations ran 04, 01, 05, 02, 03,
       # so 04/05 hit a `market` schema that 02 had not created yet and the deploy
       # failed. The numeric prefixes only mean anything if this is sorted.
+      #
+      # AND `| sort` IS LEXICOGRAPHIC, WHICH IS WHY THE PREFIXES ARE ZERO-PADDED.
+      # Jinja has no numeric sort, so the moment a migration numbered 100 existed it
+      # sorted between `02-` and `29-` and ran before the schema it depends on. Caught
+      # locally on the first 3-digit migration; it would have failed the next deploy.
+      # Padding to three digits makes lexicographic order BE numeric order, with no
+      # clever sorting anywhere — and `migrations-sort-numerically.sql` fails CI if a
+      # filename ever stops matching that shape.
       loop: "{{ query('fileglob', playbook_dir + '/../stack/supabase/migrations/*.sql') | sort }}"
       loop_control:
         label: "{{ item | basename }}"

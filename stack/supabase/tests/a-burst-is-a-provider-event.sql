@@ -24,7 +24,7 @@ on conflict (security_id) do nothing;
 
 delete from market.one_shot where key = '57-clear-throttle-burst-statement-marks';
 
-\i stack/supabase/migrations/57-a-burst-is-a-provider-event.sql
+\i stack/supabase/migrations/057-a-burst-is-a-provider-event.sql
 
 do $$
 declare
@@ -56,7 +56,7 @@ update market.security
    set statements_missing_at = timestamptz '2026-08-12 15:30:00+00'
  where security_id = '00000000-0000-0000-0000-0000000057a1';
 
-\i stack/supabase/migrations/57-a-burst-is-a-provider-event.sql
+\i stack/supabase/migrations/057-a-burst-is-a-provider-event.sql
 
 do $$
 begin

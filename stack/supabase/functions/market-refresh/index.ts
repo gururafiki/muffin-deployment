@@ -49,6 +49,7 @@ import {
   extractMacroPoints,
   openbbFetcher,
   planPriceFetches,
+  NEWS_RETENTION_DAYS,
   PRICE_HISTORY_YEARS,
   PRICE_WINDOW_DAYS,
   PRICES_TTL_MINUTES,
@@ -295,6 +296,7 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
+const NEWS_RESOURCE = 'security-news'
 const SHARE_STATS_RESOURCE = 'security-share-stats'
 const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
@@ -341,6 +343,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [NEWS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -986,6 +989,114 @@ const STATEMENTS_RESOURCE = 'security-statements'
     // per-security snapshots for the same securities, and both batch — six symbols in 0.48s and
     // 0.33s measured — so fetching them together halves the requests for what is really two halves
     // of one row.
+    if (resource === NEWS_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_news')
+        .select('security_id,symbol,fetch_symbol')
+        .limit(scopeLimit ?? 400)
+      if (pErr) throw new Error(`pending_news read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, articles: 0, links: 0, remaining: 0, note: 'every equity is current' })
+      }
+
+      let articles = 0
+      let links = 0
+      let batches = 0
+      let batchesFailed = 0
+      let pruned = 0
+      let throttledOut = false
+      let lastError: string | null = null
+
+      const BATCH = 20
+      for (let i = 0; i < wanted.length && Date.now() < deadline - 10_000; i += BATCH) {
+        const group = wanted.slice(i, i + BATCH)
+        const bySymbol = new Map(group.map((g) => [g.fetchSymbol.toUpperCase(), g.securityId]))
+        batches++
+        try {
+          const rows = await fetcher(
+            `/api/v1/news/company?symbol=${symbolList(group.map((g) => g.fetchSymbol))}` +
+              `&provider=yfinance&limit=10`,
+            Math.min(30_000, deadline - Date.now()),
+          )
+
+          // ONE ROW PER ARTICLE, not per (article, security). 11% of articles come back for more
+          // than one security and a market-wide story for hundreds; `text` is dropped because it
+          // was byte-identical to `summary` in all 200 rows measured.
+          const articleRows = new Map<string, Record<string, unknown>>()
+          const linkRows: { url: string; security_id: string; source_code: string }[] = []
+          for (const r of rows) {
+            const url = String(r.url ?? '')
+            const published = String(r.date ?? '')
+            const title = String(r.title ?? '')
+            if (!url || !published || !title) continue
+            const id = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+            if (!id) continue
+            articleRows.set(url, {
+              url,
+              published_at: published,
+              title,
+              source: typeof r.source === 'string' ? r.source : null,
+              summary: typeof r.summary === 'string' ? r.summary : null,
+            })
+            linkRows.push({ url, security_id: id, source_code: 'yfinance' })
+          }
+
+          if (articleRows.size > 0) {
+            const list = [...articleRows.values()]
+            for (let j = 0; j < list.length; j += 500) {
+              const { error } = await market.from('news_article')
+                .upsert(list.slice(j, j + 500), { onConflict: 'url' })
+              if (error) throw new Error(`news_article upsert failed: ${error.message}`)
+            }
+            articles += list.length
+
+            // THE ARTICLE FIRST, THE LINK SECOND. `news_security.url` is a foreign key, so a link
+            // written before its article fails the statement and takes the batch with it.
+            const deduped = dedupeBy(linkRows, (r) => `${r.url}|${r.security_id}`)
+            for (let j = 0; j < deduped.length; j += 500) {
+              const { error } = await market.from('news_security')
+                .upsert(deduped.slice(j, j + 500), { onConflict: 'url,security_id', ignoreDuplicates: true })
+              if (error) throw new Error(`news_security upsert failed: ${error.message}`)
+            }
+            links += deduped.length
+          }
+
+          // STAMPED WHETHER OR NOT ANYTHING CAME BACK. The backlog is keyed on when we asked, so a
+          // security the provider has no news for would otherwise be re-asked every run for ever.
+          for (const g of group) {
+            const { error } = await market.from('security')
+              .update({ news_fetched_at: new Date().toISOString() })
+              .eq('security_id', g.securityId)
+            if (error) throw new Error(`news_fetched_at update failed: ${error.message}`)
+          }
+        } catch (e) {
+          batchesFailed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          lastError = msg
+          if (throttled(msg)) { throttledOut = true; break }
+        }
+      }
+
+      // PRUNED EVERY RUN, not on a separate schedule. A retention window enforced by a resource
+      // nobody remembers to call is a retention window that does not exist.
+      const { data: prunedCount, error: prErr } = await market.rpc('prune_news', { p_days: NEWS_RETENTION_DAYS })
+      if (prErr) throw new Error(`prune_news failed: ${prErr.message}`)
+      pruned = typeof prunedCount === 'number' ? prunedCount : 0
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, articles, links, batches, batchesFailed, pruned, throttledOut, lastError,
+        remaining: await backlogSize(market, 'pending_news'),
+      })
+    }
+
     if (resource === SHARE_STATS_RESOURCE) {
       const deadline = Date.now() + 60_000
       const { data: pending, error: pErr } = await market

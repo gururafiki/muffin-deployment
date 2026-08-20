@@ -37,7 +37,7 @@ on conflict (security_id) do nothing;
 
 delete from market.one_shot where key = '64-clear-marks-for-newly-swept-venues';
 
-\i stack/supabase/migrations/64-a-new-venue-invalidates-its-marks.sql
+\i stack/supabase/migrations/064-a-new-venue-invalidates-its-marks.sql
 
 do $$
 declare
@@ -73,7 +73,7 @@ end $$;
 update market.security set figi_missing_at = now()
  where security_id = '00000000-0000-0000-0000-0000000064a1';
 
-\i stack/supabase/migrations/64-a-new-venue-invalidates-its-marks.sql
+\i stack/supabase/migrations/064-a-new-venue-invalidates-its-marks.sql
 
 do $$
 begin

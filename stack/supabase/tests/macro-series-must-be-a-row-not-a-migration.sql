@@ -111,7 +111,7 @@ end $$;
 -- on EVERY deploy, so an `on conflict do update` that touches `enabled` silently reverses an
 -- operator switching off a series that started failing. Same pattern as
 -- `securities-are-typed-from-the-filing.sql`: seed the production shape, then \i the real file.
-\i stack/supabase/migrations/82-macro-is-a-catalogue-not-a-hardcoded-list.sql
+\i stack/supabase/migrations/082-macro-is-a-catalogue-not-a-hardcoded-list.sql
 
 do $$
 declare on_again boolean;
