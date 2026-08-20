@@ -54,6 +54,12 @@ insert into market.security_price (security_id, date, close, grain) values
   ('00000000-0000-0000-0000-000000009401', date '2024-01-04', 15, 'daily')
 on conflict (security_id, grain, date) do nothing;
 
+-- A MATERIALIZED VIEW MAKES THIS A SNAPSHOT TEST. `price_series` joins `market.symbol_security`,
+-- which is materialised (migration 102) — so rows inserted in this transaction are invisible to it
+-- until it is rebuilt. NON-concurrently, deliberately: `refresh ... concurrently` cannot run inside
+-- a transaction block, and a test that cannot roll back is not a test.
+refresh materialized view market.symbol_security;
+
 do $$
 declare n integer; c numeric;
 begin
