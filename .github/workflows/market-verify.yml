@@ -424,6 +424,23 @@ jobs:
             fail=1
           fi
 
+          # 10. THE APP'S OWN READS MUST ANSWER INSIDE THE ANON CEILING. `anon` has a 3-second
+          #     statement timeout and `service_role` has none, so a slow view fails for the APP
+          #     while every check above — all of which run as service_role — reports it healthy.
+          #
+          #     Three incidents, none of which a correctness check could see: `fund_sector_weight`
+          #     answered service_role in 7.2s and gave anon 57014 while the Markets donut was
+          #     failing in the deployed app; `security_facets` was fine on any ONE filter and timed
+          #     out on tier AND sector together; and `price_series` answered `symbol=eq.AAPL` in
+          #     696ms and TIMED OUT for `symbol=eq.AAPL & grain=eq.daily` — broken by the filter it
+          #     had just been given, one deploy after the column was added.
+          #
+          #     So the probes send the CONJUNCTIONS the app really applies. A single-filter probe
+          #     would have passed all three.
+          if ! BASE="$BASE" ANON="$ANON" python3 .github/scripts/check_anon_read_latency.py; then
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
