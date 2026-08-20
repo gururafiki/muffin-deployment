@@ -53,8 +53,8 @@ end $$;
 -- 3. A DISABLED SERIES SURVIVES THE SEED RE-RUNNING. Migrations re-apply on EVERY deploy, so an
 --    `on conflict do update` that touched `enabled` would silently re-enable all of them next
 --    deploy. Proven by re-applying the real seed over the disabled state.
-\i stack/supabase/migrations/82-macro-is-a-catalogue-not-a-hardcoded-list.sql
-\i stack/supabase/migrations/83-fred-fills-the-gap-econdb-left.sql
+\i stack/supabase/migrations/082-macro-is-a-catalogue-not-a-hardcoded-list.sql
+\i stack/supabase/migrations/083-fred-fills-the-gap-econdb-left.sql
 
 do $$
 declare n integer;
@@ -82,7 +82,7 @@ values ('es-cpi-probe', 'Spain inflation (oecd probe)', 'inflation', '/api/v1/ec
         'oecd', '{}'::jsonb, 'ES', 'monthly', 'percent', true, 98)
 on conflict (code) do update set enabled = true;
 
-\i stack/supabase/migrations/85-a-series-that-returns-rows-can-still-be-a-year-stale.sql
+\i stack/supabase/migrations/085-a-series-that-returns-rows-can-still-be-a-year-stale.sql
 
 do $$
 declare still_on boolean;

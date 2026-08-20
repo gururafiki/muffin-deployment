@@ -64,7 +64,7 @@ values
 -- the `update`, so the test cannot drift away from what actually ships. The path is relative to the
 -- repo root because that is where quality.yml runs psql from — and the migration is idempotent, so
 -- applying it a third time is exactly what it is designed for.
-\i stack/supabase/migrations/49-type-securities-from-the-filing.sql
+\i stack/supabase/migrations/049-type-securities-from-the-filing.sql
 
 do $$
 declare

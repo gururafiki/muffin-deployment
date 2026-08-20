@@ -101,7 +101,7 @@ jobs:
           # 01 and 03 reference auth.users / GoTrue-owned schemas, which only exist in a real
           # Supabase stack — they are applied there after GoTrue has migrated, and cannot be
           # exercised here.
-          files=$(ls stack/supabase/migrations/*.sql | grep -vE '/(01|03)-' | sort)
+          files=$(ls stack/supabase/migrations/*.sql | grep -vE '/(001|003)-' | sort)
 
           for pass in 1 2; do
             echo "--- pass $pass ---"

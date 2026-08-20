@@ -51,7 +51,7 @@ on conflict (security_id, grain, date) do nothing;
 -- seeded above — this is inside a transaction that rolls back.
 delete from market.one_shot where key = '55-clear-contradicted-performance-marks';
 
-\i stack/supabase/migrations/55-a-mark-is-not-evidence.sql
+\i stack/supabase/migrations/055-a-mark-is-not-evidence.sql
 
 do $$
 declare
@@ -84,7 +84,7 @@ update market.security
    set performance_missing_at = now()
  where security_id = '00000000-0000-0000-0000-0000000055a1';
 
-\i stack/supabase/migrations/55-a-mark-is-not-evidence.sql
+\i stack/supabase/migrations/055-a-mark-is-not-evidence.sql
 
 do $$
 begin

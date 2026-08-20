@@ -43,7 +43,7 @@ on conflict (security_id) do nothing;
 
 delete from market.one_shot where key = '58-promote-market-cap-from-fundamentals';
 
-\i stack/supabase/migrations/58-the-market-cap-was-already-here.sql
+\i stack/supabase/migrations/058-the-market-cap-was-already-here.sql
 
 do $$
 declare
