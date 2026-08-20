@@ -1694,5 +1694,49 @@ console.log('\nsecurity-share-stats')
   )
 }
 
+
+// ── migration filenames must sort numerically under a STRING sort ────────────────────────────
+//
+// Every place that enumerates migrations sorts them as strings: Ansible's Jinja `| sort`, which
+// has no numeric option at all; CI's `ls | sort`; the local harness. Invisible for 99 migrations
+// and wrong on the hundredth — measured, jinja sorts
+// ['02-market.sql', '100-news.sql', '29-x.sql', '99-ifrs.sql'], so `100-` runs before the schema
+// it depends on and the deploy fails on a file that is entirely correct.
+//
+// Zero-padding to three digits makes lexicographic order BE numeric order, needing no `sort -V`
+// (absent from some busybox builds) and no Jinja gymnastics.
+//
+// This lives here rather than in a SQL test because it is a fact about FILENAMES. The SQL version
+// used `pg_ls_dir` and passed locally only because the repo happened to be mounted into the
+// database container; in CI Postgres is a service container that cannot see the repo at all.
+console.log('\nmigration filenames sort numerically')
+{
+  const dir = new URL('../../migrations/', import.meta.url)
+  const names: string[] = []
+  for await (const e of Deno.readDir(dir)) {
+    if (e.isFile && e.name.endsWith('.sql')) names.push(e.name)
+  }
+  check(names.length > 50, `the migrations directory was found (${names.length} files)`)
+
+  const bad = names.filter((n) => !/^\d{3}-/.test(n))
+  check(
+    bad.length === 0,
+    'every migration filename starts with a THREE-DIGIT zero-padded number',
+    bad.length ? `not padded: ${bad.slice(0, 5).join(', ')}` : '',
+  )
+
+  // The property itself, asserted rather than inferred from the naming rule: sorting the names as
+  // STRINGS must give the same order as sorting them by their number.
+  const numOf = (n: string) => Number(n.slice(0, n.indexOf('-')))
+  const lexical = [...names].sort()
+  const numeric = [...names].sort((a, b) => numOf(a) - numOf(b))
+  const firstDiff = lexical.findIndex((n, i) => n !== numeric[i])
+  check(
+    firstDiff === -1,
+    'a plain string sort of the migrations equals a numeric sort',
+    firstDiff === -1 ? '' : `diverges at ${firstDiff}: string sort has ${lexical[firstDiff]}, numeric has ${numeric[firstDiff]}`,
+  )
+}
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
