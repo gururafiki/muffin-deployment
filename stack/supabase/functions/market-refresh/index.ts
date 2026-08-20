@@ -1543,6 +1543,10 @@ const STATEMENTS_RESOURCE = 'security-statements'
           // So a symbol is only marked when THIS batch answered cleanly and simply did not include
           // it, or when isolation asked it ALONE and it failed. Anything else is left for the next
           // run, which costs one more request and cannot cost a security 30 days.
+          // A batch that answered nothing is now ISOLATED by `fetchWithIsolation` and adjudicated
+          // by a control symbol, so `dead` is authoritative either way: populated means the
+          // provider is up and those symbols are unanswerable, empty means it is not up and
+          // nothing may be marked.
           const batchClean = !isolated.error && rows.length > 0
 
           const bySymbol = new Map<string, { date: string; close: number }[]>()
