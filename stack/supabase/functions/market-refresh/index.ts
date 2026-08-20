@@ -295,6 +295,7 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
+const SHARE_STATS_RESOURCE = 'security-share-stats'
 const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
@@ -340,6 +341,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -980,8 +982,151 @@ const STATEMENTS_RESOURCE = 'security-statements'
     // ONE FILE, EVERY US FILER. `company_tickers.json` is 776 KB and maps ticker -> CIK for
     // ~10,400 filers, which is the whole input to the XBRL resource below. Reference data, so it
     // runs on the reference TTL rather than the backlog one.
+    // ONE BATCH OF SYMBOLS, TWO ENDPOINTS. Share statistics and analyst consensus are both
+    // per-security snapshots for the same securities, and both batch — six symbols in 0.48s and
+    // 0.33s measured — so fetching them together halves the requests for what is really two halves
+    // of one row.
+    if (resource === SHARE_STATS_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_share_stats')
+        .select('security_id,symbol,fetch_symbol')
+        .limit(scopeLimit ?? 600)
+      if (pErr) throw new Error(`pending_share_stats read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, stats: 0, estimates: 0, remaining: 0, note: 'every equity is current' })
+      }
+
+      let stats = 0
+      let estimates = 0
+      let batches = 0
+      let batchesFailed = 0
+      let missing = 0
+      let throttledOut = false
+      let lastError: string | null = null
+      const today = new Date().toISOString().slice(0, 10)
+
+      const BATCH = 40
+      for (let i = 0; i < wanted.length && Date.now() < deadline - 8_000; i += BATCH) {
+        const group = wanted.slice(i, i + BATCH)
+        const bySymbol = new Map(group.map((g) => [g.fetchSymbol.toUpperCase(), g.securityId]))
+        batches++
+        try {
+          const syms = symbolList(group.map((g) => g.fetchSymbol))
+          const [statRows, estRows] = await Promise.all([
+            fetcher(`/api/v1/equity/ownership/share_statistics?symbol=${syms}&provider=yfinance`,
+              Math.min(30_000, deadline - Date.now())),
+            fetcher(`/api/v1/equity/estimates/consensus?symbol=${syms}&provider=yfinance`,
+              Math.min(30_000, deadline - Date.now())),
+          ])
+
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+          const statPayload = statRows.flatMap((r) => {
+            const id = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+            if (!id) return []
+            return [{
+              security_id: id,
+              // The PROVIDER's date. Falling back to today would mint a row per run and call it
+              // history — the reason this table is not keyed on the fetch date.
+              as_of: String(r.date ?? '').slice(0, 10) || today,
+              float_shares: num(r.float_shares),
+              outstanding_shares: num(r.outstanding_shares),
+              short_interest: num(r.short_interest),
+              short_percent_of_float: num(r.short_percent_of_float),
+              days_to_cover: num(r.days_to_cover),
+              insider_ownership: num(r.insider_ownership),
+              institution_ownership: num(r.institution_ownership),
+              institutions_count: num(r.institutions_count),
+              source_code: 'yfinance',
+              fetched_at: new Date().toISOString(),
+            }]
+          })
+          const estPayload = estRows.flatMap((r) => {
+            const id = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+            if (!id) return []
+            const cur = typeof r.currency === 'string' && /^[A-Za-z]{3}$/.test(r.currency)
+              ? r.currency.toUpperCase()
+              : null
+            return [{
+              security_id: id,
+              as_of: today,
+              target_high: num(r.target_high),
+              target_low: num(r.target_low),
+              target_consensus: num(r.target_consensus),
+              target_median: num(r.target_median),
+              recommendation: typeof r.recommendation === 'string' ? r.recommendation : null,
+              recommendation_mean: num(r.recommendation_mean),
+              number_of_analysts: num(r.number_of_analysts),
+              currency_code: cur,
+              source_code: 'yfinance',
+              fetched_at: new Date().toISOString(),
+            }]
+          })
+
+          // LEARN THE CURRENCY FIRST. `currency_code` is a foreign key, so a code the table has
+          // never seen fails the STATEMENT rather than the row and takes the whole batch with it.
+          const currencies = [...new Set(estPayload.map((e) => e.currency_code).filter(Boolean))]
+          if (currencies.length > 0) {
+            const { error } = await market.from('currency')
+              .upsert(currencies.map((code) => ({ code })), { onConflict: 'code', ignoreDuplicates: true })
+            if (error) throw new Error(`currency learn failed: ${error.message}`)
+          }
+
+          if (statPayload.length > 0) {
+            const { error } = await market.from('security_share_stats').upsert(
+              dedupeBy(statPayload, (r) => `${r.security_id}|${r.as_of}`),
+              { onConflict: 'security_id,as_of' })
+            if (error) throw new Error(`security_share_stats upsert failed: ${error.message}`)
+            stats += statPayload.length
+          }
+          if (estPayload.length > 0) {
+            const { error } = await market.from('security_estimate').upsert(
+              dedupeBy(estPayload, (r) => `${r.security_id}|${r.as_of}`),
+              { onConflict: 'security_id,as_of' })
+            if (error) throw new Error(`security_estimate upsert failed: ${error.message}`)
+            estimates += estPayload.length
+          }
+
+          // PER BATCH, from THIS batch's own outcome. A run-wide tally is the "if any of the 40
+          // answered, blame the rest" rule, and yfinance defeats it by omitting symbols from a 200
+          // rather than erroring.
+          const answered = new Set(statPayload.map((r) => r.security_id))
+          if (statRows.length > 0) {
+            for (const g of group) {
+              if (answered.has(g.securityId)) continue
+              missing++
+              const { error } = await market.from('security')
+                .update({ share_stats_missing_at: new Date().toISOString() })
+                .eq('security_id', g.securityId)
+              if (error) throw new Error(`share_stats_missing_at update failed: ${error.message}`)
+            }
+          }
+        } catch (e) {
+          batchesFailed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          lastError = msg
+          if (throttled(msg)) { throttledOut = true; break }
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, stats, estimates, batches, batchesFailed, missing, throttledOut, lastError,
+        remaining: await backlogSize(market, 'pending_share_stats'),
+      })
+    }
+
+    // ONE FILE, ONE STATEMENT. `company_tickers.json` is 776 KB and maps ticker -> CIK for
+    // ~10,400 filers. The first version applied it row by row and reached 6,645 of ~27,000
+    // identifiers before its deadline — then restarted from zero on the next run, so it could
+    // never reach the rest while reporting 3,516 matches as if that were progress.
     if (resource === CIK_RESOURCE) {
-      const deadline = Date.now() + 70_000
       const map = await fetchCikMap(30_000)
       if (map.size === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: 'empty cik map' })
@@ -989,40 +1134,21 @@ const STATEMENTS_RESOURCE = 'security-statements'
       }
 
       // Matched on the US TICKER, which is what SEC lists. A local symbol (`SAP.DE`) is not a
-      // filer id and must not be matched — that is why this reads `security_identifier`, not
-      // `security_symbol`, whose `coalesce(ticker, provider_symbol)` would supply one.
-      let matched = 0
-      let scanned = 0
-      for (let from = 0; ; from += 1000) {
-        const { data, error } = await market
-          .from('security_identifier')
-          .select('security_id,value')
-          .eq('kind_code', 'ticker')
-          .range(from, from + 999)
-        if (error) throw new Error(`security_identifier read failed: ${error.message}`)
-        const page = data ?? []
-        scanned += page.length
-
-        const updates: { security_id: string; cik: number }[] = []
-        for (const r of page) {
-          const cik = map.get(String(r.value).toUpperCase())
-          if (cik) updates.push({ security_id: r.security_id as string, cik })
-        }
-        for (let i = 0; i < updates.length; i += 500) {
-          const chunk = updates.slice(i, i + 500)
-          for (const u of chunk) {
-            const { error: uErr } = await market
-              .from('security').update({ cik: u.cik }).eq('security_id', u.security_id)
-            if (uErr) throw new Error(`cik update failed: ${uErr.message}`)
-          }
-          matched += chunk.length
-        }
-        if (page.length < 1000) break
-        if (Date.now() > deadline) break
-      }
+      // filer id, which is why the function joins `security_identifier` rather than
+      // `security_symbol` — the latter's `coalesce(ticker, provider_symbol)` would supply one.
+      const { data, error } = await market.rpc('apply_cik_map', {
+        p_map: Object.fromEntries(map),
+      })
+      if (error) throw new Error(`apply_cik_map failed: ${error.message}`)
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, filers: map.size, scanned, matched })
+      return json({
+        resource,
+        filers: map.size,
+        // Rows CHANGED, not rows matched: the statement skips a security whose cik is already
+        // right, so a steady-state run reports 0 and that is the correct answer.
+        updated: typeof data === 'number' ? data : 0,
+      })
     }
 
     // SEVENTEEN YEARS, QUARTERLY, ONE REQUEST PER FILER.
@@ -1030,13 +1156,14 @@ const STATEMENTS_RESOURCE = 'security-statements'
       const deadline = Date.now() + 60_000
       const { data: concepts, error: cErr } = await market
         .from('xbrl_concept')
-        .select('metric_code,concept,priority,unit')
+        .select('metric_code,concept,priority,unit,taxonomy')
       if (cErr) throw new Error(`xbrl_concept read failed: ${cErr.message}`)
       const specs: ConceptSpec[] = (concepts ?? []).map((c) => ({
         metricCode: c.metric_code as string,
         concept: c.concept as string,
         priority: Number(c.priority),
         unit: String(c.unit),
+        taxonomy: String(c.taxonomy ?? 'us-gaap'),
       }))
       if (specs.length === 0) throw new Error('xbrl_concept is empty — every filer would yield nothing')
 
@@ -1094,6 +1221,15 @@ const STATEMENTS_RESOURCE = 'security-statements'
               source_code: 'sec-xbrl',
               fetched_at: new Date().toISOString(),
             }))
+            // LEARN THE CURRENCY FIRST. `security_metric.currency_code` is a foreign key, and an
+            // IFRS filer reports in its own currency — DKK, TWD, EUR — so a code the table has
+            // never seen fails the STATEMENT and takes the whole filer with it.
+            const curs = [...new Set(rows.map((r) => r.currency_code).filter(Boolean))] as string[]
+            if (curs.length > 0) {
+              const { error: cuErr } = await market.from('currency')
+                .upsert(curs.map((code) => ({ code })), { onConflict: 'code', ignoreDuplicates: true })
+              if (cuErr) throw new Error(`currency learn failed: ${cuErr.message}`)
+            }
             for (let i = 0; i < rows.length; i += 500) {
               const { error } = await market
                 .from('security_metric')

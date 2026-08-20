@@ -1071,6 +1071,7 @@ console.log('\nresource registry — the cron and the function agree')
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
     XBRL_RESOURCE: [],
+    SHARE_STATS_RESOURCE: [],
     // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
     // `security_id` alone, so one row is one security.
     FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
@@ -1659,6 +1660,36 @@ console.log('\nsecurity-price-history')
   check(
     /fetchWithIsolation/.test(body),
     'a batch failure is isolated rather than blamed on every symbol in it',
+  )
+}
+
+
+// ── security-share-stats ─────────────────────────────────────────────────────────────────────
+console.log('\nsecurity-share-stats')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const seg = idx.slice(idx.indexOf('resource === SHARE_STATS_RESOURCE'))
+  const body = seg.slice(0, seg.indexOf('resource === CIK_RESOURCE')).replace(/\/\/[^\n]*/g, '')
+
+  check(
+    /share_statistics/.test(body) && /estimates\/consensus/.test(body),
+    'one batch of symbols answers BOTH endpoints — splitting them doubles the requests for two halves of one row',
+  )
+  check(
+    /as_of: String\(r\.date \?\? ''\)/.test(body),
+    "share statistics are keyed on the PROVIDER's date — keying on the fetch date mints a row per run and calls it history",
+  )
+  check(
+    /from\('currency'\)[\s\S]{0,200}upsert/.test(body),
+    'currency codes are LEARNED before the estimate write — currency_code is a foreign key, so an unseen code fails the STATEMENT and takes the batch with it',
+  )
+  check(
+    /if \(statRows\.length > 0\) \{/.test(body),
+    "a security is marked missing only when THIS batch answered — a run-wide tally is the 'if any of the 40 answered, blame the rest' rule yfinance defeats by omitting symbols from a 200",
+  )
+  check(
+    !/\* 100/.test(body) && !/\/ 100/.test(body),
+    'no unit conversion on write — these fields are fractions and stay fractions, because converting here hides the convention from every reader',
   )
 }
 

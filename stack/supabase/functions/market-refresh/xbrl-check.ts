@@ -5,7 +5,7 @@
  * choice yields a shorter series or a plausible-looking wrong number, never an error. So it is
  * driven over synthetic payloads shaped exactly like companyfacts.
  */
-import { factsFromCompanyFacts, type ConceptSpec } from './xbrl.ts'
+import { factsFromCompanyFacts, pickUnitKey, type ConceptSpec } from './xbrl.ts'
 
 let failures = 0
 function check(ok: boolean, label: string, detail = '') {
@@ -14,9 +14,12 @@ function check(ok: boolean, label: string, detail = '') {
 }
 
 const SPECS: ConceptSpec[] = [
-  { metricCode: 'revenue', concept: 'RevenueFromContractWithCustomerExcludingAssessedTax', priority: 100, unit: 'USD' },
-  { metricCode: 'revenue', concept: 'Revenues', priority: 80, unit: 'USD' },
-  { metricCode: 'shares_basic', concept: 'WeightedAverageNumberOfSharesOutstandingBasic', priority: 100, unit: 'shares' },
+  { metricCode: 'revenue', concept: 'RevenueFromContractWithCustomerExcludingAssessedTax', priority: 100, unit: 'USD', taxonomy: 'us-gaap' },
+  { metricCode: 'revenue', concept: 'Revenues', priority: 80, unit: 'USD', taxonomy: 'us-gaap' },
+  { metricCode: 'shares_basic', concept: 'WeightedAverageNumberOfSharesOutstandingBasic', priority: 100, unit: 'shares', taxonomy: 'us-gaap' },
+  // The IFRS spelling of the same metric. A foreign private issuer's companyfacts has NO us-gaap
+  // node at all, so without this the filer yields nothing and is marked absent for 30 days.
+  { metricCode: 'revenue', concept: 'Revenue', priority: 100, unit: 'USD', taxonomy: 'ifrs-full' },
 ]
 
 const facts = (units: Record<string, unknown[]>, concept = 'Revenues') => ({
@@ -143,6 +146,46 @@ console.log('xbrl fact resolution')
     'an uncatalogued filer yields no facts and no exception')
   check(factsFromCompanyFacts({}, SPECS).length === 0, 'an empty payload yields no facts')
   check(factsFromCompanyFacts(null, SPECS).length === 0, 'a null payload yields no facts')
+}
+
+
+// 9. AN IFRS FILER IS READ AT ALL. The first real run returned `noFacts: 10` of 20 filers, every
+//    one a foreign private issuer — AB InBev's companyfacts has only `['dei', 'ifrs-full']`, with
+//    no us-gaap node. Reading one taxonomy marks them absent for 30 days, silently.
+{
+  const payload = {
+    facts: { 'ifrs-full': { Revenue: { units: { EUR: [
+      { end: '2024-12-31', val: 22300, fp: 'FY', filed: '2025-02-01', start: '2024-01-01' },
+    ] } } } },
+  }
+  const out = factsFromCompanyFacts(payload, SPECS).filter((f) => f.metricCode === 'revenue')
+  check(out.length === 1 && out[0].value === 22300,
+    'an IFRS filer with no us-gaap node still yields facts', `got ${JSON.stringify(out)}`)
+  // 10. AND THE UNIT KEY IS THE REPORTING CURRENCY. Novo Nordisk files in DKK and Nokia in EUR;
+  //     labelling either "USD" is the Alibaba bug with a different company.
+  check(out.length === 1 && out[0].currency === 'EUR',
+    "the reporting currency comes from the unit key, not a constant", `got ${JSON.stringify(out)}`)
+}
+
+// 11. A FILER PUBLISHING TWO CURRENCIES PICKS ITS PRIMARY. TSMC reports in TWD and USD, the second
+//     a convenience translation with less history. Most data points wins; picking USD by habit
+//     would relabel the primary series.
+{
+  // USD FIRST on purpose. With the primary currency listed first, "most data points wins" and
+  // "the first key wins" give the same answer and a mutation swapping them passes clean — the
+  // convenience translation has to come first for the two rules to disagree.
+  const units = {
+    USD: [1, 2],
+    TWD: [1, 2, 3, 4, 5],
+  } as Record<string, unknown>
+  check(pickUnitKey(units, 'USD') === 'TWD',
+    'the currency with the most data points is the primary reporting currency',
+    `got ${pickUnitKey(units, 'USD')}`)
+  check(pickUnitKey({ shares: [1] }, 'shares') === 'shares', 'a share count finds its own unit key')
+  check(pickUnitKey({ 'DKK/shares': [1] }, 'USD/shares') === 'DKK/shares',
+    'a per-share figure is found in the filer\'s own currency')
+  check(pickUnitKey({ pure: [1], TWD: [1] }, 'shares') === null,
+    'a non-currency unit is not mistaken for one')
 }
 
 console.log(failures === 0 ? '\nALL XBRL CHECKS PASSED' : `\n${failures} XBRL CHECK(S) FAILED`)
