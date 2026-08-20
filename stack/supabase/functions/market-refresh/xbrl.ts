@@ -28,7 +28,39 @@ export interface ConceptSpec {
   metricCode: string
   concept: string
   priority: number
+  /**
+   * A KIND, not a literal. `USD` means "whichever currency this filer reports in", `USD/shares`
+   * per-share in that currency, `shares` a count. A US filer's facts sit under a `USD` unit key;
+   * Novo Nordisk's under `DKK` and Nokia's under `EUR`.
+   */
   unit: string
+  /** `us-gaap` for domestic filers, `ifrs-full` for foreign private issuers filing 20-F. */
+  taxonomy: string
+}
+
+/**
+ * Which unit key inside a concept holds the filer's own figures.
+ *
+ * A filer may publish several: TSMC reports in TWD **and** USD, the second being a convenience
+ * translation. The primary reporting currency carries the full history, so the key with the most
+ * data points wins — choosing USD instead would relabel Novo Nordisk's kroner as dollars.
+ */
+export function pickUnitKey(units: Record<string, unknown>, kind: string): string | null {
+  if (kind === 'shares') return 'shares' in units ? 'shares' : null
+  const perShare = kind.includes('/shares')
+  const re = perShare ? /^[A-Z]{3}\/shares$/ : /^[A-Z]{3}$/
+  let best: string | null = null
+  let bestLen = -1
+  for (const [key, val] of Object.entries(units)) {
+    if (!re.test(key)) continue
+    const len = Array.isArray(val) ? val.length : 0
+    // Ties break on the key so the answer does not depend on object order.
+    if (len > bestLen || (len === bestLen && best !== null && key < best)) {
+      best = key
+      bestLen = len
+    }
+  }
+  return best
 }
 
 async function secJson(url: string, timeoutMs: number): Promise<unknown> {
@@ -75,18 +107,27 @@ export function factsFromCompanyFacts(
   payload: unknown,
   concepts: ConceptSpec[],
 ): XbrlFact[] {
-  const gaap = (payload as { facts?: Record<string, unknown> })?.facts?.['us-gaap']
-  if (!gaap || typeof gaap !== 'object') return []
+  const facts = (payload as { facts?: Record<string, unknown> })?.facts
+  if (!facts || typeof facts !== 'object') return []
 
   // (metric, periodType, end) -> the best candidate seen so far.
   const best = new Map<string, { priority: number; filed: string; value: number; currency: string | null }>()
 
   for (const spec of concepts) {
-    const node = (gaap as Record<string, unknown>)[spec.concept] as
+    // BOTH TAXONOMIES. Reading only `us-gaap` marked ten foreign private issuers as having no
+    // facts — AB InBev's companyfacts has no us-gaap node at all, only `ifrs-full`.
+    const tax = (facts as Record<string, unknown>)[spec.taxonomy]
+    if (!tax || typeof tax !== 'object') continue
+    const node = (tax as Record<string, unknown>)[spec.concept] as
       | { units?: Record<string, unknown[]> }
       | undefined
-    const points = node?.units?.[spec.unit]
+    if (!node?.units) continue
+    const unitKey = pickUnitKey(node.units as Record<string, unknown>, spec.unit)
+    if (!unitKey) continue
+    const points = node.units[unitKey]
     if (!Array.isArray(points)) continue
+    // The unit key IS the reporting currency, arriving free and per filer.
+    const currency = spec.unit === 'shares' ? null : unitKey.slice(0, 3)
 
     for (const p of points) {
       const f = p as {
@@ -124,7 +165,7 @@ export function factsFromCompanyFacts(
           priority: spec.priority,
           filed,
           value: val,
-          currency: spec.unit === 'shares' ? null : 'USD',
+          currency,
         })
       }
     }

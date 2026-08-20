@@ -1156,13 +1156,14 @@ const STATEMENTS_RESOURCE = 'security-statements'
       const deadline = Date.now() + 60_000
       const { data: concepts, error: cErr } = await market
         .from('xbrl_concept')
-        .select('metric_code,concept,priority,unit')
+        .select('metric_code,concept,priority,unit,taxonomy')
       if (cErr) throw new Error(`xbrl_concept read failed: ${cErr.message}`)
       const specs: ConceptSpec[] = (concepts ?? []).map((c) => ({
         metricCode: c.metric_code as string,
         concept: c.concept as string,
         priority: Number(c.priority),
         unit: String(c.unit),
+        taxonomy: String(c.taxonomy ?? 'us-gaap'),
       }))
       if (specs.length === 0) throw new Error('xbrl_concept is empty — every filer would yield nothing')
 
@@ -1220,6 +1221,15 @@ const STATEMENTS_RESOURCE = 'security-statements'
               source_code: 'sec-xbrl',
               fetched_at: new Date().toISOString(),
             }))
+            // LEARN THE CURRENCY FIRST. `security_metric.currency_code` is a foreign key, and an
+            // IFRS filer reports in its own currency — DKK, TWD, EUR — so a code the table has
+            // never seen fails the STATEMENT and takes the whole filer with it.
+            const curs = [...new Set(rows.map((r) => r.currency_code).filter(Boolean))] as string[]
+            if (curs.length > 0) {
+              const { error: cuErr } = await market.from('currency')
+                .upsert(curs.map((code) => ({ code })), { onConflict: 'code', ignoreDuplicates: true })
+              if (cuErr) throw new Error(`currency learn failed: ${cuErr.message}`)
+            }
             for (let i = 0; i < rows.length; i += 500) {
               const { error } = await market
                 .from('security_metric')
