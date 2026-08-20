@@ -92,6 +92,7 @@ jobs:
               security-metrics \
               sec-cik-map \
               security-xbrl \
+              security-share-stats \
               security-corporate-actions \
               security-dividends \
               security-performance \
