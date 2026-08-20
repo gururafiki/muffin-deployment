@@ -963,20 +963,44 @@ const STATEMENTS_RESOURCE = 'security-statements'
     // over statements we already hold, and `market.derive_security_metrics` does all of it in one
     // statement — which is why it cannot be throttled and re-running it is free.
     if (resource === METRICS_RESOURCE) {
-      const { data, error } = await market.rpc('derive_security_metrics', {
-        p_limit: scopeLimit ?? null,
-      })
-      if (error) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: error.message })
-        return json({ resource, ok: false, error: error.message })
+      // PAGED, AND THE PAGE SIZE IS NOT NEGOTIABLE UPWARD. Unlimited, this exceeded the statement
+      // timeout on the role PostgREST uses (105,927 statements) and did NOTHING while correctly
+      // reporting the failure. 2,000 statements measured under a second, so the loop runs pages
+      // until the worker deadline instead of betting the whole table on one statement.
+      // Own deadline, like every other handler. 60s of the 90s worker budget, leaving room for
+      // the final `backlogSize` count and `finish_refresh` to answer.
+      const deadline = Date.now() + 60_000
+      const PAGE = scopeLimit ?? 4_000
+      let written = 0
+      let pages = 0
+      let lastError: string | null = null
+      while (Date.now() < deadline - 15_000) {
+        const { data, error } = await market.rpc('derive_security_metrics', { p_limit: PAGE })
+        if (error) { lastError = error.message; break }
+        const n = typeof data === 'number' ? data : 0
+        pages++
+        written += n
+        // A page that wrote nothing means the anti-join found nothing left to do. Stopping on it
+        // is safe ONLY because the page advances — with migration 90's non-advancing select this
+        // condition could never be reached and the loop would have spun until the deadline.
+        if (n === 0) break
+      }
+      if (lastError) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: lastError })
+        return json({ resource, ok: false, error: lastError, written, pages })
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
-        written: typeof data === 'number' ? data : 0,
-        // Statements that produced NOTHING. Non-zero and growing means the catalogue's field names
-        // have drifted from what the provider sends — the failure this whole design exists to make
-        // visible, and one that is otherwise silent because a missing field is simply no row.
+        written,
+        // MORE THAN ONE PAGE IS THE PROOF THE PAGING WORKS. Migration 90 shipped a select that
+        // returned the same rows every call; two invocations reported byte-identical counts and
+        // it read as throughput. If this is ever 1 while `remaining` stays high, that is back.
+        pages,
+        // Statement periods still to derive. Settles to the ones whose provider reports none of
+        // the mapped lines — non-zero and stable is expected; the TREND is the signal, because a
+        // rising count means the catalogue's field names have drifted from what a provider sends,
+        // which is otherwise silent (a missing field is simply no row).
         remaining: await backlogSize(market, 'pending_metrics'),
       })
     }
