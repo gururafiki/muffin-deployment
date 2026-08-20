@@ -164,6 +164,10 @@ jobs:
         # --allow-read: the registry check reads the workflow and the handler as TEXT, because the
         # resource names live in files that cannot import each other.
         run: deno run --allow-read stack/supabase/functions/market-refresh/logic-check.ts
+          # The XBRL resolver is pure logic over a companyfacts-shaped payload, and every
+          # subtlety in it fails silently — a wrong concept choice yields a shorter series, a
+          # mislabelled duration yields a plausible wrong number. Driven offline, no network.
+          deno run --allow-read stack/supabase/functions/market-refresh/xbrl-check.ts
 
   terraform:
     runs-on: ubuntu-latest

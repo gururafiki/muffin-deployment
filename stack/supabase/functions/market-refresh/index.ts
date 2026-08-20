@@ -34,6 +34,7 @@ import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
 import { SUBUNITS, fetchUsdPerUnit, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
+import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, type ConceptSpec } from './xbrl.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
@@ -294,6 +295,8 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
+const CIK_RESOURCE = 'sec-cik-map'
+const XBRL_RESOURCE = 'security-xbrl'
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
@@ -337,6 +340,8 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
+    [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -972,6 +977,156 @@ const STATEMENTS_RESOURCE = 'security-statements'
     // daily resource, so this does not need to re-run to stay current at the DAILY grain — but the
     // weekly series does drift stale at its own end, which is why the resource stays scheduled
     // rather than being a one-time script someone has to remember.
+    // ONE FILE, EVERY US FILER. `company_tickers.json` is 776 KB and maps ticker -> CIK for
+    // ~10,400 filers, which is the whole input to the XBRL resource below. Reference data, so it
+    // runs on the reference TTL rather than the backlog one.
+    if (resource === CIK_RESOURCE) {
+      const deadline = Date.now() + 70_000
+      const map = await fetchCikMap(30_000)
+      if (map.size === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: 'empty cik map' })
+        return json({ resource, ok: false, error: 'SEC returned no filers' })
+      }
+
+      // Matched on the US TICKER, which is what SEC lists. A local symbol (`SAP.DE`) is not a
+      // filer id and must not be matched — that is why this reads `security_identifier`, not
+      // `security_symbol`, whose `coalesce(ticker, provider_symbol)` would supply one.
+      let matched = 0
+      let scanned = 0
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await market
+          .from('security_identifier')
+          .select('security_id,value')
+          .eq('kind_code', 'ticker')
+          .range(from, from + 999)
+        if (error) throw new Error(`security_identifier read failed: ${error.message}`)
+        const page = data ?? []
+        scanned += page.length
+
+        const updates: { security_id: string; cik: number }[] = []
+        for (const r of page) {
+          const cik = map.get(String(r.value).toUpperCase())
+          if (cik) updates.push({ security_id: r.security_id as string, cik })
+        }
+        for (let i = 0; i < updates.length; i += 500) {
+          const chunk = updates.slice(i, i + 500)
+          for (const u of chunk) {
+            const { error: uErr } = await market
+              .from('security').update({ cik: u.cik }).eq('security_id', u.security_id)
+            if (uErr) throw new Error(`cik update failed: ${uErr.message}`)
+          }
+          matched += chunk.length
+        }
+        if (page.length < 1000) break
+        if (Date.now() > deadline) break
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, filers: map.size, scanned, matched })
+    }
+
+    // SEVENTEEN YEARS, QUARTERLY, ONE REQUEST PER FILER.
+    if (resource === XBRL_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const { data: concepts, error: cErr } = await market
+        .from('xbrl_concept')
+        .select('metric_code,concept,priority,unit')
+      if (cErr) throw new Error(`xbrl_concept read failed: ${cErr.message}`)
+      const specs: ConceptSpec[] = (concepts ?? []).map((c) => ({
+        metricCode: c.metric_code as string,
+        concept: c.concept as string,
+        priority: Number(c.priority),
+        unit: String(c.unit),
+      }))
+      if (specs.length === 0) throw new Error('xbrl_concept is empty — every filer would yield nothing')
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_xbrl')
+        .select('security_id,cik')
+        .limit(scopeLimit ?? 150)
+      if (pErr) throw new Error(`pending_xbrl read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        cik: Number(r.cik),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every filer is current' })
+      }
+
+      let written = 0
+      let filers = 0
+      let noFacts = 0
+      let failed = 0
+      let anySucceeded = false
+      let lastError: string | null = null
+
+      for (const item of wanted) {
+        // ONE AT A TIME AND BOUNDED. companyfacts is ~3.6 MB for a large filer; holding several in
+        // a 256 MB worker at once is how a resource dies with a bare 502 instead of an error.
+        if (Date.now() > deadline - 6_000) break
+        try {
+          const payload = await fetchCompanyFacts(item.cik, Math.min(25_000, deadline - Date.now()))
+          if (payload !== null) anySucceeded = true
+          const facts = payload === null ? [] : factsFromCompanyFacts(payload, specs)
+          filers++
+
+          if (facts.length === 0) {
+            // Marked only when SEC actually answered for someone this run — a refusal is about the
+            // endpoint, not about this filer.
+            if (anySucceeded) {
+              noFacts++
+              const { error } = await market
+                .from('security')
+                .update({ xbrl_missing_at: new Date().toISOString() })
+                .eq('security_id', item.securityId)
+              if (error) throw new Error(`xbrl_missing_at update failed: ${error.message}`)
+            }
+          } else {
+            const rows = facts.map((f) => ({
+              security_id: item.securityId,
+              metric_code: f.metricCode,
+              period_type: f.periodType,
+              as_of: f.periodEnding,
+              value: f.value,
+              currency_code: f.currency,
+              source_code: 'sec-xbrl',
+              fetched_at: new Date().toISOString(),
+            }))
+            for (let i = 0; i < rows.length; i += 500) {
+              const { error } = await market
+                .from('security_metric')
+                .upsert(
+                  dedupeBy(rows.slice(i, i + 500),
+                    (r) => `${r.security_id}|${r.metric_code}|${r.period_type}|${r.as_of}`),
+                  { onConflict: 'security_id,metric_code,period_type,as_of' },
+                )
+              if (error) throw new Error(`security_metric xbrl upsert failed: ${error.message}`)
+            }
+            written += rows.length
+          }
+
+          // RECORDED WHETHER OR NOT FACTS CAME BACK. The backlog is keyed on when we last ASKED,
+          // so failing to stamp it here would re-ask the same filers every run for ever.
+          const { error: tErr } = await market
+            .from('security')
+            .update({ xbrl_fetched_at: new Date().toISOString() })
+            .eq('security_id', item.securityId)
+          if (tErr) throw new Error(`xbrl_fetched_at update failed: ${tErr.message}`)
+        } catch (e) {
+          failed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, filers, noFacts, failed, lastError,
+        remaining: await backlogSize(market, 'pending_xbrl'),
+      })
+    }
+
     if (resource === PRICE_HISTORY_RESOURCE) {
       const deadline = Date.now() + 60_000
       const { data: pending, error: pErr } = await market
