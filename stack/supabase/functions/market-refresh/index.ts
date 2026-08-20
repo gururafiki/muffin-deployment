@@ -1122,8 +1122,11 @@ const STATEMENTS_RESOURCE = 'security-statements'
       })
     }
 
+    // ONE FILE, ONE STATEMENT. `company_tickers.json` is 776 KB and maps ticker -> CIK for
+    // ~10,400 filers. The first version applied it row by row and reached 6,645 of ~27,000
+    // identifiers before its deadline — then restarted from zero on the next run, so it could
+    // never reach the rest while reporting 3,516 matches as if that were progress.
     if (resource === CIK_RESOURCE) {
-      const deadline = Date.now() + 70_000
       const map = await fetchCikMap(30_000)
       if (map.size === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: 'empty cik map' })
@@ -1131,40 +1134,21 @@ const STATEMENTS_RESOURCE = 'security-statements'
       }
 
       // Matched on the US TICKER, which is what SEC lists. A local symbol (`SAP.DE`) is not a
-      // filer id and must not be matched — that is why this reads `security_identifier`, not
-      // `security_symbol`, whose `coalesce(ticker, provider_symbol)` would supply one.
-      let matched = 0
-      let scanned = 0
-      for (let from = 0; ; from += 1000) {
-        const { data, error } = await market
-          .from('security_identifier')
-          .select('security_id,value')
-          .eq('kind_code', 'ticker')
-          .range(from, from + 999)
-        if (error) throw new Error(`security_identifier read failed: ${error.message}`)
-        const page = data ?? []
-        scanned += page.length
-
-        const updates: { security_id: string; cik: number }[] = []
-        for (const r of page) {
-          const cik = map.get(String(r.value).toUpperCase())
-          if (cik) updates.push({ security_id: r.security_id as string, cik })
-        }
-        for (let i = 0; i < updates.length; i += 500) {
-          const chunk = updates.slice(i, i + 500)
-          for (const u of chunk) {
-            const { error: uErr } = await market
-              .from('security').update({ cik: u.cik }).eq('security_id', u.security_id)
-            if (uErr) throw new Error(`cik update failed: ${uErr.message}`)
-          }
-          matched += chunk.length
-        }
-        if (page.length < 1000) break
-        if (Date.now() > deadline) break
-      }
+      // filer id, which is why the function joins `security_identifier` rather than
+      // `security_symbol` — the latter's `coalesce(ticker, provider_symbol)` would supply one.
+      const { data, error } = await market.rpc('apply_cik_map', {
+        p_map: Object.fromEntries(map),
+      })
+      if (error) throw new Error(`apply_cik_map failed: ${error.message}`)
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, filers: map.size, scanned, matched })
+      return json({
+        resource,
+        filers: map.size,
+        // Rows CHANGED, not rows matched: the statement skips a security whose cik is already
+        // right, so a steady-state run reports 0 and that is the correct answer.
+        updated: typeof data === 'number' ? data : 0,
+      })
     }
 
     // SEVENTEEN YEARS, QUARTERLY, ONE REQUEST PER FILER.
