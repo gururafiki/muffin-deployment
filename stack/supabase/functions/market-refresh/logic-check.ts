@@ -1216,7 +1216,13 @@ console.log('\nresource registry — the cron and the function agree')
   // this check searched the whole file and passed while broken, because
   // `SWEEP_DEADLINE - VENUE_RESERVE_MS` also appears in the `stoppedBecause` expression a few
   // lines below — so weakening the actual loop guard changed nothing it could see.
-  const sweepWhile = index.match(/while \(\s*\n?\s*Date\.now\(\)[^)]*?\)\s*\{/s)?.[0] ?? ''
+  // SLICED TO THE SWEEP'S OWN HANDLER FIRST. This used to match the FIRST `while (Date.now()...)`
+  // in the whole file, which was the sweep's only by accident of ordering — adding a paged loop to
+  // `security-metrics` above it made this guard start reading the wrong loop and fail for a reason
+  // unrelated to what it tests. Same defect the comment above describes, one level up: anchoring on
+  // a pattern is not anchoring on the thing.
+  const sweepBody = index.slice(index.indexOf('resource === LISTINGS_RESOURCE'))
+  const sweepWhile = sweepBody.match(/while \(\s*\n?\s*Date\.now\(\)[^)]*?\)\s*\{/s)?.[0] ?? ''
   check(/SWEEP_DEADLINE - VENUE_RESERVE_MS/.test(sweepWhile),
     'the sweep refuses to START a venue it cannot finish, rather than only checking the deadline',
     sweepWhile ? `condition: ${sweepWhile.replace(/\s+/g, ' ').slice(0, 90)}` : 'no while loop found')
