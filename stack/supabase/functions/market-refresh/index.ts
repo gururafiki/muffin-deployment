@@ -35,6 +35,7 @@ import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts
 import { SUBUNITS, fetchUsdPerUnit, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, type ConceptSpec } from './xbrl.ts'
+import { candidateSymbols } from './symbol-repair.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
@@ -296,6 +297,7 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
+const SYMBOL_REPAIR_RESOURCE = 'security-symbol-repair'
 const NEWS_RESOURCE = 'security-news'
 const SHARE_STATS_RESOURCE = 'security-share-stats'
 const CIK_RESOURCE = 'sec-cik-map'
@@ -343,6 +345,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SYMBOL_REPAIR_RESOURCE]: BACKLOG_TTL_MINUTES,
     [NEWS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
@@ -989,6 +992,92 @@ const STATEMENTS_RESOURCE = 'security-statements'
     // per-security snapshots for the same securities, and both batch — six symbols in 0.48s and
     // 0.33s measured — so fetching them together halves the requests for what is really two halves
     // of one row.
+    // A WRONG NAME IS NOT A MISSING SECURITY.
+    if (resource === SYMBOL_REPAIR_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_symbol_repair')
+        .select('security_id,symbol,fetch_symbol')
+        .limit(scopeLimit ?? 120)
+      if (pErr) throw new Error(`pending_symbol_repair read failed: ${pErr.message}`)
+
+      let examined = 0
+      let repaired = 0
+      let probes = 0
+      let failed = 0
+      let lastError: string | null = null
+      const fixes: string[] = []
+
+      for (const row of pending ?? []) {
+        if (Date.now() > deadline - 8_000) break
+        const current = String(row.fetch_symbol ?? row.symbol)
+        const candidates = candidateSymbols(current)
+        // Stamped even when there is nothing to try, or a security whose spelling is simply right
+        // is re-examined on every run for ever.
+        examined++
+        if (candidates.length === 0) {
+          const { error } = await market.from('security')
+            .update({ symbol_repair_at: new Date().toISOString() })
+            .eq('security_id', row.security_id as string)
+          if (error) throw new Error(`symbol_repair_at update failed: ${error.message}`)
+          continue
+        }
+
+        let adopted: string | null = null
+        for (const candidate of candidates) {
+          if (Date.now() > deadline - 6_000) break
+          probes++
+          try {
+            // ONE SYMBOL, SHORT WINDOW. The question is only "does the provider know this name",
+            // so a year of weekly bars is enough and a 20-year fetch would cost 5x for the same
+            // yes-or-no.
+            const rows = await fetcher(
+              `/api/v1/equity/price/historical?symbol=${encodeURIComponent(candidate)}` +
+                `&provider=yfinance&interval=1W&start_date=2023-01-01`,
+              Math.min(15_000, deadline - Date.now()),
+            )
+            // ADOPTION REQUIRES AN ANSWER. The rules are generated liberally — the Nordic one
+            // matches `SAND.ST` (Sandvik), a company name and not a class share — so a candidate
+            // that returns nothing is simply wrong, and silence is the provider saying so.
+            if (rows.length > 0) { adopted = candidate; break }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+            lastError = msg
+            // A refusal is about the endpoint, not the candidate: stop probing rather than
+            // concluding every remaining spelling is wrong.
+            if (throttled(msg)) { failed++; break }
+          }
+        }
+
+        if (adopted) {
+          const { error: sErr } = await market.from('security_provider_symbol')
+            .upsert({ security_id: row.security_id, provider_code: 'yfinance', symbol: adopted },
+              { onConflict: 'security_id,provider_code' })
+          if (sErr) throw new Error(`security_provider_symbol upsert failed: ${sErr.message}`)
+          // A CORRECTED SYMBOL INVALIDATES EVERY SYMBOL-KEYED CACHE. Fixing the spelling and
+          // leaving the marks set would keep the security excluded for 30 days by the very flags
+          // that recorded asking under the wrong name.
+          const { error: cErr } = await market.rpc('clear_symbol_caches', {
+            p_security_id: row.security_id,
+          })
+          if (cErr) throw new Error(`clear_symbol_caches failed: ${cErr.message}`)
+          repaired++
+          if (fixes.length < 12) fixes.push(`${current} -> ${adopted}`)
+        }
+
+        const { error } = await market.from('security')
+          .update({ symbol_repair_at: new Date().toISOString() })
+          .eq('security_id', row.security_id as string)
+        if (error) throw new Error(`symbol_repair_at update failed: ${error.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, examined, repaired, probes, failed, lastError, fixes,
+        remaining: await backlogSize(market, 'pending_symbol_repair'),
+      })
+    }
+
     if (resource === NEWS_RESOURCE) {
       const deadline = Date.now() + 60_000
       const { data: pending, error: pErr } = await market
