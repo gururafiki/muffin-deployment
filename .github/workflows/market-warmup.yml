@@ -90,6 +90,8 @@ jobs:
               security-fundamentals \
               security-statements \
               security-metrics \
+              sec-cik-map \
+              security-xbrl \
               security-corporate-actions \
               security-dividends \
               security-performance \

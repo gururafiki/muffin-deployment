@@ -1070,6 +1070,7 @@ console.log('\nresource registry — the cron and the function agree')
     STATEMENTS_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
+    XBRL_RESOURCE: [],
     // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
     // `security_id` alone, so one row is one security.
     FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
@@ -1643,9 +1644,17 @@ console.log('\nsecurity-price-history')
     /grain: 'weekly'/.test(body),
     'the backfill writes weekly-grained rows, or the prune will treat them as a stale daily window',
   )
+  // PER BATCH, NOT PER RUN. Observed live: a run reported `noHistory: 13` beside
+  // `Signal timed out`, because a run-wide success flag says "if any of the 40 answered, blame
+  // the rest" — and yfinance throttles PROGRESSIVELY, omitting symbols from a 200 rather than
+  // erroring, so a partly-served batch is indistinguishable from a healthy one.
   check(
-    /if \(anySucceeded\)/.test(body),
-    'a security is marked as having no history only when the endpoint answered for SOMEONE this run — a throttled yfinance returns 200-with-no-rows and would otherwise mark thousands',
+    /const batchClean = !isolated\.error && rows\.length > 0/.test(body),
+    'the marking gate is computed PER BATCH from that batch\'s own outcome, not from a run-wide tally',
+  )
+  check(
+    /if \(!batchClean && !deadSymbols\.has\(/.test(body),
+    'a symbol is skipped unless its batch answered cleanly OR isolation asked it alone and it failed — the next run costs one request, a false mark costs 30 days',
   )
   check(
     /fetchWithIsolation/.test(body),

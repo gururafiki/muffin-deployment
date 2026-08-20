@@ -156,14 +156,24 @@ jobs:
         # compile is a guard nobody can trust.
         run: |
           deno check stack/supabase/functions/market-refresh/index.ts \
-                     stack/supabase/functions/market-refresh/logic-check.ts
+                     stack/supabase/functions/market-refresh/logic-check.ts \
+                     stack/supabase/functions/market-refresh/xbrl-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
       - name: Logic checks
         # --allow-read: the registry check reads the workflow and the handler as TEXT, because the
         # resource names live in files that cannot import each other.
-        run: deno run --allow-read stack/supabase/functions/market-refresh/logic-check.ts
+        # A BLOCK SCALAR, not two lines appended to a plain one. Appending to `run: <cmd>` folds
+        # the following lines INTO THE STRING — comments included — and the job fails to parse
+        # with "This run likely failed because of a workflow file issue", which names no file and
+        # no line.
+        run: |
+          deno run --allow-read stack/supabase/functions/market-refresh/logic-check.ts
+          # The XBRL resolver is pure logic over a companyfacts-shaped payload, and every subtlety
+          # in it fails silently — a wrong concept choice yields a shorter series, a mislabelled
+          # duration yields a plausible wrong number. Driven offline, no network.
+          deno run --allow-read stack/supabase/functions/market-refresh/xbrl-check.ts
 
   terraform:
     runs-on: ubuntu-latest
