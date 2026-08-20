@@ -44,8 +44,12 @@ drop view if exists market.security_current;
 do $$
 declare v record;
 begin
+  -- RELKIND-AWARE, because a MATERIALIZED view has a `pg_rewrite` entry too and is discovered
+  -- here exactly like a plain one — while `drop view if exists` raises `"x" is not a view` for it
+  -- and `IF EXISTS` does not help. Migration 102's `symbol_security` is such a dependent, and it
+  -- failed the deploy on pass 2. Migration 013's loop needed the same fix for the same reason.
   for v in
-    select distinct dv.relname as name
+    select distinct dv.relname as name, dv.relkind as kind
     from pg_depend d
     join pg_rewrite r  on r.oid = d.objid
     join pg_class dv   on dv.oid = r.ev_class
@@ -53,7 +57,11 @@ begin
     join pg_namespace n on n.oid = src.relnamespace
     where n.nspname = 'market' and src.relname = 'security_symbol' and dv.relname <> 'security_symbol'
   loop
-    execute format('drop view if exists market.%I cascade', v.name);
+    if v.kind = 'm' then
+      execute format('drop materialized view if exists market.%I cascade', v.name);
+    else
+      execute format('drop view if exists market.%I cascade', v.name);
+    end if;
   end loop;
 end $$;
 
