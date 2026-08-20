@@ -406,6 +406,24 @@ jobs:
             fail=1
           fi
 
+          # 9. A DERIVED NUMBER MUST MATCH THE FILING IT CAME FROM. `security-metrics` reports a
+          #    `written` count, and that count is satisfied by writing the WRONG number exactly as
+          #    well as the right one — it says a row was produced, not that the row is true.
+          #
+          #    The comparison is possible because this pipeline keeps the raw provider jsonb beside
+          #    the served value. `sec` and `yfinance` share 4 of 40 income-statement field names, so
+          #    every metric's provider spelling is a ROW in `metric_source_field` — and a provider
+          #    renaming a field produces no error at all: the metric stops appearing and the chart
+          #    is merely shorter. Same for a metric wired to the wrong provider's spelling
+          #    (`total_pretax_income` vs `total_pre_tax_income`), which yields null, not a mistake.
+          #
+          #    The script FAILS when it compares zero values, rather than reporting success. Every
+          #    sampled metric failing to resolve a field is precisely what a mapping drift looks
+          #    like, and a check that verified nothing must never read as a check that passed.
+          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_derived_metrics.py; then
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
