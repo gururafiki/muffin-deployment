@@ -1064,7 +1064,11 @@ console.log('\nresource registry — the cron and the function agree')
   // backlog that reports itself drained for ever.
   const REMAINING_MAY_USE: Record<string, string[]> = {
     ACTIONS_RESOURCE: ['wanted', 'covered', 'none', 'noTicker'],
-    STATEMENTS_RESOURCE: ['wanted', 'symbolsAnswered', 'none'],
+    // Both of these report the BACKLOG via `backlogSize`, which the loop exempts from the
+    // arithmetic rules — there are no units to confuse in a `content-range` count. They are still
+    // listed so the "has the list rotted" tally keeps meaning "every resource was looked at".
+    STATEMENTS_RESOURCE: [],
+    METRICS_RESOURCE: [],
     // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
     // `security_id` alone, so one row is one security.
     FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],

@@ -293,6 +293,7 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
+const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
@@ -334,6 +335,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -953,6 +955,29 @@ const STATEMENTS_RESOURCE = 'security-statements'
         throttledOut: failed > 0 && !!lastError && throttled(lastError),
         asked: wanted.length,
         remaining: Math.max(0, wanted.length - covered - none - noTicker),
+      })
+    }
+
+    // DERIVING METRICS NEEDS NO PROVIDER, so this resource has none of the machinery the others
+    // do: no batching, no isolation, no negative cache, no deadline arithmetic. The work is a JOIN
+    // over statements we already hold, and `market.derive_security_metrics` does all of it in one
+    // statement — which is why it cannot be throttled and re-running it is free.
+    if (resource === METRICS_RESOURCE) {
+      const { data, error } = await market.rpc('derive_security_metrics', {
+        p_limit: scopeLimit ?? null,
+      })
+      if (error) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: error.message })
+        return json({ resource, ok: false, error: error.message })
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        written: typeof data === 'number' ? data : 0,
+        // Statements that produced NOTHING. Non-zero and growing means the catalogue's field names
+        // have drifted from what the provider sends — the failure this whole design exists to make
+        // visible, and one that is otherwise silent because a missing field is simply no row.
+        remaining: await backlogSize(market, 'pending_metrics'),
       })
     }
 
