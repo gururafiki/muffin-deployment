@@ -1091,6 +1091,17 @@ console.log('\nresource registry — the cron and the function agree')
     if (!/^\s*remaining:/.test(l)) return
     checkedExpressions++
     const owner = resourceAt(i + 1)
+    // THE BACKLOG COUNT IS EXEMPT, BECAUSE IT IS THE BETTER ANSWER TO THE SAME QUESTION.
+    //
+    // This guard exists for arithmetic `remaining` expressions, which kept confusing rows with
+    // securities and page-with-backlog. `backlogSize(market, 'pending_x')` is not arithmetic at
+    // all: it asks Postgres for the true total via `content-range`, so there are no units to
+    // confuse and nothing to subtract. Requiring the subtraction here would forbid the one form
+    // that cannot get this wrong.
+    //
+    // Narrow on purpose — it must be a call to THIS helper against a `pending_` view, so
+    // `remaining: someOtherThing()` is still an offence.
+    if (/^\s*remaining:\s*await backlogSize\(market, 'pending_\w+'\),\s*$/.test(l)) return
     const allowed = owner ? REMAINING_MAY_USE[owner] : undefined
     if (!allowed) {
       offenders.push(`line ${i + 1}: no declared identifier list for ${owner ?? 'unknown resource'}`)
@@ -1116,6 +1127,9 @@ console.log('\nresource registry — the cron and the function agree')
   check(offenders.length === 0,
     'every `remaining` uses only the identifiers its resource declares (rows are not securities)',
     offenders.join(' | '))
+  // The exempted backlog-count lines still increment `checkedExpressions`, so this tally keeps
+  // meaning "every resource's remaining was looked at" rather than silently shrinking as
+  // resources move to the count.
   check(checkedExpressions === Object.keys(REMAINING_MAY_USE).length,
     'every declared resource was actually checked — the list has not rotted',
     `${checkedExpressions} expressions vs ${Object.keys(REMAINING_MAY_USE).length} declared`)
@@ -1511,6 +1525,56 @@ console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
     /secOk = true/.test(body),
     'secOk is actually set when SEC returns rows — an success flag that is never raised marks nothing, and one that is never checked marks everything',
   )
+}
+
+
+// ── every source a function WRITES must be a source some migration CREATED ───────────────────
+//
+// `security_statement.source_code` and its siblings are foreign keys to `market.data_source`.
+// Migration 88 shipped a resource writing `source_code: 'sec'` with no migration creating that
+// row, and the FIRST REAL RUN in production died with
+// `violates foreign key constraint "security_statement_source_code_fkey"` — taking the whole
+// resource with it, including rows from the provider that WAS registered.
+//
+// Nothing could have caught it downstream: the migration tests apply to a database where no
+// resource runs, so the constraint is never exercised, and every offline check passed.
+// Migration 67 got it right for Tiingo by seeding the source alongside the resource; this makes
+// that a rule instead of a habit.
+console.log('\nevery source_code written by a function is seeded by a migration')
+{
+  const dir = new URL('../', import.meta.url)
+  let fnText = ''
+  for await (const e of Deno.readDir(dir)) {
+    if (!e.isDirectory) continue
+    for await (const f of Deno.readDir(new URL(e.name + '/', dir))) {
+      if (f.isFile && f.name.endsWith('.ts') && f.name !== 'logic-check.ts') {
+        fnText += await Deno.readTextFile(new URL(`${e.name}/${f.name}`, dir))
+      }
+    }
+  }
+  const written = new Set(
+    [...fnText.matchAll(/source_code:\s*'([a-z0-9_-]+)'/g)].map((m) => m[1]),
+  )
+
+  const migDir = new URL('../../migrations/', import.meta.url)
+  let migText = ''
+  for await (const f of Deno.readDir(migDir)) {
+    if (f.isFile && f.name.endsWith('.sql')) migText += await Deno.readTextFile(new URL(f.name, migDir))
+  }
+  // Only the data_source inserts, so a source merely MENTIONED in a comment cannot vouch for itself.
+  const seeded = new Set<string>()
+  for (const m of migText.matchAll(/insert\s+into\s+market\.data_source[\s\S]{0,2000}?;/gi)) {
+    for (const v of m[0].matchAll(/\(\s*'([a-z0-9_-]+)'\s*,/g)) seeded.add(v[1])
+  }
+
+  check(written.size > 0, `at least one source_code literal was found (${written.size})`)
+  check(seeded.size > 0, `at least one data_source seed was found (${seeded.size})`)
+  for (const code of [...written].sort()) {
+    check(
+      seeded.has(code),
+      `'${code}' is written by a function AND seeded by a migration — an unseeded source is a foreign key violation on the resource's first real run, not a typecheck error`,
+    )
+  }
 }
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)

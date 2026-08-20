@@ -277,7 +277,23 @@ Deno.serve(async (req: Request) => {
   const PROMOTE_RESOURCE = 'promote-listing'
   const ONE_SECURITY_RESOURCE = 'security-refresh'
   const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
-  const STATEMENTS_RESOURCE = 'security-statements'
+  /**
+ * How many securities the backlog still holds — the TRUE total, via `content-range`.
+ *
+ * Never a page: `PGRST_DB_MAX_ROWS` is 1,000, so `select(...).limit(5000)` returns exactly 1,000
+ * and a guard sized on it reports "1000" for ever however bad things get. `head: true` fetches no
+ * rows at all, which is also why it is cheap enough to run on every response.
+ *
+ * Returns null rather than 0 when the count is unavailable: a failed count and an empty backlog
+ * are different facts, and reporting the second for the first is how a resource announces itself
+ * drained while it is broken.
+ */
+async function backlogSize(market: MarketClient, view: string): Promise<number | null> {
+  const { count, error } = await market.from(view).select('security_id', { count: 'exact', head: true })
+  return error ? null : (count ?? null)
+}
+
+const STATEMENTS_RESOURCE = 'security-statements'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -1183,14 +1199,22 @@ Deno.serve(async (req: Request) => {
         // only and the batch size must go back to 1.
         symbolsAnswered: symbolsAnswered.size,
         symbolsAsked: wanted.length,
-        // SECURITIES, not rows. `written` counts statement ROWS — income/balance/cash across
-        // several periods, about twelve per security — so `wanted.length - written` subtracted
-        // twelve-per-security from a count of securities and hit zero almost immediately.
-        // Measured live 2026-08-17: `written: 276, symbolsAsked: 60, remaining: 0` while
-        // `pending_statements` stood at 3,646. The backlog reported itself drained on every run.
-        // Third instance of this unit confusion (see ACTIONS_RESOURCE, SEC_PERF_RESOURCE); the
-        // guard in logic-check.ts now fails on the shape rather than the instance.
-        remaining: Math.max(0, wanted.length - symbolsAnswered.size - none),
+        // THE BACKLOG, COUNTED — not what is left of this page.
+        //
+        // The page-scoped number is `unanswered` below. `remaining` used to be page-scoped too and
+        // therefore reported 0 on a run that had asked 20 of 8,633 — which is indistinguishable
+        // from a drained backlog, the single most dangerous reading in this pipeline (a backlog
+        // that empties by MARKING looks exactly like one that empties by WORKING). It also meant
+        // this resource's `remaining` and `security-industries`' `remaining` were different units
+        // with the same name, so comparing two runs was misleading by construction.
+        //
+        // Counted with `head: true`, so it is a `content-range` and not a page: a `.limit()` above
+        // PGRST_DB_MAX_ROWS silently returns 1,000 and would report "1000" for ever however bad
+        // things got.
+        remaining: await backlogSize(market, 'pending_statements'),
+        // What this PAGE failed to answer for. Non-zero here with `remaining` still large is an
+        // ordinary partial run; non-zero here on every run is a provider problem.
+        unanswered: Math.max(0, wanted.length - symbolsAnswered.size - none),
       })
     }
 
