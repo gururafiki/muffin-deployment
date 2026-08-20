@@ -1150,7 +1150,6 @@ const STATEMENTS_RESOURCE = 'security-statements'
       let batches = 0
       let batchesFailed = 0
       let noHistory = 0
-      let anySucceeded = false
       let throttledOut = false
       let lastError: string | null = null
 
@@ -1173,11 +1172,17 @@ const STATEMENTS_RESOURCE = 'security-statements'
           )
           const rows = isolated.rows
           if (isolated.error) lastError = isolated.error
-          // A symbol the provider rejects ALONE is genuinely bad; one that failed only inside a
-          // batch was collateral, and `fetchWithIsolation` already tells them apart. Marking is
-          // still gated on the endpoint having answered for someone this run.
           const deadSymbols = new Set(isolated.dead.map((d) => d.toUpperCase()))
-          if (rows.length > 0) anySucceeded = true
+          // PER BATCH, NOT PER RUN. A run-wide `anySucceeded` is the "if any of the 40 answered,
+          // blame the rest" rule, and yfinance defeats it by throttling PROGRESSIVELY — it omits
+          // symbols from a 200 rather than erroring, so a partly-served batch looks like a healthy
+          // one. Observed live: a run reported `noHistory: 13` alongside `Signal timed out`, and
+          // those 13 were almost certainly collateral.
+          //
+          // So a symbol is only marked when THIS batch answered cleanly and simply did not include
+          // it, or when isolation asked it ALONE and it failed. Anything else is left for the next
+          // run, which costs one more request and cannot cost a security 30 days.
+          const batchClean = !isolated.error && rows.length > 0
 
           const bySymbol = new Map<string, { date: string; close: number }[]>()
           for (const r of rows) {
@@ -1195,12 +1200,11 @@ const STATEMENTS_RESOURCE = 'security-statements'
           for (const g of group) {
             const bars = bySymbol.get(g.fetchSymbol.toUpperCase()) ?? []
             if (bars.length === 0) {
-              // A symbol the deadline stopped us asking about is not a symbol with no history.
-              if (!anySucceeded && !deadSymbols.has(g.fetchSymbol.toUpperCase())) continue
-              // MARKED ONLY IF THE ENDPOINT ANSWERED FOR SOMEONE. A throttled yfinance returns a
+              if (!batchClean && !deadSymbols.has(g.fetchSymbol.toUpperCase())) continue
+              // MARKED ONLY IF THIS BATCH ANSWERED CLEANLY, OR ISOLATION PROVED THE SYMBOL DEAD. A throttled yfinance returns a
               // 200 with no rows rather than erroring, and marking on that recorded "this security
               // has no history" for thousands of perfectly answerable ones in a single afternoon.
-              if (anySucceeded) {
+              {
                 noHistory++
                 const { error } = await market
                   .from('security')
