@@ -1129,13 +1129,34 @@ const STATEMENTS_RESOURCE = 'security-statements'
         const bySymbol = new Map(group.map((g) => [g.fetchSymbol.toUpperCase(), g.securityId]))
         batches++
         try {
-          const syms = symbolList(group.map((g) => g.fetchSymbol))
-          const [statRows, estRows] = await Promise.all([
-            fetcher(`/api/v1/equity/ownership/share_statistics?symbol=${syms}&provider=yfinance`,
-              Math.min(30_000, deadline - Date.now())),
-            fetcher(`/api/v1/equity/estimates/consensus?symbol=${syms}&provider=yfinance`,
-              Math.min(30_000, deadline - Date.now())),
+          // ISOLATED, because ONE BAD SYMBOL KILLS A BATCHED CALL and this backlog is ordered by
+          // fund weight — so the same poisoned head comes back every run and the resource stalls
+          // for ever. Observed live: `openbb 400 on /equity/estimates/consensus?symbol=
+          // HUMANSFT.KW,ROST,...` took all 40 symbols with it, `remaining` sat at 11,136 across
+          // eight consecutive runs, and `stats: 0` reported it as if nothing needed doing.
+          const wantSyms = group.map((g) => g.fetchSymbol)
+          const timeout = () => Math.min(30_000, deadline - Date.now())
+          const [statIso, estIso] = await Promise.all([
+            fetchWithIsolation(
+              fetcher,
+              (syms: string[]) =>
+                `/api/v1/equity/ownership/share_statistics?symbol=${symbolList(syms)}&provider=yfinance`,
+              wantSyms, timeout(), deadline,
+            ),
+            fetchWithIsolation(
+              fetcher,
+              (syms: string[]) =>
+                `/api/v1/equity/estimates/consensus?symbol=${symbolList(syms)}&provider=yfinance`,
+              wantSyms, timeout(), deadline,
+            ),
           ])
+          const statRows = statIso.rows
+          const estRows = estIso.rows
+          if (statIso.error) lastError = statIso.error
+          else if (estIso.error) lastError = estIso.error
+          // A symbol the provider rejects ALONE is genuinely bad. Marking it is what lets the
+          // weight-ordered head advance past it instead of re-poisoning every future batch.
+          const dead = new Set([...statIso.dead, ...estIso.dead].map((d) => d.toUpperCase()))
 
           const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
           const statPayload = statRows.flatMap((r) => {
@@ -1208,9 +1229,13 @@ const STATEMENTS_RESOURCE = 'security-statements'
           // answered, blame the rest" rule, and yfinance defeats it by omitting symbols from a 200
           // rather than erroring.
           const answered = new Set(statPayload.map((r) => r.security_id))
-          if (statRows.length > 0) {
-            for (const g of group) {
-              if (answered.has(g.securityId)) continue
+          // Per batch, from THIS batch's own outcome — plus any symbol isolation proved bad on its
+          // own. A run-wide tally is the "if any of the 40 answered, blame the rest" rule that
+          // yfinance defeats by omitting symbols from a 200 rather than erroring.
+          const batchClean = !statIso.error && statRows.length > 0
+          for (const g of group) {
+            if (answered.has(g.securityId)) continue
+            if (batchClean || dead.has(g.fetchSymbol.toUpperCase())) {
               missing++
               const { error } = await market.from('security')
                 .update({ share_stats_missing_at: new Date().toISOString() })

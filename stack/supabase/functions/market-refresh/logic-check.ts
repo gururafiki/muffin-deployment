@@ -1685,8 +1685,20 @@ console.log('\nsecurity-share-stats')
     'currency codes are LEARNED before the estimate write — currency_code is a foreign key, so an unseen code fails the STATEMENT and takes the batch with it',
   )
   check(
-    /if \(statRows\.length > 0\) \{/.test(body),
+    /const batchClean = !statIso\.error && statRows\.length > 0/.test(body),
     "a security is marked missing only when THIS batch answered — a run-wide tally is the 'if any of the 40 answered, blame the rest' rule yfinance defeats by omitting symbols from a 200",
+  )
+  // ONE BAD SYMBOL KILLS A BATCHED CALL, and this backlog is ordered by fund weight — so an
+  // unisolated 400 brings the SAME poisoned head back every run and the resource stalls for ever.
+  // Observed live: `openbb 400 on /equity/estimates/consensus?symbol=HUMANSFT.KW,ROST,...` took
+  // all 40 symbols with it and `remaining` sat at 11,136 across eight consecutive runs.
+  check(
+    (body.match(/fetchWithIsolation/g) ?? []).length >= 2,
+    'BOTH batched calls are isolated — an unisolated 400 stalls a weight-ordered backlog on its own head',
+  )
+  check(
+    /dead\.has\(g\.fetchSymbol\.toUpperCase\(\)\)/.test(body),
+    'a symbol the provider rejects ALONE is marked, which is what lets the weight-ordered head advance past it rather than re-poisoning every future batch',
   )
   check(
     !/\* 100/.test(body) && !/\/ 100/.test(body),
