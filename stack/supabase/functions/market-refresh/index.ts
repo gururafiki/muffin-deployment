@@ -268,6 +268,7 @@ Deno.serve(async (req: Request) => {
   const FACETS_RESOURCE = 'facets-refresh'
   const MACRO_RESOURCE = 'macro-indicators'
   const PROMOTE_WAVE_RESOURCE = 'promote-wave'
+  const DIVIDENDS_RESOURCE = 'security-dividends'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const INDUSTRY_RESOURCE = 'security-industries'
   const SEC_PERF_RESOURCE = 'security-performance'
@@ -345,6 +346,9 @@ Deno.serve(async (req: Request) => {
     // the TTL only has to permit the next run. A completion-shaped TTL here would not slow the
     // resource down, it would stall the queue for its length.
     [PROMOTE_WAVE_RESOURCE]: BACKLOG_TTL_MINUTES,
+    // One call PER SYMBOL (the route 400s on a comma list), so this drains like every other
+    // per-symbol backlog and needs a backlog-shaped TTL that permits the next slice.
+    [DIVIDENDS_RESOURCE]: BACKLOG_TTL_MINUTES,
     // 41 currencies in one pass, so this FINISHES what it starts — a completion-shaped TTL is
     // correct here, unlike every backlog resource. Daily, because that is the cadence of the
     // underlying reference rates.
@@ -531,6 +535,96 @@ Deno.serve(async (req: Request) => {
     // `security-prices`, `security-statements`, `security-industries` and `security-fundamentals`,
     // every one of which is limited by the SAME provider budget. Promoting faster than they drain
     // does not add coverage, it starves the securities people are already looking at.
+    // DIVIDENDS FOR EVERY MARKET, not just the US. `security-corporate-actions` reaches 560 of
+    // 12,350 equities because Tiingo must be asked by the US ticker and the backlog therefore
+    // requires the priced symbol to BE that ticker. yfinance is asked with the symbol the bars are
+    // keyed on, so the dividend and the series describe one listing by construction — measured
+    // AAPL 92 rows, SAP.DE 28, 7203.T 54. Tiingo stays for SPLITS, which this route does not carry.
+    if (resource === DIVIDENDS_RESOURCE) {
+      const { data: pending, error: pErr } = await market
+        .from('pending_dividends')
+        .select('security_id,symbol,fetch_symbol')
+        .order('best_weight', { ascending: false })
+        .order('security_id', { ascending: true })
+        .limit(scopeLimit ?? 60)
+      if (pErr) throw new Error(`pending_dividends read failed: ${pErr.message}`)
+      const wanted = pending ?? []
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every equity has recent dividends' })
+      }
+
+      const deadline = Date.now() + 70_000
+      let written = 0      // ROWS
+      let covered = 0      // SECURITIES that produced rows
+      let noDividend = 0   // SECURITIES the provider says pay none
+      let failed = 0
+      let lastError: string | null = null
+      // Proof the endpoint answered for SOMEONE this run, so a provider outage cannot mark a page.
+      let anyAnswer = false
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - 5_000) break
+        const sym = String(item.fetch_symbol ?? item.symbol ?? '')
+        if (!sym) continue
+        try {
+          const rows = await fetcher(
+            `/api/v1/equity/fundamental/dividends?provider=yfinance&symbol=${encodeURIComponent(sym)}`,
+            Math.min(15_000, deadline - Date.now()),
+          ) as { ex_dividend_date?: string; amount?: number }[]
+          anyAnswer = true
+          const actions = (rows ?? [])
+            .filter((r) => r.ex_dividend_date && Number.isFinite(Number(r.amount)))
+            .map((r) => ({
+              security_id: item.security_id,
+              ex_date: String(r.ex_dividend_date).slice(0, 10),
+              kind: 'dividend',
+              value: Number(r.amount),
+              // The listing this was OBSERVED on — an action that cannot be tied to a series cannot
+              // be checked against the series it is supposed to explain.
+              observed_symbol: sym,
+              source_code: 'yfinance',
+              as_of: new Date().toISOString(),
+            }))
+          if (actions.length === 0) { noDividend++; continue }
+          const { error } = await market.from('security_corporate_action').upsert(
+            dedupeBy(actions, (r) => `${r.security_id}|${r.ex_date}|${r.kind}`),
+            { onConflict: 'security_id,ex_date,kind' },
+          )
+          if (error) throw new Error(`corporate action upsert failed: ${error.message}`)
+          written += actions.length
+          covered++
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          // A NON-PAYER ARRIVES AS AN HTTP 400, NOT AN EMPTY ANSWER — measured:
+          // `Error getting data for TSLA: No dividend data found for TSLA`. That is the provider
+          // speaking about THIS security, so it earns a mark on its own, exactly as Tiingo's 404
+          // does. Every other 400 is a real failure and must not mark anything.
+          if (/no dividend data found/i.test(msg)) {
+            anyAnswer = true
+            noDividend++
+            const { error } = await market
+              .from('security')
+              .update({ dividends_missing_at: new Date().toISOString() })
+              .eq('security_id', item.security_id)
+            if (error) throw new Error(`dividends_missing_at update failed: ${error.message}`)
+            continue
+          }
+          failed++
+          lastError = msg.slice(0, 200)
+          if (throttled(msg)) break
+        }
+      }
+
+      // A run where NOTHING answered is a provider event, not 60 dividend-less securities.
+      if (!anyAnswer && failed > 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false })
+        return json({ resource, ok: false, written: 0, failed, lastError }, 200)
+      }
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({ resource, written, covered, noDividend, failed, lastError })
+    }
+
     if (resource === PROMOTE_WAVE_RESOURCE) {
       // Default deliberately small, and capped at 100 REGARDLESS of `limit`. The shared
       // `scopeLimit` already clamps to 1,000, which is the right ceiling for reading a backlog and

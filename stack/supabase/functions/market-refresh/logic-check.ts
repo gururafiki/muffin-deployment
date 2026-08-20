@@ -1384,5 +1384,60 @@ console.log('\npromote-wave — spending a fixed provider budget')
   )
 }
 
+
+// ── security-dividends — a non-payer is an HTTP 400, not an empty answer ─────
+//
+// Source checks, because the behaviour that matters is a CLASSIFICATION of an error string and the
+// cheap way to exercise it is to call a live provider. Measured: `equity/fundamental/dividends`
+// answers a company with no dividends with `400 ... No dividend data found for TSLA`. Treating
+// that as a failure would never mark, so every non-payer is re-asked forever and crowds out the
+// payers; treating every 400 as a non-payer would mark securities during an outage, which is the
+// mechanism that once negative-cached 1,369 answerable ones.
+console.log('\nsecurity-dividends — the 400 that means "this company pays none"')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const fn = idx.slice(idx.indexOf("resource === DIVIDENDS_RESOURCE"))
+  const withComments = fn.slice(0, fn.indexOf('if (resource === PROMOTE_WAVE_RESOURCE)'))
+  // STRIP THE COMMENTS FIRST. Every string these guards look for also appears in the prose above
+  // the code that explains it, so asserting against the raw text matches the COMMENT — two of
+  // these passed a mutation that had deleted the code entirely.
+  const body = withComments.replace(/\/\/[^\n]*/g, '')
+
+  check(
+    /no dividend data found/i.test(body),
+    'a non-payer is recognised by the provider MESSAGE — it arrives as a 400, not as an empty array',
+  )
+  // Match the WRITE, not the name. `dividends_missing_at` also appears in the error-message string
+  // two lines below it, so `includes(name)` passed a mutation that had deleted the update entirely.
+  check(
+    /update\(\{\s*dividends_missing_at:/.test(body),
+    'the non-payer branch actually WRITES the negative cache, or every dividend-less security is re-asked forever',
+  )
+  check(
+    body.search(/update\(\{\s*dividends_missing_at:/) > body.indexOf('no dividend data found'),
+    'ONLY the recognised message marks — a generic 400 must not negative-cache a security',
+  )
+  check(
+    body.includes('!anyAnswer') && body.includes('p_ok: false'),
+    'a run where NOTHING answered reports ok:false — that is a provider event, not 60 dividend-less securities',
+  )
+  check(
+    body.includes('observed_symbol'),
+    'the listing the dividend was seen on is stored — an action that cannot be tied to a series cannot be checked against it',
+  )
+  check(
+    body.includes('fetch_symbol'),
+    'asked with the PRICED symbol, which is what removes Tiingo\'s US-ticker constraint and takes coverage past 4.5%',
+  )
+  check(
+    body.includes('dedupeBy('),
+    'the upsert is deduped — the same key twice fails the WHOLE statement with 21000',
+  )
+  check(
+    /throttled\(msg\)/.test(body),
+    'a throttle signature stops the run rather than burning the rest of the page against a refusing provider',
+  )
+}
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
