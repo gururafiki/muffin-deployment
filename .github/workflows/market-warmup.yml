@@ -89,6 +89,7 @@ jobs:
               security-profile-detail \
               earnings-calendar \
               security-insider \
+              security-filings \
               security-industries \
               security-fundamentals \
               security-statements \

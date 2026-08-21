@@ -310,6 +310,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
 const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
 const EARNINGS_RESOURCE = 'earnings-calendar'
 const INSIDER_RESOURCE = 'security-insider'
+const FILINGS_RESOURCE = 'security-filings'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -365,6 +366,7 @@ const INSIDER_RESOURCE = 'security-insider'
     // dates get rescheduled and consensus is revised, but not many times a day.
     [EARNINGS_RESOURCE]: PRICES_TTL_MINUTES,
     [INSIDER_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [FILINGS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1746,6 +1748,122 @@ const INSIDER_RESOURCE = 'security-insider'
     // A ROLLING CURSOR, NOT A BACKLOG: insiders keep trading, so `insider_fetched_at` records when
     // we last looked and never that there is nothing to find. `pending_insider` is not meant to
     // empty.
+    // THE FILINGS THEMSELVES — the documents, not the numbers in them.
+    //
+    // ASKED BY CIK, which this endpoint accepts and `insider_trading` does not. So there is no
+    // symbol resolution here at all: no `symbol_security` lookup, no US-ticker-versus-display-symbol
+    // question, and none of the `CIK not found for symbol BG.VI` failures that cost the insider
+    // resource 12 of 26 securities on its first run. The backlog already filters on the CIK.
+    if (resource === FILINGS_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_filings')
+        .select('security_id,cik')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 120)
+      if (pendErr) throw new Error(`pending_filings read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        cik: String(r.cik),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, securities: 0, note: 'every filer was read this week' })
+      }
+
+      // BOTH VOCABULARIES IN ONE CALL. A domestic registrant files 10-K/10-Q; a foreign private
+      // issuer files 20-F/6-K instead — BABA returns twelve 6-Ks and no 10-Q. `form_type` filters
+      // (comma separated, measured); `form_group` was tried first and is a NO-OP that returns
+      // Form 4s regardless, which reads as a working filter returning honest results.
+      const FORM_TYPES = ['10-K', '10-Q', '8-K', '20-F', '6-K', 'DEF 14A']
+        .map((t) => encodeURIComponent(t))
+        .join(',')
+
+      const deadline = Date.now() + 60_000
+      let written = 0
+      let securities = 0
+      let noFilings = 0
+      let failed = 0
+      let lastError: string | null = null
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - TAIL_RESERVE_MS) break
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/fundamental/filings?cik=${encodeURIComponent(item.cik)}` +
+              `&form_type=${FORM_TYPES}&provider=sec&limit=40`,
+            Math.min(20_000, deadline - Date.now()),
+          )
+        } catch (e) {
+          const msg = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+          // A 400 NAMING THE ABSENCE IS AN ANSWER, the same distinction the insider resource makes:
+          // a filer with none of these forms in the window has been asked, and the cursor advances.
+          // A TRANSPORT error is not an answer and must leave the cursor alone, or a thirty-second
+          // openbb-api restart costs a week of staleness for the whole page.
+          if (/no .* data|not found/i.test(msg) && !/connect|refused|timeout/i.test(msg)) {
+            noFilings++
+            const { error: cErr } = await market
+              .from('security')
+              .update({ filings_fetched_at: new Date().toISOString() })
+              .eq('security_id', item.securityId)
+            if (cErr) throw new Error(`filings_fetched_at update failed: ${cErr.message}`)
+            continue
+          }
+          failed++
+          lastError = msg
+          continue
+        }
+
+        const out: Record<string, unknown>[] = []
+        for (const r of rows) {
+          const accession = String(r.accession_number ?? '').trim()
+          if (!accession) continue
+          out.push({
+            accession_number: accession,
+            security_id: item.securityId,
+            filing_date: r.filing_date ? String(r.filing_date).slice(0, 10) : null,
+            report_date: r.report_date ? String(r.report_date).slice(0, 10) : null,
+            report_type: r.report_type ? String(r.report_type) : null,
+            report_url: r.report_url ? String(r.report_url) : null,
+            filing_detail_url: r.filing_detail_url ? String(r.filing_detail_url) : null,
+            source_code: 'sec-filings',
+            as_of: new Date().toISOString(),
+          })
+        }
+
+        if (out.length > 0) {
+          const { error } = await market
+            .from('security_filing')
+            .upsert(
+              dedupeBy(out, (r) => `${r.security_id}|${r.accession_number}`),
+              { onConflict: 'security_id,accession_number' },
+            )
+          if (error) throw new Error(`security_filing upsert failed: ${error.message}`)
+          written += out.length
+          securities++
+        } else {
+          noFilings++
+        }
+
+        const { error: cErr } = await market
+          .from('security')
+          .update({ filings_fetched_at: new Date().toISOString() })
+          .eq('security_id', item.securityId)
+        if (cErr) throw new Error(`filings_fetched_at update failed: ${cErr.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        written,
+        securities,
+        noFilings,
+        failed,
+        lastError,
+        remaining: await backlogSize(market, 'pending_filings'),
+      })
+    }
+
     if (resource === INSIDER_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_insider')
