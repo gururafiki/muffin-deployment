@@ -1354,3 +1354,21 @@ export function extractMacroPoints(rows: Record<string, unknown>[], code: string
     return true
   })
 }
+
+/**
+ * A stable key for a record whose source gives it none.
+ *
+ * SEC's Form 4 response carries no filing id, so the transaction's own facts ARE its identity —
+ * owner, date, direction, share count, price. Hashing them makes a re-fetch idempotent instead of
+ * inserting the same trade again every week, which matters because the insider resource re-reads
+ * each filer on a cursor by design.
+ *
+ * Not a security boundary: this is a dedupe key, and SHA-256 is simply what the runtime offers.
+ */
+export async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
