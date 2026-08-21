@@ -2758,6 +2758,9 @@ const QUARTERS_RESOURCE = 'security-quarters'
       // competing with anything.
       let backfilled = 0
       const historyFor: string[] = []
+      // Currencies the provider has no usable history for. Reported separately from `failed`:
+      // a pair we could not fetch and a pair that genuinely has one bar are different facts.
+      const noHistory: string[] = []
       {
         // A currency is "spot-only" if everything we hold for it is recent. Asking for rows older
         // than 90 days is an ANTI-JOIN over the entity, not a count — a currency with three days of
@@ -2782,7 +2785,19 @@ const QUARTERS_RESOURCE = 'security-quarters'
           try {
             hist = await fetchUsdPerUnitHistory(code, Math.min(20_000, deadline - Date.now()))
           } catch { failed.push(`${code}(history)`); continue }
-          if (hist.length === 0) { failed.push(`${code}(history)`); continue }
+          // A SINGLE BAR IS NOT HISTORY. Yahoo carries one for some minor pairs (GEL, measured),
+          // so the upsert succeeds, writes a recent row, and the currency stays in the backlog to
+          // be re-asked eight times a day for ever. Marked instead — the fetch answered, and what
+          // it answered is "there is nothing here".
+          if (hist.length < 8) {
+            const { error: mErr } = await market
+              .from('currency')
+              .update({ history_missing_at: new Date().toISOString() })
+              .eq('code', code)
+            if (mErr) throw new Error(`history_missing_at update failed: ${mErr.message}`)
+            noHistory.push(code)
+            if (hist.length === 0) continue
+          }
 
           const rows = hist.map((h) => ({
             currency_code: code,
@@ -2827,6 +2842,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
         // ten years and there is nothing left to do, which is the steady state.
         backfilled,
         historyFor,
+        noHistory,
         failed,
         // Reported separately from `failed`: a pair we could not fetch and a pair whose value we
         // refused are different facts, and only the second one suggests the pair is inverted.
