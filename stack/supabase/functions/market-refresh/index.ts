@@ -305,6 +305,7 @@ const XBRL_RESOURCE = 'security-xbrl'
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
+const QUARTERS_RESOURCE = 'security-quarters'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -353,6 +354,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [QUARTERS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1667,6 +1669,139 @@ const STATEMENTS_RESOURCE = 'security-statements'
       })
     }
 
+    // QUARTERLY STATEMENTS FOR THE COMPANIES THAT DO NOT FILE WITH THE SEC.
+    //
+    // Measured 2026-08-21: the deployed ratio series answered for AAPL/MSFT/NVDA and returned NO
+    // ROWS for SAP.DE, 7203.T, 005930.KS, ASML.AS, TSM and BABA — because `derive_ttm` needs four
+    // consecutive quarters and quarters came only from SEC companyfacts, which needs a CIK. 3,516
+    // securities have one against 12,350 equities, so every price-based ratio was a US-only
+    // feature and the section simply did not render for the rest.
+    //
+    // THREE CALLS PER SECURITY, AND THAT IS THE WHOLE DESIGN CONSTRAINT. Quarterly does not batch:
+    // two symbols in one request return ZERO rows (measured against a local openbb-api, which is
+    // also why `STMT_BATCH` is already 1). Against a rate-limited provider that makes this the
+    // most expensive backlog per security in the system, so it is scoped to non-SEC equities that
+    // already have ANNUAL statements — proof the provider answers for this symbol at all — and
+    // ordered by fund weight, which is free of currency, market cap and country in a way that
+    // `market_cap` is not.
+    if (resource === QUARTERS_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_quarters')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 12)
+      if (pendErr) throw new Error(`pending_quarters read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: String(r.symbol),
+      }))
+      const remaining = await backlogSize(market, 'pending_quarters')
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, securities: 0, remaining, note: 'no security is waiting for quarters' })
+      }
+
+      const deadline = Date.now() + 60_000
+      let written = 0
+      let securities = 0
+      let noQuarters = 0
+      let failed = 0
+      let throttledOut = false
+      let lastError: string | null = null
+      // Proof the ENDPOINT answered for someone this run. Without it a throttled provider — which
+      // answers 200 with no rows rather than throwing — would have every security in the page
+      // recorded as permanently having no quarterly statements. That mechanism once negative-cached
+      // 1,369 ordinary tickers.
+      let anyAnswer = false
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - TAIL_RESERVE_MS) break
+        const rows: Record<string, unknown>[] = []
+        let asked = true
+        for (const kind of ['income', 'balance', 'cash'] as const) {
+          const left = deadline - Date.now()
+          if (left < 6_000) { asked = false; break }
+          try {
+            // `limit` is capped at 5 by the API (a 6 returns a validation error naming the bound).
+            // Five quarters is one more than `derive_ttm` needs, so a single restatement does not
+            // cost the whole window.
+            const got = await fetcher(
+              `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(item.symbol)}` +
+                `&provider=yfinance&period=quarter&limit=5`,
+              Math.min(20_000, left),
+            )
+            if (got.length > 0) anyAnswer = true
+            for (const r of got) {
+              const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
+              if (!period) continue
+              rows.push({
+                security_id: item.securityId,
+                statement: kind,
+                period_ending: period,
+                // STATED, NOT READ OFF `fiscal_period`. It is part of the primary key since
+                // migration 106 and NOT NULL, and the provider does not always populate its own
+                // label — an absent one would fail the whole statement rather than one row.
+                period_type: 'quarter',
+                currency: r.reported_currency ? String(r.reported_currency) : null,
+                data: r,
+                source_code: 'yfinance',
+                as_of: new Date().toISOString(),
+              })
+            }
+          } catch (e) {
+            failed++
+            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+            lastError = msg
+            // A refusal is a fact about the ENDPOINT, not about this security.
+            if (throttled(msg)) { throttledOut = true; asked = false; break }
+          }
+        }
+        if (throttledOut) break
+
+        if (rows.length > 0) {
+          const { error } = await market
+            .from('security_statement')
+            .upsert(
+              dedupeBy(rows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}|${r.period_type}`),
+              { onConflict: 'security_id,statement,period_ending,period_type' },
+            )
+          if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
+          written += rows.length
+          securities++
+        } else if (asked && anyAnswer) {
+          // ASKED ALONE, AND THE ENDPOINT ANSWERED FOR SOMEONE ELSE THIS RUN — so this is a fact
+          // about the company, not about the provider. Swiss issuers report SEMI-ANNUALLY (Nestlé
+          // returns nothing, verified), which is an ordinary permanent answer and exactly what a
+          // negative cache is for.
+          noQuarters++
+          const { error } = await market
+            .from('security')
+            .update({ quarters_missing_at: new Date().toISOString() })
+            .eq('security_id', item.securityId)
+          if (error) throw new Error(`quarters_missing_at update failed: ${error.message}`)
+        }
+      }
+
+      // Quarters are only worth having because they become TTM. Deriving here means one run
+      // produces the whole chain rather than leaving the metrics resource to notice tomorrow.
+      const { error: dErr } = await market.rpc('derive_security_metrics', { p_limit: 2_000 })
+      if (dErr) lastError = lastError ?? dErr.message
+      const { data: ttm } = await market.rpc('derive_ttm', { p_security_id: null })
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: !throttledOut })
+      return json({
+        resource,
+        written,
+        securities,
+        noQuarters,
+        failed,
+        throttled: throttledOut,
+        ttm: typeof ttm === 'number' ? ttm : 0,
+        lastError,
+        remaining: await backlogSize(market, 'pending_quarters'),
+      })
+    }
+
     if (resource === STATEMENTS_RESOURCE) {
       const { data: pending, error: pErr } = await market
         .from('pending_statements')
@@ -1776,7 +1911,9 @@ const STATEMENTS_RESOURCE = 'security-statements'
                   security_id: item.securityId,
                   statement: kind,
                   period_ending: period,
-                  period_type: r.fiscal_period ? String(r.fiscal_period) : null,
+                  // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is both
+                // an annual period and a fourth-quarter one, so the two must be able to coexist.
+                period_type: 'annual',
                   // THE POINT OF THIS PROVIDER. 0 of 104,972 rows carried a currency before it.
                   currency: r.reported_currency ? String(r.reported_currency) : null,
                   data: r,
@@ -1841,7 +1978,9 @@ const STATEMENTS_RESOURCE = 'security-statements'
                 security_id: item.securityId,
                 statement: kind,
                 period_ending: period,
-                period_type: r.fiscal_period ? String(r.fiscal_period) : null,
+                // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is both
+                // an annual period and a fourth-quarter one, so the two must be able to coexist.
+                period_type: 'annual',
                 currency: r.reported_currency ? String(r.reported_currency) : null,
                 data: r,
                 source_code: 'yfinance',
@@ -1866,8 +2005,8 @@ const STATEMENTS_RESOURCE = 'security-statements'
         if (rows.length > 0) {
           const { error } = await market
             .from('security_statement')
-            .upsert(dedupeBy(rows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}`),
-              { onConflict: 'security_id,statement,period_ending' })
+            .upsert(dedupeBy(rows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}|${r.period_type}`),
+              { onConflict: 'security_id,statement,period_ending,period_type' })
           if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
           written += rows.length
         } else if (anyAnswer || (failed === 0 && written > 0)) {
@@ -2378,7 +2517,9 @@ const STATEMENTS_RESOURCE = 'security-statements'
               security_id: securityId,
               statement: kind,
               period_ending: period,
-              period_type: r.fiscal_period ? String(r.fiscal_period) : null,
+              // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is both
+                // an annual period and a fourth-quarter one, so the two must be able to coexist.
+                period_type: 'annual',
               currency: r.reported_currency ? String(r.reported_currency) : null,
               data: r,
               source_code: 'yfinance',
@@ -2389,8 +2530,8 @@ const STATEMENTS_RESOURCE = 'security-statements'
         if (stRows.length === 0) out.statements = 'not covered'
         else {
           const { error } = await market.from('security_statement').upsert(
-            dedupeBy(stRows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}`),
-            { onConflict: 'security_id,statement,period_ending' },
+            dedupeBy(stRows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}|${r.period_type}`),
+            { onConflict: 'security_id,statement,period_ending,period_type' },
           )
           if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
           out.statements = `${stRows.length} rows`
