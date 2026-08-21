@@ -92,7 +92,7 @@ on conflict (security_id, grain, date) do nothing;
 refresh materialized view market.symbol_security;
 
 do $$
-declare v numeric; n integer; b boolean;
+declare v numeric; n integer; b boolean; fxc boolean;
 begin
   -- 1. THE DIVISION IS RIGHT. 40 / 2 = 20.
   select pe_ratio into v from market.security_ratio_series
@@ -149,13 +149,38 @@ begin
   -- 4. AN ADR DIVIDES NOTHING. USD price over DKK earnings is wrong by the exchange rate and looks
   --    completely ordinary — 40/2 = 20 here, a perfectly plausible P/E for a company whose real
   --    one is nothing like it.
+  -- WITH NO RATE HELD FOR THAT BAR, nothing is produced. A missing rate is not a rate of 1, which
+  -- would silently treat one krone as one dollar.
   select pe_ratio, currency_comparable into v, b from market.security_ratio_series
    where symbol = 'T105B' and date = date '2025-03-01';
   if v is not null then
-    raise exception 'the ADR got a P/E of % — a USD price over DKK earnings is wrong by the FX rate and reads as an ordinary number', v;
+    raise exception 'the ADR got a P/E of % with no exchange rate held for that bar — a missing rate is not a rate of 1', v;
   end if;
   if b is not false then
-    raise exception 'currency_comparable is % for a DKK filer quoted in USD', b;
+    raise exception 'currency_comparable is % for a DKK filer quoted in USD with no rate held', b;
+  end if;
+
+  -- 4b. GIVEN A RATE, IT CONVERTS — and says that it did. 8 DKK/share at 0.125 USD per DKK is
+  --     1.00 USD/share against a 40.00 USD price, so the P/E is 40, not the 5 an unconverted
+  --     division would report. Those two numbers are both plausible, which is the whole problem.
+  insert into market.fx_rate (currency_code, as_of, usd_per_unit, source_code) values
+    ('DKK', date '2025-01-01', 0.125, 'sec-xbrl'),
+    ('USD', date '2025-01-01', 1,     'sec-xbrl')
+  on conflict (currency_code, as_of) do update set usd_per_unit = excluded.usd_per_unit;
+  update market.security_metric set value = 8
+   where security_id = '00000000-0000-0000-0000-000000010502' and metric_code = 'eps_diluted';
+
+  select pe_ratio, currency_comparable, fx_converted into v, b, fxc
+    from market.security_ratio_series
+   where symbol = 'T105B' and date = date '2025-03-01';
+  if v is distinct from 40 then
+    raise exception 'the converted P/E is % , expected 40 (close 40 / (8 DKK x 0.125 USD/DKK)). Unconverted it would read 5, which is equally plausible', coalesce(v::text,'<null>');
+  end if;
+  if b is not true then
+    raise exception 'a convertible pair is not reported comparable';
+  end if;
+  if fxc is not true then
+    raise exception 'fx_converted is % — a ratio MADE comparable must not look like one that was born that way', fxc;
   end if;
 
   -- 5. A NEGATIVE DENOMINATOR YIELDS NOTHING. A "P/E of -20" charts a mirror of the price.
@@ -193,14 +218,17 @@ begin
     raise exception 'a metric with no stated currency produced % — the company''s reporting currency should fill the silence', coalesce(v::text,'<null>');
   end if;
 
-  -- 9. AND IT MUST NEVER OVERRIDE THE FILING. The ADR states DKK on the metric itself; a fallback
-  --    that won would relabel kroner as dollars and hand back the exact bug the gate exists for.
+  -- 9. AND IT MUST NEVER OVERRIDE THE FILING. The ADR states DKK on the metric itself. If the
+  --    security's stated reporting currency won, the two sides would look equal, no conversion
+  --    would happen, and 8 kroner would be divided into a 40 dollar price as though it were 8
+  --    dollars — a P/E of 5. Converted from DKK it is 40. BOTH ARE PLAUSIBLE VALUATIONS, which is
+  --    exactly why this is asserted on the number and not on a flag.
   update market.security set reporting_currency = 'USD'
    where security_id = '00000000-0000-0000-0000-000000010502';
   select pe_ratio into v from market.security_ratio_series
    where symbol = 'T105B' and date = date '2025-03-01';
-  if v is not null then
-    raise exception 'the ADR got a P/E of % — a stated DKK filing was overridden by the fallback', v;
+  if v is distinct from 40 then
+    raise exception 'the ADR P/E is % , expected 40 — a stated DKK filing was overridden by the security''s USD fallback, turning 8 kroner into 8 dollars', coalesce(v::text,'<null>');
   end if;
 end $$;
 

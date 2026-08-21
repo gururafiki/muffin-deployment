@@ -32,7 +32,7 @@ import {
 } from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
-import { SUBUNITS, fetchUsdPerUnit, isPlausibleRate, type FxQuote } from './fx.ts'
+import { SUBUNITS, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, type ConceptSpec } from './xbrl.ts'
 import { candidateSymbols } from './symbol-repair.ts'
@@ -2748,12 +2748,83 @@ const QUARTERS_RESOURCE = 'security-quarters'
         if (error) throw new Error(`fx_rate upsert failed: ${error.message}`)
       }
 
+      // ── HISTORY, FOR THE CURRENCIES THAT DO NOT HAVE IT YET ─────────────────────────────────
+      //
+      // Spot is enough to reprice a market cap TODAY and useless for a ratio SERIES: converting a
+      // 2021 bar with today's rate is wrong by every intervening move and looks entirely ordinary.
+      // So each run backfills ten years of WEEKLY rates for a few currencies that are still
+      // spot-only, and then never touches them again — this is a one-off per currency, not a
+      // recurring cost, which is why a handful per run drains 41 currencies in days without
+      // competing with anything.
+      let backfilled = 0
+      const historyFor: string[] = []
+      {
+        // A currency is "spot-only" if everything we hold for it is recent. Asking for rows older
+        // than 90 days is an ANTI-JOIN over the entity, not a count — a currency with three days of
+        // data and one with ten years both have rows, and only the second is done.
+        const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10)
+        const { data: haveOld, error: hErr } = await market
+          .from('fx_rate')
+          .select('currency_code')
+          .lt('as_of', cutoff)
+        if (hErr) throw new Error(`fx_rate history probe failed: ${hErr.message}`)
+        const done = new Set((haveOld ?? []).map((r) => r.currency_code as string))
+        // Subunits are DERIVED from a parent, never quoted: Yahoo has no `ILAUSD=X`. They are
+        // filled from the parent's history below rather than fetched.
+        const wanted = toFetch.filter((c) => c !== 'USD' && !done.has(c))
+
+        for (const code of wanted) {
+          if (Date.now() > deadline - 12_000) break
+          if (historyFor.length >= 4) break
+          let hist: { asOf: string; usdPerUnit: number }[] = []
+          try {
+            hist = await fetchUsdPerUnitHistory(code, Math.min(20_000, deadline - Date.now()))
+          } catch { failed.push(`${code}(history)`); continue }
+          if (hist.length === 0) { failed.push(`${code}(history)`); continue }
+
+          const rows = hist.map((h) => ({
+            currency_code: code,
+            as_of: h.asOf,
+            usd_per_unit: h.usdPerUnit,
+            source_code: 'yfinance',
+            derived_from: null as string | null,
+          }))
+          // Every subunit of this currency, in the same pass and from the SAME rates — a subunit
+          // whose parent has ten years of history and which has three days would silently fall back
+          // to the spot rate for every historical bar.
+          for (const [sub, { parent, per }] of Object.entries(SUBUNITS)) {
+            if (parent !== code || !codes.includes(sub)) continue
+            for (const h of hist) {
+              rows.push({
+                currency_code: sub,
+                as_of: h.asOf,
+                usd_per_unit: h.usdPerUnit / per,
+                source_code: 'yfinance',
+                derived_from: parent,
+              })
+            }
+          }
+
+          const { error } = await market
+            .from('fx_rate')
+            .upsert(dedupeBy(rows, (r) => `${r.currency_code}|${r.as_of}`),
+              { onConflict: 'currency_code,as_of', ignoreDuplicates: true })
+          if (error) throw new Error(`fx_rate history upsert failed: ${error.message}`)
+          backfilled += rows.length
+          historyFor.push(code)
+        }
+      }
+
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
         quoted: quotes.length,
         derived: quotes.filter((q) => q.derived_from).length,
         currencies: codes.length,
+        // One-off per currency: `historyFor` empty with `failed` empty means every currency has its
+        // ten years and there is nothing left to do, which is the steady state.
+        backfilled,
+        historyFor,
         failed,
         // Reported separately from `failed`: a pair we could not fetch and a pair whose value we
         // refused are different facts, and only the second one suggests the pair is inverted.
