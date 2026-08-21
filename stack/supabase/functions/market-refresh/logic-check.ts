@@ -436,6 +436,8 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   const gates: [string, string][] = [
     ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
     ['security-quarters',     'asked && anyAnswer'],
+    // Marks only what isolation proved dead ALONE — never absence from a batched 200.
+    ['security-profile-detail', 'anyAnswer && iso.dead.length > 0'],
     ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
     ['security-profiles',     'if (classified > 0) {'],
     ['security-fundamentals', 'if (written > 0) {'],
@@ -1071,6 +1073,8 @@ console.log('\nresource registry — the cron and the function agree')
     STATEMENTS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the two above.
     QUARTERS_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the others above.
+    PROFILE_DETAIL_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
     XBRL_RESOURCE: [],

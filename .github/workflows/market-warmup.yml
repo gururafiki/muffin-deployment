@@ -86,6 +86,7 @@ jobs:
               exchange-listings \
               security-yahoo-symbols \
               security-profiles \
+              security-profile-detail \
               security-industries \
               security-fundamentals \
               security-statements \
