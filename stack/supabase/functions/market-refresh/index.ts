@@ -1759,20 +1759,32 @@ const INSIDER_RESOURCE = 'security-insider'
         return json({ resource, written: 0, securities: 0, note: 'every filer was read this week' })
       }
 
-      // The endpoint takes a SYMBOL, so resolve through the materialised map rather than the view
-      // that costs a scan of the universe per lookup.
+      // THE US TICKER, NOT THE DISPLAY SYMBOL — and the endpoint gives no choice.
+      //
+      // It requires `symbol` and rejects a CIK outright (`cik=` answers "Field required: symbol";
+      // `symbol=0000320193` answers "CIK not found"), so the CIK we already hold cannot be passed.
+      // And the DISPLAY symbol is the wrong key here: `symbol_security` serves the primary listing,
+      // which for Bunge is `BG.VI` — SEC has no CIK for a Vienna line, and the first real run
+      // failed 12 of 26 securities on exactly that. `BG` works.
+      //
+      // This is the mirror of the rule migration 39 established. `security_identifier`'s `ticker`
+      // is OpenFIGI's US lookup, which is the WRONG symbol for prices (it is a thin OTC
+      // foreign-ordinary line for a foreign company) and the RIGHT one for anything asking SEC,
+      // because SEC only knows US registrants. Same company, two correct answers, different
+      // questions.
+      //
       // CHUNKED, because an `in.()` filter is a URL and its size is a LENGTH budget: 120 UUIDs is
       // already ~4.7 KB, and 6.5 KB is where the proxy answers a bare 502 with nothing pointing at
-      // the cause. `scopeLimit` can raise the page, so the bound has to live here rather than in
-      // the caller's default.
+      // the cause. `scopeLimit` can raise the page, so the bound lives here.
       const symbolById = new Map<string, string>()
       for (let i = 0; i < wanted.length; i += 100) {
         const { data: symRows, error: symErr } = await market
-          .from('symbol_security')
-          .select('symbol,security_id')
+          .from('security_identifier')
+          .select('value,security_id')
+          .eq('kind_code', 'ticker')
           .in('security_id', wanted.slice(i, i + 100))
-        if (symErr) throw new Error(`symbol_security read failed: ${symErr.message}`)
-        for (const r of symRows ?? []) symbolById.set(r.security_id as string, String(r.symbol))
+        if (symErr) throw new Error(`security_identifier read failed: ${symErr.message}`)
+        for (const r of symRows ?? []) symbolById.set(r.security_id as string, String(r.value))
       }
 
       const deadline = Date.now() + 60_000
