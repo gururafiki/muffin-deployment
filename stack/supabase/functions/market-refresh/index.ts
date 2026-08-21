@@ -1858,11 +1858,6 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
       let batchesFailed = 0
       let throttledOut = false
       let lastError: string | null = null
-      // Proof the ENDPOINT answered for someone this run. yfinance under rate limit returns 200 with
-      // no rows rather than throwing, so without this a throttled run would record every security in
-      // the page as permanently having no profile — the mechanism that once cost 1,369 tickers.
-      let anyAnswer = false
-
       for (let i = 0; i < wanted.length && Date.now() < deadline - TAIL_RESERVE_MS; i += BATCH) {
         const batch = wanted.slice(i, i + BATCH)
         const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
@@ -1879,7 +1874,6 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
           lastError = iso.error
           if (throttled(iso.error)) { throttledOut = true; break }
         }
-        if (rows.length > 0) anyAnswer = true
 
         const out: Record<string, unknown>[] = []
         for (const r of rows) {
@@ -1916,10 +1910,19 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
         // batched 200". A tally is not evidence about a symbol: yfinance throttles PROGRESSIVELY,
         // omitting symbols from a 200 rather than erroring, and marking on absence is exactly what
         // put `performance_missing_at` on 2,548 securities whose prices were being written daily
-        // off the same endpoint. A security that merely rides along in a batch and is not answered
-        // for stays in the backlog; it costs nothing until the batch is all-uncovered, at which
-        // point isolation engages and the control symbol decides.
-        if (anyAnswer && iso.dead.length > 0) {
+        // off the same endpoint.
+        //
+        // AND `iso.dead` IS THE WHOLE GATE — there is deliberately no run-level tally here.
+        // `fetchWithIsolation` only populates `dead` after asking each symbol ALONE and then
+        // proving the provider is up with a CONTROL symbol; on a throttle or an outage it returns
+        // an empty `dead` by construction. Requiring "and some batch in this run returned rows" on
+        // top of that looks safer and is strictly worse: once a weight-ordered backlog has drained
+        // its answerable head, EVERY batch in a page is uncovered, no batch returns rows, the tally
+        // never becomes true and the page can never be marked. Measured 2026-08-21 —
+        // `written: 0, batchesFailed: 15, remaining: 10894`, identical five runs in a row, on
+        // Philippine, Emirati and Vietnamese listings that answer 204 NO CONTENT individually.
+        // That is the stall this pipeline has hit four times before.
+        if (iso.dead.length > 0) {
           const deadIds = iso.dead
             .map((sym) => bySymbol.get(sym.toUpperCase()))
             .filter((id): id is string => !!id)
