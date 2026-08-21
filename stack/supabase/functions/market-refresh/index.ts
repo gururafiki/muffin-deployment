@@ -61,6 +61,7 @@ import {
   symbolList,
   throttled,
   TICKERS_TTL_MINUTES,
+  sha256Hex,
   type PerfRow,
 } from './resources.ts'
 
@@ -308,6 +309,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
 const QUARTERS_RESOURCE = 'security-quarters'
 const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
 const EARNINGS_RESOURCE = 'earnings-calendar'
+const INSIDER_RESOURCE = 'security-insider'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -362,6 +364,7 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
     // forward window every time, so the TTL is the real cadence of the underlying data —
     // dates get rescheduled and consensus is revised, but not many times a day.
     [EARNINGS_RESOURCE]: PRICES_TTL_MINUTES,
+    [INSIDER_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1732,6 +1735,133 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
     // MOVES, dates are rescheduled and estimates revised up to the day. So each run re-reads the
     // whole forward window and the newest answer wins — a backlog here would freeze a date that
     // later changed.
+    // WHO INSIDE THE COMPANY IS BUYING, AND WHO IS SELLING.
+    //
+    // Form 4 filings via `equity/ownership/insider_trading?provider=sec`. Chosen over
+    // `equity/fundamental/management` because neither BATCHES (measured: two symbols return zero
+    // rows) and this one runs on SEC — 10 requests a second documented, ~0.17s each, and scoped to
+    // the 3,516 securities that have a CIK — rather than the yfinance budget every other backlog is
+    // already queued behind.
+    //
+    // A ROLLING CURSOR, NOT A BACKLOG: insiders keep trading, so `insider_fetched_at` records when
+    // we last looked and never that there is nothing to find. `pending_insider` is not meant to
+    // empty.
+    if (resource === INSIDER_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_insider')
+        .select('security_id')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 120)
+      if (pendErr) throw new Error(`pending_insider read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => r.security_id as string)
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, securities: 0, note: 'every filer was read this week' })
+      }
+
+      // The endpoint takes a SYMBOL, so resolve through the materialised map rather than the view
+      // that costs a scan of the universe per lookup.
+      const { data: symRows, error: symErr } = await market
+        .from('symbol_security')
+        .select('symbol,security_id')
+        .in('security_id', wanted)
+      if (symErr) throw new Error(`symbol_security read failed: ${symErr.message}`)
+      const symbolById = new Map((symRows ?? []).map((r) => [r.security_id as string, String(r.symbol)]))
+
+      const deadline = Date.now() + 60_000
+      let written = 0
+      let securities = 0
+      let noFilings = 0
+      let failed = 0
+      let lastError: string | null = null
+
+      for (const securityId of wanted) {
+        if (Date.now() > deadline - TAIL_RESERVE_MS) break
+        const symbol = symbolById.get(securityId)
+        if (!symbol) continue
+
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/ownership/insider_trading?symbol=${encodeURIComponent(symbol)}` +
+              `&provider=sec&limit=50`,
+            Math.min(20_000, deadline - Date.now()),
+          )
+        } catch (e) {
+          failed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          // The cursor is NOT advanced on a failure: a security we could not ask about must come
+          // back next run, not wait a week because the attempt errored.
+          continue
+        }
+
+        const out: Record<string, unknown>[] = []
+        for (const r of rows) {
+          const txDate = String(r.transaction_date ?? '').slice(0, 10)
+          const shares = Number(r.securities_transacted)
+          const price = Number(r.transaction_price)
+          const ownedAfter = Number(r.securities_owned)
+          const owner = r.owner_name ? String(r.owner_name) : ''
+          const direction = r.acquisition_or_disposition ? String(r.acquisition_or_disposition) : null
+          if (!txDate) continue
+          // DETERMINISTIC KEY over the filing's own facts, because the response carries no id.
+          // Re-fetching the same filing must be idempotent rather than duplicating it every run,
+          // and this resource re-reads each security weekly by design.
+          const key = await sha256Hex(
+            [securityId, txDate, owner, direction ?? '', String(r.security_type ?? ''),
+             Number.isFinite(shares) ? shares : '', Number.isFinite(price) ? price : ''].join('|'),
+          )
+          out.push({
+            trade_key: key,
+            security_id: securityId,
+            filing_date: r.filing_date ? String(r.filing_date).slice(0, 10) : null,
+            transaction_date: txDate,
+            owner_name: owner || null,
+            owner_title: r.owner_title ? String(r.owner_title) : null,
+            direction,
+            transaction_type: r.transaction_type ? String(r.transaction_type) : null,
+            security_type: r.security_type ? String(r.security_type) : null,
+            shares: Number.isFinite(shares) ? shares : null,
+            shares_owned_after: Number.isFinite(ownedAfter) ? ownedAfter : null,
+            price: Number.isFinite(price) ? price : null,
+            source_code: 'sec-form4',
+            as_of: new Date().toISOString(),
+          })
+        }
+
+        if (out.length > 0) {
+          const { error } = await market
+            .from('insider_trade')
+            .upsert(dedupeBy(out, (r) => String(r.trade_key)), { onConflict: 'trade_key' })
+          if (error) throw new Error(`insider_trade upsert failed: ${error.message}`)
+          written += out.length
+          securities++
+        } else {
+          // ASKED AND ANSWERED WITH NOTHING, which for Form 4 is ordinary — plenty of companies go
+          // a quarter without an insider transaction. The cursor still advances: this is "we
+          // looked", not "there is nothing to find".
+          noFilings++
+        }
+
+        const { error: cErr } = await market
+          .from('security')
+          .update({ insider_fetched_at: new Date().toISOString() })
+          .eq('security_id', securityId)
+        if (cErr) throw new Error(`insider_fetched_at update failed: ${cErr.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        written,
+        securities,
+        noFilings,
+        failed,
+        lastError,
+        remaining: await backlogSize(market, 'pending_insider'),
+      })
+    }
+
     if (resource === EARNINGS_RESOURCE) {
       const deadline = Date.now() + 60_000
       const CHUNK_DAYS = 3
