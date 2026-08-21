@@ -306,6 +306,7 @@ const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
 const QUARTERS_RESOURCE = 'security-quarters'
+const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -355,6 +356,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [QUARTERS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [PROFILE_DETAIL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1703,6 +1705,130 @@ const QUARTERS_RESOURCE = 'security-quarters'
     // already have ANNUAL statements — proof the provider answers for this symbol at all — and
     // ordered by fund weight, which is free of currency, market cap and country in a way that
     // `market_cap` is not.
+    // THE DESCRIPTIVE HALF OF A RESPONSE THIS PIPELINE ALREADY FETCHES.
+    //
+    // `security-profiles` reads the sector, market cap and operating country off `equity/profile`
+    // and discards `long_description`, `employees`, `company_url`, `hq_address_*` and `beta` — a
+    // company page's whole identity. Sixth instance of "the answer is already in a response you
+    // fetch".
+    //
+    // It is NOT free, and the plan that called it free was wrong: `pending_profile` asks about the
+    // SECTOR and is drained, so widening that handler would fetch nothing and these columns would
+    // sit empty — migration 56's `provider_country_iso2`, which reached production at 0 rows while
+    // the resource reported success. Hence its own backlog. The cost is modest because
+    // `equity/profile` BATCHES (measured): one call per 20 securities, not three per security.
+    if (resource === PROFILE_DETAIL_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_profile_detail')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 300)
+      if (pendErr) throw new Error(`pending_profile_detail read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: String(r.symbol),
+      }))
+      const remaining = await backlogSize(market, 'pending_profile_detail')
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining, note: 'every security has a profile' })
+      }
+
+      const deadline = Date.now() + 60_000
+      const BATCH = 20
+      let written = 0
+      let noProfile = 0
+      let batchesFailed = 0
+      let throttledOut = false
+      let lastError: string | null = null
+      // Proof the ENDPOINT answered for someone this run. yfinance under rate limit returns 200 with
+      // no rows rather than throwing, so without this a throttled run would record every security in
+      // the page as permanently having no profile — the mechanism that once cost 1,369 tickers.
+      let anyAnswer = false
+
+      for (let i = 0; i < wanted.length && Date.now() < deadline - TAIL_RESERVE_MS; i += BATCH) {
+        const batch = wanted.slice(i, i + BATCH)
+        const bySymbol = new Map(batch.map((b) => [b.symbol.toUpperCase(), b.securityId]))
+        const iso = await fetchWithIsolation(
+          fetcher,
+          (syms: string[]) => `/api/v1/equity/profile?symbol=${symbolList(syms)}&provider=yfinance`,
+          batch.map((b) => b.symbol),
+          Math.min(20_000, deadline - Date.now()),
+          deadline,
+        )
+        const rows = iso.rows
+        if (iso.error) {
+          batchesFailed++
+          lastError = iso.error
+          if (throttled(iso.error)) { throttledOut = true; break }
+        }
+        if (rows.length > 0) anyAnswer = true
+
+        const out: Record<string, unknown>[] = []
+        for (const r of rows) {
+          const sym = String(r.symbol ?? (batch.length === 1 ? batch[0].symbol : '')).toUpperCase()
+          const securityId = bySymbol.get(sym)
+          if (!securityId) continue
+          const employees = Number(r.employees)
+          const beta = Number(r.beta)
+          out.push({
+            security_id: securityId,
+            description: r.long_description ? String(r.long_description) : null,
+            // A count, not a measurement: reject anything non-finite rather than writing NaN, which
+            // casts to null in some drivers and to an error in others.
+            employees: Number.isFinite(employees) && employees > 0 ? Math.round(employees) : null,
+            website: r.company_url ? String(r.company_url) : null,
+            hq_city: r.hq_address_city ? String(r.hq_address_city) : null,
+            hq_state: r.hq_address_state ? String(r.hq_address_state) : null,
+            hq_country: r.hq_address_country ? String(r.hq_address_country) : null,
+            beta: Number.isFinite(beta) ? beta : null,
+            source_code: 'yfinance',
+            as_of: new Date().toISOString(),
+          })
+        }
+
+        if (out.length > 0) {
+          const { error } = await market
+            .from('security_profile')
+            .upsert(dedupeBy(out, (r) => String(r.security_id)), { onConflict: 'security_id' })
+          if (error) throw new Error(`security_profile upsert failed: ${error.message}`)
+          written += out.length
+        }
+
+        // MARKED ONLY WHAT WAS ASKED ALONE AND REFUSED ALONE — `iso.dead`, never "absent from a
+        // batched 200". A tally is not evidence about a symbol: yfinance throttles PROGRESSIVELY,
+        // omitting symbols from a 200 rather than erroring, and marking on absence is exactly what
+        // put `performance_missing_at` on 2,548 securities whose prices were being written daily
+        // off the same endpoint. A security that merely rides along in a batch and is not answered
+        // for stays in the backlog; it costs nothing until the batch is all-uncovered, at which
+        // point isolation engages and the control symbol decides.
+        if (anyAnswer && iso.dead.length > 0) {
+          const deadIds = iso.dead
+            .map((sym) => bySymbol.get(sym.toUpperCase()))
+            .filter((id): id is string => !!id)
+          for (const id of deadIds) {
+            const { error } = await market
+              .from('security')
+              .update({ profile_detail_missing_at: new Date().toISOString() })
+              .eq('security_id', id)
+            if (error) throw new Error(`profile_detail_missing_at update failed: ${error.message}`)
+            noProfile++
+          }
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: !throttledOut })
+      return json({
+        resource,
+        written,
+        noProfile,
+        batchesFailed,
+        throttled: throttledOut,
+        lastError,
+        remaining: await backlogSize(market, 'pending_profile_detail'),
+      })
+    }
+
     if (resource === QUARTERS_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_quarters')
