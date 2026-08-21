@@ -1642,6 +1642,14 @@ const STATEMENTS_RESOURCE = 'security-statements'
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: lastError })
         return json({ resource, ok: false, error: lastError, written, pages })
       }
+
+      // TTM LAST, because it is arithmetic over the quarters this run just derived. It is the
+      // denominator of every ratio the app charts — financecharts' P/E page is literally
+      // `ADJ close / DILUTED EPS TTM` per day — so a run that produced quarters and no TTM has
+      // produced half a feature.
+      const { data: ttm, error: ttmErr } = await market.rpc('derive_ttm', { p_security_id: null })
+      if (ttmErr) throw new Error(`derive_ttm failed: ${ttmErr.message}`)
+
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
@@ -1650,6 +1658,7 @@ const STATEMENTS_RESOURCE = 'security-statements'
         // returned the same rows every call; two invocations reported byte-identical counts and
         // it read as throughput. If this is ever 1 while `remaining` stays high, that is back.
         pages,
+        ttm: typeof ttm === 'number' ? ttm : 0,
         // Statement periods still to derive. Settles to the ones whose provider reports none of
         // the mapped lines — non-zero and stable is expected; the TREND is the signal, because a
         // rising count means the catalogue's field names have drifted from what a provider sends,
