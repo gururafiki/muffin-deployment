@@ -1649,7 +1649,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
       // denominator of every ratio the app charts — financecharts' P/E page is literally
       // `ADJ close / DILUTED EPS TTM` per day — so a run that produced quarters and no TTM has
       // produced half a feature.
-      const { data: ttm, error: ttmErr } = await market.rpc('derive_ttm', { p_security_id: null })
+      const { data: ttm, error: ttmErr } = await market.rpc('derive_ttm', { p_security_id: null, p_limit: 400 })
       if (ttmErr) throw new Error(`derive_ttm failed: ${ttmErr.message}`)
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
@@ -1786,7 +1786,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
       // produces the whole chain rather than leaving the metrics resource to notice tomorrow.
       const { error: dErr } = await market.rpc('derive_security_metrics', { p_limit: 2_000 })
       if (dErr) lastError = lastError ?? dErr.message
-      const { data: ttm } = await market.rpc('derive_ttm', { p_security_id: null })
+      const { data: ttm } = await market.rpc('derive_ttm', { p_security_id: null, p_limit: 400 })
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: !throttledOut })
       return json({
