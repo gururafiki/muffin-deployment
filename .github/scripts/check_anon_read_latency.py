@@ -43,6 +43,14 @@ QUERIES = [
     ("markets donut", "fund_sector_weight?select=sector_id,weight&limit=100"),
     ("screener, two filters", "security_facets?select=security_id&msci_tier=eq.developed&sector_id=eq.information-technology&limit=50"),
     ("country macro panel", "macro_current?select=code,name,value,as_of&country_iso2=eq.US"),
+    # The ratio series range-joins 3.4M price bars to 2.1M metric rows, so it is the biggest join
+    # the app sends and it carries the same two-filter shape that broke `price_series` — symbol
+    # AND grain. Both grains are timed: weekly reaches back to 2006 and returns the most rows.
+    ("stock P/E chart, daily", "security_ratio_series?select=date,close,pe_ratio&symbol=eq.AAPL&grain=eq.daily&order=date"),
+    ("stock P/E chart, weekly", "security_ratio_series?select=date,close,pe_ratio&symbol=eq.AAPL&grain=eq.weekly&order=date"),
+    # A non-USD filer, where the currency gate does the withholding — the branch a US-only probe
+    # never reaches.
+    ("stock P/E chart, local listing", "security_ratio_series?select=date,pe_ratio,currency_comparable&symbol=eq.SAP.DE&grain=eq.daily&order=date"),
 ]
 
 
