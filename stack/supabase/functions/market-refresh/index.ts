@@ -2762,16 +2762,18 @@ const QUARTERS_RESOURCE = 'security-quarters'
         // A currency is "spot-only" if everything we hold for it is recent. Asking for rows older
         // than 90 days is an ANTI-JOIN over the entity, not a count — a currency with three days of
         // data and one with ten years both have rows, and only the second is done.
-        const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10)
-        const { data: haveOld, error: hErr } = await market
-          .from('fx_rate')
+        // ASKED AS A BACKLOG, NOT READ AS A PAGE. This probe used to select the rows older than
+        // 90 days and build a set from them — and `PGRST_DB_MAX_ROWS` is 1,000 while the backfill
+        // writes ~520 rows per currency, so after two currencies it could not see past its own
+        // page and re-fetched the same four for ever while reporting no failures.
+        const { data: pendingFx, error: hErr } = await market
+          .from('pending_fx_history')
           .select('currency_code')
-          .lt('as_of', cutoff)
-        if (hErr) throw new Error(`fx_rate history probe failed: ${hErr.message}`)
-        const done = new Set((haveOld ?? []).map((r) => r.currency_code as string))
+        if (hErr) throw new Error(`pending_fx_history read failed: ${hErr.message}`)
+        const needs = new Set((pendingFx ?? []).map((r) => r.currency_code as string))
         // Subunits are DERIVED from a parent, never quoted: Yahoo has no `ILAUSD=X`. They are
         // filled from the parent's history below rather than fetched.
-        const wanted = toFetch.filter((c) => c !== 'USD' && !done.has(c))
+        const wanted = toFetch.filter((c) => c !== 'USD' && needs.has(c))
 
         for (const code of wanted) {
           if (Date.now() > deadline - 12_000) break
