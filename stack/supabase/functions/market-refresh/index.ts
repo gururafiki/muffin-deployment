@@ -1649,8 +1649,27 @@ const QUARTERS_RESOURCE = 'security-quarters'
       // denominator of every ratio the app charts — financecharts' P/E page is literally
       // `ADJ close / DILUTED EPS TTM` per day — so a run that produced quarters and no TTM has
       // produced half a feature.
-      const { data: ttm, error: ttmErr } = await market.rpc('derive_ttm', { p_security_id: null, p_limit: 400 })
-      if (ttmErr) throw new Error(`derive_ttm failed: ${ttmErr.message}`)
+      // PAGED AND LOOPED, AT A SIZE MEASURED AGAINST THE ROLE'S STATEMENT TIMEOUT — which is
+      // EIGHT SECONDS for the role PostgREST uses, not the 60s worker budget. Measured 2026-08-21
+      // against production: 100 securities 2.7s, 200 4.1s, 400 **8.1s and cancelled**. A page is
+      // therefore ~100, and the loop is what makes a run drain more than one page rather than the
+      // page being made bigger — the same shape `derive_security_metrics` already uses.
+      let ttmWritten = 0
+      let ttmErrMsg: string | null = null
+      while (Date.now() < deadline - 8_000) {
+        const { data: page, error: pErr } = await market.rpc('derive_ttm', {
+          p_security_id: null,
+          p_limit: 100,
+        })
+        if (pErr) { ttmErrMsg = pErr.message; break }
+        const n = typeof page === 'number' ? page : 0
+        ttmWritten += n
+        // Nothing left that is out of date. Safe to stop ONLY because the page is an anti-join
+        // over `pending_ttm` and therefore advances; with a bare `limit` this would spin.
+        if (n === 0) break
+      }
+      if (ttmErrMsg) throw new Error(`derive_ttm failed: ${ttmErrMsg}`)
+      const ttm = ttmWritten
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
@@ -1660,7 +1679,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
         // returned the same rows every call; two invocations reported byte-identical counts and
         // it read as throughput. If this is ever 1 while `remaining` stays high, that is back.
         pages,
-        ttm: typeof ttm === 'number' ? ttm : 0,
+        ttm,
         // Statement periods still to derive. Settles to the ones whose provider reports none of
         // the mapped lines — non-zero and stable is expected; the TREND is the signal, because a
         // rising count means the catalogue's field names have drifted from what a provider sends,
@@ -1786,7 +1805,7 @@ const QUARTERS_RESOURCE = 'security-quarters'
       // produces the whole chain rather than leaving the metrics resource to notice tomorrow.
       const { error: dErr } = await market.rpc('derive_security_metrics', { p_limit: 2_000 })
       if (dErr) lastError = lastError ?? dErr.message
-      const { data: ttm } = await market.rpc('derive_ttm', { p_security_id: null, p_limit: 400 })
+      const { data: ttm } = await market.rpc('derive_ttm', { p_security_id: null, p_limit: 100 })
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: !throttledOut })
       return json({
