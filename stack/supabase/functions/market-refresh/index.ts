@@ -307,6 +307,7 @@ const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
 const QUARTERS_RESOURCE = 'security-quarters'
 const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
+const EARNINGS_RESOURCE = 'earnings-calendar'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -357,6 +358,10 @@ const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [QUARTERS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PROFILE_DETAIL_RESOURCE]: BACKLOG_TTL_MINUTES,
+    // NOT the backlog TTL: this resource has no slice to permit. It re-reads the whole
+    // forward window every time, so the TTL is the real cadence of the underlying data —
+    // dates get rescheduled and consensus is revised, but not many times a day.
+    [EARNINGS_RESOURCE]: PRICES_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1717,6 +1722,118 @@ const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
     // sit empty — migration 56's `provider_country_iso2`, which reached production at 0 rows while
     // the resource reported success. Hence its own backlog. The cost is modest because
     // `equity/profile` BATCHES (measured): one call per 20 securities, not three per security.
+    // WHEN THIS COMPANY NEXT REPORTS.
+    //
+    // `equity/calendar/earnings` takes a DATE RANGE, not a symbol — one call returned 116 companies
+    // for a three-day window (measured). That makes it the cheapest thing here per fact delivered.
+    // A FIVE-DAY window timed out, so the chunk size is part of the contract, not a tuning knob.
+    //
+    // A ROLLING REFRESH, NOT A BACKLOG. Every other resource drains a queue; the earnings horizon
+    // MOVES, dates are rescheduled and estimates revised up to the day. So each run re-reads the
+    // whole forward window and the newest answer wins — a backlog here would freeze a date that
+    // later changed.
+    if (resource === EARNINGS_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const CHUNK_DAYS = 3
+      const HORIZON_DAYS = 21
+      const day = (offset: number) =>
+        new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
+
+      // Resolve symbols to securities ONCE. `symbol_security` is the materialised map that exists
+      // because resolving through the view cost a scan of the whole universe per query.
+      const { data: symRows, error: symErr } = await market
+        .from('symbol_security')
+        .select('symbol,security_id')
+      if (symErr) throw new Error(`symbol_security read failed: ${symErr.message}`)
+      const idBySymbol = new Map(
+        (symRows ?? []).map((r) => [String(r.symbol).toUpperCase(), r.security_id as string]),
+      )
+
+      let fetched = 0
+      let written = 0
+      let matched = 0
+      let windows = 0
+      let failed = 0
+      let lastError: string | null = null
+
+      for (let offset = -7; offset < HORIZON_DAYS && Date.now() < deadline - TAIL_RESERVE_MS; offset += CHUNK_DAYS) {
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/calendar/earnings?provider=nasdaq` +
+              `&start_date=${day(offset)}&end_date=${day(offset + CHUNK_DAYS - 1)}`,
+            Math.min(25_000, deadline - Date.now()),
+          )
+        } catch (e) {
+          failed++
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          continue
+        }
+        windows++
+        fetched += rows.length
+
+        const out: Record<string, unknown>[] = []
+        for (const r of rows) {
+          const symbol = String(r.symbol ?? '').toUpperCase()
+          const reportDate = String(r.report_date ?? '').slice(0, 10)
+          if (!symbol || !reportDate) continue
+          const securityId = idBySymbol.get(symbol) ?? null
+          if (securityId) matched++
+          const consensus = Number(r.eps_consensus)
+          const previous = Number(r.eps_previous)
+          const estimates = Number(r.num_estimates)
+          out.push({
+            symbol,
+            report_date: reportDate,
+            // NULL rather than dropped when we do not track the company: nasdaq covers far more US
+            // listings than this universe holds, and discarding them would mean re-fetching the
+            // same unresolvable rows for ever to learn the same nothing.
+            security_id: securityId,
+            name: r.name ? String(r.name) : null,
+            eps_consensus: Number.isFinite(consensus) ? consensus : null,
+            eps_previous: Number.isFinite(previous) ? previous : null,
+            num_estimates: Number.isFinite(estimates) ? Math.round(estimates) : null,
+            period_ending: r.period_ending ? String(r.period_ending) : null,
+            reporting_time: r.reporting_time ? String(r.reporting_time) : null,
+            source_code: 'nasdaq',
+            as_of: new Date().toISOString(),
+          })
+        }
+
+        if (out.length > 0) {
+          const { error } = await market
+            .from('earnings_calendar')
+            .upsert(dedupeBy(out, (r) => `${r.symbol}|${r.report_date}`),
+              { onConflict: 'symbol,report_date' })
+          if (error) throw new Error(`earnings_calendar upsert failed: ${error.message}`)
+          written += out.length
+        }
+      }
+
+      // A CALENDAR, NOT AN ARCHIVE. Ninety days of history so a page can say "reported on the 26th"
+      // as well as "reports on the 26th"; beyond that the row is answering no question anyone asks
+      // and `security_statement` already holds what was actually reported.
+      const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10)
+      const { error: delErr } = await market
+        .from('earnings_calendar')
+        .delete()
+        .lt('report_date', cutoff)
+      if (delErr) throw new Error(`earnings_calendar prune failed: ${delErr.message}`)
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: failed === 0 })
+      return json({
+        resource,
+        windows,
+        fetched,
+        written,
+        // How many of the calendar's companies this universe actually tracks. A collapse here means
+        // the symbol map broke, not that companies stopped reporting.
+        matched,
+        failed,
+        lastError,
+      })
+    }
+
     if (resource === PROFILE_DETAIL_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_profile_detail')
