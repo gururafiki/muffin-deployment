@@ -441,6 +441,20 @@ jobs:
             fail=1
           fi
 
+          # 11. A QUARTERLY FIGURE MUST BE A QUARTER OF A YEAR. `security-xbrl` classified a fact
+          #     as quarterly from its `fp` label and bounded the duration on one side only — and
+          #     XBRL's Q2/Q3 duration facts are frequently YEAR-TO-DATE, so the nine-month figure
+          #     was dropped and the six-month one kept. AAPL's 2026-03-28 "quarter" read
+          #     254,940M against a full year of 416,161M: 61% of a year in one quarter.
+          #
+          #     Nothing in a row count or a resource response could show that — the resource
+          #     reported success throughout — so the check is a RATIO. Flow metrics only: a
+          #     balance-sheet quarter is an INSTANT, and total assets at quarter-end is ~100% of
+          #     total assets at year-end, which would flag every security.
+          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_quarter_is_a_quarter.py; then
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1

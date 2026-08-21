@@ -188,5 +188,59 @@ console.log('xbrl fact resolution')
     'a non-currency unit is not mistaken for one')
 }
 
+
+// 12. A YEAR-TO-DATE FACT TAGGED AS A QUARTER IS NOT A QUARTER. This is the defect that reached
+//     production: XBRL Q2/Q3 duration facts are frequently 6- and 9-month YTD figures and still
+//     carry `fp: "Q2"`. A filter that only rejected `days > 200` dropped the 9-month one and
+//     ADMITTED the 6-month one, so AAPL's 2026-03-28 "quarter" was 254,940M against a full year of
+//     416,161M — 61% of a year in one quarter, spiking the chart every Q2, invisible in every count.
+{
+  const payload = facts({ USD: [
+    // A real discrete quarter: 91 days.
+    { end: '2024-03-31', val: 25, fp: 'Q1', filed: '2024-05-01', start: '2024-01-01' },
+    // The same filing's HALF-YEAR figure, also tagged Q2 — six months, and the one that got through.
+    { end: '2024-06-30', val: 55, fp: 'Q2', filed: '2024-08-01', start: '2024-01-01' },
+    // And the nine-month YTD, tagged Q3.
+    { end: '2024-09-30', val: 90, fp: 'Q3', filed: '2024-11-01', start: '2024-01-01' },
+    // A one-month stub period, also tagged as a quarter — a transition period after a fiscal-year
+    // change. Without a LOWER bound this enters the series as a quarter a third of the right size,
+    // which reads as a collapse rather than as a partial period.
+    { end: '2024-12-31', val: 8, fp: 'Q4', filed: '2025-02-01', start: '2024-12-01' },
+  ] })
+  const out = factsFromCompanyFacts(payload, SPECS).filter((f) => f.periodType === 'quarter')
+  check(out.length === 1 && out[0].value === 25,
+    'a 6-month and a 9-month YTD fact tagged Q2/Q3 are both rejected from the quarterly series',
+    `got ${JSON.stringify(out)}`)
+}
+
+// 13. AND A DISCRETE QUARTER STILL LANDS whatever its exact length. Fiscal quarters are not all 91
+//     days — a 4-4-5 retail calendar gives 84 and 98 — so the band has to admit them or the fix
+//     for the above becomes "we have no quarterly data".
+{
+  const payload = facts({ USD: [
+    { end: '2024-03-30', val: 10, fp: 'Q1', filed: '2024-05-01', start: '2024-01-07' }, // 83 days
+    { end: '2024-07-06', val: 12, fp: 'Q2', filed: '2024-08-01', start: '2024-03-31' }, // 97 days
+  ] })
+  const out = factsFromCompanyFacts(payload, SPECS).filter((f) => f.periodType === 'quarter')
+  check(out.length === 2, 'an 83-day and a 97-day fiscal quarter both survive the band',
+    `got ${JSON.stringify(out)}`)
+}
+
+// 14. A MULTI-YEAR FACT IS NOT AN ANNUAL ONE. Some filings carry cumulative or 2-year comparatives
+//     with `fp: FY`; unbounded above, those enter the annual series as an enormous outlier.
+{
+  const payload = facts({ USD: [
+    // THE CUMULATIVE ONE FIRST. Both share a key, priority and filing date, so the first survivor
+    // wins — listed second it would be discarded by ordering rather than by the bound, and a
+    // mutation removing the bound would pass clean.
+    { end: '2024-12-31', val: 300, fp: 'FY', filed: '2025-02-01', start: '2022-01-01' },
+    { end: '2024-12-31', val: 100, fp: 'FY', filed: '2025-02-01', start: '2024-01-01' },
+  ] })
+  const out = factsFromCompanyFacts(payload, SPECS).filter((f) => f.periodType === 'annual')
+  check(out.length === 1 && out[0].value === 100,
+    'a 3-year cumulative fact tagged FY is rejected from the annual series',
+    `got ${JSON.stringify(out)}`)
+}
+
 console.log(failures === 0 ? '\nALL XBRL CHECKS PASSED' : `\n${failures} XBRL CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

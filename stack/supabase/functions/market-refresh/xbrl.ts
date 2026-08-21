@@ -142,14 +142,28 @@ export function factsFromCompanyFacts(
       // from a quarterly one for an INSTANT concept (a balance sheet has no start date to measure).
       const periodType: 'annual' | 'quarter' =
         fp === 'FY' ? 'annual' : fp.startsWith('Q') ? 'quarter' : 'annual'
-      // A DURATION FACT MUST MATCH ITS LABEL. An income statement fact carries `start`, and a
-      // 10-K's Q1 comparative can be tagged FY; trusting the label alone puts a three-month
-      // revenue into the annual series, where it reads as a 75% collapse.
+      // A DURATION FACT MUST MATCH ITS LABEL, AND `fp` DOES NOT MEAN WHAT IT LOOKS LIKE.
+      //
+      // XBRL duration facts for Q2 and Q3 are frequently YEAR-TO-DATE — six and nine months — and
+      // they still carry `fp: "Q2"` / `"Q3"`. The first version of this filter rejected anything
+      // over 200 days, which drops the 9-month YTD and ADMITS THE 6-MONTH ONE. Measured in
+      // production: AAPL's `2026-03-28` "quarterly" revenue came out at 254,940M against a
+      // full-year 416,161M — **61% of a year in a single quarter** — and the same for 2025-03-29
+      // at 53%. The quarterly chart spiked every Q2 and nothing in any row count showed it.
+      //
+      // So a quarter is bounded on BOTH sides: a discrete three-month period is ~90 days, and
+      // anything outside 80..100 is a different period wearing a quarterly label. A YTD fact is
+      // simply skipped — the discrete quarter is derivable as `YTD(n) - YTD(n-1)` within a fiscal
+      // year, but that is a separate change with its own failure modes, and a missing quarter is
+      // honest where a six-month figure labelled as a quarter is not.
+      // An INSTANT fact (a balance sheet) has no `start` and is classified by `fp` alone. That is
+      // deliberate and must stay: rejecting it for lack of a duration drops every balance-sheet
+      // metric, which a mutation already proved.
       if (typeof f.start === 'string') {
         const days = (Date.parse(end) - Date.parse(f.start)) / 86_400_000
         if (!Number.isFinite(days)) continue
-        if (periodType === 'annual' && days < 300) continue
-        if (periodType === 'quarter' && days > 200) continue
+        if (periodType === 'annual' && (days < 300 || days > 400)) continue
+        if (periodType === 'quarter' && (days < 80 || days > 100)) continue
       }
 
       const key = `${spec.metricCode}|${periodType}|${end}`
