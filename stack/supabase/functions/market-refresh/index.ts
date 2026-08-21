@@ -1761,12 +1761,19 @@ const INSIDER_RESOURCE = 'security-insider'
 
       // The endpoint takes a SYMBOL, so resolve through the materialised map rather than the view
       // that costs a scan of the universe per lookup.
-      const { data: symRows, error: symErr } = await market
-        .from('symbol_security')
-        .select('symbol,security_id')
-        .in('security_id', wanted)
-      if (symErr) throw new Error(`symbol_security read failed: ${symErr.message}`)
-      const symbolById = new Map((symRows ?? []).map((r) => [r.security_id as string, String(r.symbol)]))
+      // CHUNKED, because an `in.()` filter is a URL and its size is a LENGTH budget: 120 UUIDs is
+      // already ~4.7 KB, and 6.5 KB is where the proxy answers a bare 502 with nothing pointing at
+      // the cause. `scopeLimit` can raise the page, so the bound has to live here rather than in
+      // the caller's default.
+      const symbolById = new Map<string, string>()
+      for (let i = 0; i < wanted.length; i += 100) {
+        const { data: symRows, error: symErr } = await market
+          .from('symbol_security')
+          .select('symbol,security_id')
+          .in('security_id', wanted.slice(i, i + 100))
+        if (symErr) throw new Error(`symbol_security read failed: ${symErr.message}`)
+        for (const r of symRows ?? []) symbolById.set(r.security_id as string, String(r.symbol))
+      }
 
       const deadline = Date.now() + 60_000
       let written = 0
@@ -1869,15 +1876,35 @@ const INSIDER_RESOURCE = 'security-insider'
       const day = (offset: number) =>
         new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
 
-      // Resolve symbols to securities ONCE. `symbol_security` is the materialised map that exists
-      // because resolving through the view cost a scan of the whole universe per query.
-      const { data: symRows, error: symErr } = await market
-        .from('symbol_security')
-        .select('symbol,security_id')
-      if (symErr) throw new Error(`symbol_security read failed: ${symErr.message}`)
-      const idBySymbol = new Map(
-        (symRows ?? []).map((r) => [String(r.symbol).toUpperCase(), r.security_id as string]),
-      )
+      // RESOLVED BY ASKING FOR THE SYMBOLS WE ACTUALLY GOT, NEVER BY LOADING THE MAP.
+      //
+      // The first version selected all of `symbol_security` in one go. It holds 12,090 rows and
+      // `PGRST_DB_MAX_ROWS` is 1,000, so the map silently contained a twelfth of the universe:
+      // measured, a run wrote 753 calendar rows and matched **22** of them, with NVDA and CRM
+      // landing at `security_id: null` while both are tracked. No error, and the count reads like
+      // a fact about coverage rather than about paging. Third time this cap has bitten in this
+      // codebase — the FX history probe did the same thing yesterday.
+      //
+      // An `in.()` filter is a URL, so its chunk size is a LENGTH budget rather than a row budget:
+      // 500 ISINs is a ~6.5 KB URL and the proxy answers a bare 502. 100 is the documented safe size.
+      const idBySymbol = new Map<string, string>()
+      const resolve = async (symbols: string[]) => {
+        const unknown = [...new Set(symbols)].filter((sym) => !idBySymbol.has(sym))
+        for (let i = 0; i < unknown.length; i += 100) {
+          const chunk = unknown.slice(i, i + 100)
+          const { data, error } = await market
+            .from('symbol_security')
+            .select('symbol,security_id')
+            .in('symbol', chunk)
+          if (error) throw new Error(`symbol_security read failed: ${error.message}`)
+          for (const r of data ?? []) {
+            idBySymbol.set(String(r.symbol).toUpperCase(), r.security_id as string)
+          }
+          // Remember the misses too, so a symbol nasdaq reports and this universe does not track is
+          // asked about once per run rather than once per window.
+          for (const sym of chunk) if (!idBySymbol.has(sym)) idBySymbol.set(sym, '')
+        }
+      }
 
       let fetched = 0
       let written = 0
@@ -1902,12 +1929,17 @@ const INSIDER_RESOURCE = 'security-insider'
         windows++
         fetched += rows.length
 
+        await resolve(
+          rows.map((r) => String(r.symbol ?? '').toUpperCase()).filter((sym) => sym.length > 0),
+        )
+
         const out: Record<string, unknown>[] = []
         for (const r of rows) {
           const symbol = String(r.symbol ?? '').toUpperCase()
           const reportDate = String(r.report_date ?? '').slice(0, 10)
           if (!symbol || !reportDate) continue
-          const securityId = idBySymbol.get(symbol) ?? null
+          // '' is a remembered MISS, not an id.
+          const securityId = idBySymbol.get(symbol) || null
           if (securityId) matched++
           const consensus = Number(r.eps_consensus)
           const previous = Number(r.eps_previous)

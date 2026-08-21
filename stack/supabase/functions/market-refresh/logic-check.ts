@@ -1793,5 +1793,41 @@ console.log('\nsecurity-symbol-repair')
   )
 }
 
+
+// ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────
+//
+// This cap has now cost three separate defects: a `market-verify` guard that reported "1000" for
+// ever as a measurement; the FX history probe that re-fetched the same four currencies because it
+// could not see past its own page; and the earnings resource, which loaded `symbol_security`
+// (12,090 rows) in ONE select and matched 22 of 753 companies — NVDA and CRM landing unresolved
+// while both are tracked. None of them errored. A short answer is not an error, it is a shorter
+// answer, and it reads as a fact about coverage.
+//
+// So a select from one of the LARGE tables must NARROW: `.in(`, `.eq(`, `.limit(`, a range filter,
+// or a `head: true` count. Deliberately a named list rather than every table — the point is the
+// tables big enough for the cap to bite in silence.
+{
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const BIG = ['symbol_security', 'security_metric', 'security_statement', 'security_price',
+               'exchange_listing', 'fund_holding']
+  const offenders: string[] = []
+  const lines = src.split('\n')
+  lines.forEach((l: string, i: number) => {
+    const m = /\.from\('([a-z_]+)'\)/.exec(l)
+    if (!m || !BIG.includes(m[1])) return
+    // The whole chained statement, not one line: the narrowing is usually on the next.
+    const stmt = lines.slice(i, i + 6).join(' ')
+    // WRITES ARE NOT READS. `.upsert(`/`.delete(`/`.update(` carry their own rows or their own
+    // filter and are not subject to the row cap at all — the first version of this guard matched
+    // any `.from(` and reported eight upserts, which is the shape that gets a guard disabled.
+    if (!/\.select\(/.test(stmt)) return
+    if (/\.in\(|\.eq\(|\.limit\(|head:\s*true|\.lt\(|\.gt\(|\.gte\(|\.lte\(/.test(stmt)) return
+    offenders.push(`line ${i + 1}: unnarrowed select from ${m[1]}`)
+  })
+  check(offenders.length === 0,
+    'no select from a large table is left unnarrowed — PGRST_DB_MAX_ROWS truncates it silently',
+    offenders.join(' | '))
+}
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
