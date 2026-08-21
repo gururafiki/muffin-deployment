@@ -110,3 +110,61 @@ export async function fetchUsdPerUnit(
 export function isPlausibleRate(usdPerUnit: number): boolean {
   return Number.isFinite(usdPerUnit) && usdPerUnit > 1e-7 && usdPerUnit < 10;
 }
+
+/**
+ * TEN YEARS OF WEEKLY RATES for one currency.
+ *
+ * WHY HISTORY AT ALL. `fx_rate` held three days, which is enough to reprice a market cap TODAY and
+ * useless for a ratio SERIES: converting a 2021 bar with today's rate produces a number that is
+ * wrong by every intervening move and looks entirely ordinary — the exact shape this pipeline keeps
+ * being bitten by. A P/E chart for a company that reports in one currency and trades in another
+ * either has a rate per bar or it has nothing.
+ *
+ * WEEKLY, NOT DAILY, and that is deliberate: `security_price` is itself weekly beyond the recent
+ * window, FX moves slowly relative to the quantity being converted, and 524 weekly bars per
+ * currency against ~2,600 daily keeps the whole table small enough to join cheaply. The consumer
+ * carries each rate forward to the following bars, so a daily price between two weekly rates uses
+ * the most recent one rather than interpolating — a rate we did not observe is not a rate.
+ */
+export async function fetchUsdPerUnitHistory(
+  currency: string,
+  timeoutMs = 20_000,
+): Promise<{ asOf: string; usdPerUnit: number }[]> {
+  if (currency === 'USD') return [];
+
+  const res = await fetch(
+    `https://query2.finance.yahoo.com/v8/finance/chart/${currency}USD=X?range=10y&interval=1wk`,
+    {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; muffin-market-data)' },
+      signal: AbortSignal.timeout(timeoutMs),
+    },
+  );
+  if (!res.ok) return [];
+
+  const body = (await res.json()) as {
+    chart?: {
+      error?: unknown;
+      result?: {
+        timestamp?: number[];
+        indicators?: { quote?: { close?: (number | null)[] }[] };
+      }[];
+    };
+  };
+  if (body.chart?.error) return [];
+  const r = body.chart?.result?.[0];
+  const closes = r?.indicators?.quote?.[0]?.close ?? [];
+  const stamps = r?.timestamp ?? [];
+
+  const out: { asOf: string; usdPerUnit: number }[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    const c = closes[i];
+    const ts = stamps[i];
+    if (typeof c !== 'number' || !Number.isFinite(c) || c <= 0) continue;
+    if (typeof ts !== 'number') continue;
+    // The SAME plausibility gate the spot path uses. An inverted pair is the likely fault and both
+    // directions look reasonable, so a rate we cannot vouch for is dropped rather than corrected.
+    if (!isPlausibleRate(c)) continue;
+    out.push({ asOf: new Date(ts * 1000).toISOString().slice(0, 10), usdPerUnit: c });
+  }
+  return out;
+}
