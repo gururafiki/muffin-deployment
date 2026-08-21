@@ -40,7 +40,10 @@ insert into market.security_fundamentals (security_id, raw, as_of, source_code) 
 on conflict (security_id) do nothing;
 
 -- Run the REAL migration, not a copy of its update — a copy drifts and then proves nothing.
-\i /repo/stack/supabase/migrations/108-the-reporting-currency-was-already-here.sql
+-- RELATIVE, because `\i` resolves against the CLIENT's working directory and CI runs psql from
+-- the checkout root while the local harness runs it inside a container. An absolute /repo path
+-- passes locally and fails only in CI, which is the worst place to find out.
+\i stack/supabase/migrations/108-the-reporting-currency-was-already-here.sql
 
 do $$
 declare v text;
