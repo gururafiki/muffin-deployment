@@ -1807,10 +1807,31 @@ const INSIDER_RESOURCE = 'security-insider'
             Math.min(20_000, deadline - Date.now()),
           )
         } catch (e) {
+          const msg = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+          // A 400 THAT SAYS "NO FORM 4 DATA" IS AN ANSWER, NOT A FAILURE — and the provider states
+          // it outright rather than leaving it to be inferred from a status code. Thin OTC
+          // foreign-ordinary lines like BBVXF have no Form 4 because the company is not a US
+          // registrant; that is a settled fact about the security, reached by asking.
+          //
+          // Treating it as a failure would leave the cursor unadvanced and bring the same
+          // securities back every run for ever — 8 of 30 on the run that surfaced this. The
+          // distinction is the one this pipeline keeps relearning: A REQUEST THAT FAILED AND A
+          // REQUEST THAT ANSWERED NOTHING ARE DIFFERENT FACTS, and here the message says which.
+          if (/no form 4 data/i.test(msg)) {
+            noFilings++
+            const { error: cErr } = await market
+              .from('security')
+              .update({ insider_fetched_at: new Date().toISOString() })
+              .eq('security_id', securityId)
+            if (cErr) throw new Error(`insider_fetched_at update failed: ${cErr.message}`)
+            continue
+          }
           failed++
-          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          // The cursor is NOT advanced on a failure: a security we could not ask about must come
-          // back next run, not wait a week because the attempt errored.
+          lastError = msg
+          // A TRANSPORT ERROR IS NOT AN ANSWER. `Connection refused` means openbb-api was
+          // restarting or had been OOM-killed — measured, a deploy restart produced exactly that
+          // for ~a minute. The cursor stays put so the security comes back next run rather than
+          // waiting a week because the service was down for thirty seconds.
           continue
         }
 
