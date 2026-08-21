@@ -87,6 +87,7 @@ jobs:
               security-yahoo-symbols \
               security-profiles \
               security-profile-detail \
+              earnings-calendar \
               security-industries \
               security-fundamentals \
               security-statements \
