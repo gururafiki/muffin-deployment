@@ -435,6 +435,7 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // string is the proof that the endpoint answered for someone in this run.
   const gates: [string, string][] = [
     ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
+    ['security-quarters',     'asked && anyAnswer'],
     ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
     ['security-profiles',     'if (classified > 0) {'],
     ['security-fundamentals', 'if (written > 0) {'],
@@ -1068,6 +1069,8 @@ console.log('\nresource registry — the cron and the function agree')
     // arithmetic rules — there are no units to confuse in a `content-range` count. They are still
     // listed so the "has the list rotted" tally keeps meaning "every resource was looked at".
     STATEMENTS_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the two above.
+    QUARTERS_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
     XBRL_RESOURCE: [],
