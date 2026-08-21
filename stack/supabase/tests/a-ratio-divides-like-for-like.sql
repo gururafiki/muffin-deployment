@@ -176,6 +176,32 @@ begin
   if n <> 0 then
     raise exception 'a bar predating every report produced a row — the first EPS would be projected backwards into a year it does not describe';
   end if;
+  -- 8. THE REPORTING CURRENCY FILLS THE SILENCE. A yfinance-derived metric states no currency at
+  --    all (the income/balance/cash endpoints carry none), so without a fallback every foreign
+  --    company shows a margin and no P/E — which is what production did.
+  -- Assertion 5 left this EPS negative on purpose; restore it, or this test would be measuring the
+  -- non-positive-denominator rule again instead of the currency fallback.
+  update market.security_metric set value = 4
+   where security_id = '00000000-0000-0000-0000-000000010501' and as_of = date '2025-01-01';
+  update market.security_metric set currency_code = null
+   where security_id = '00000000-0000-0000-0000-000000010501';
+  update market.security set reporting_currency = 'USD'
+   where security_id = '00000000-0000-0000-0000-000000010501';
+  select pe_ratio into v from market.security_ratio_series
+   where symbol = 'T105A' and date = date '2025-03-01';
+  if v is distinct from 10 then
+    raise exception 'a metric with no stated currency produced % — the company''s reporting currency should fill the silence', coalesce(v::text,'<null>');
+  end if;
+
+  -- 9. AND IT MUST NEVER OVERRIDE THE FILING. The ADR states DKK on the metric itself; a fallback
+  --    that won would relabel kroner as dollars and hand back the exact bug the gate exists for.
+  update market.security set reporting_currency = 'USD'
+   where security_id = '00000000-0000-0000-0000-000000010502';
+  select pe_ratio into v from market.security_ratio_series
+   where symbol = 'T105B' and date = date '2025-03-01';
+  if v is not null then
+    raise exception 'the ADR got a P/E of % — a stated DKK filing was overridden by the fallback', v;
+  end if;
 end $$;
 
 rollback;
