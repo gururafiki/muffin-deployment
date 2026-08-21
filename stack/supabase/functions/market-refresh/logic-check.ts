@@ -437,7 +437,10 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
     ['security-quarters',     'asked && anyAnswer'],
     // Marks only what isolation proved dead ALONE — never absence from a batched 200.
-    ['security-profile-detail', 'anyAnswer && iso.dead.length > 0'],
+    // `iso.dead` IS the gate: fetchWithIsolation only populates it after asking each symbol alone
+    // AND proving the provider is up with a control symbol. A run-level tally on top can never fire
+    // once a backlog's answerable head has drained — measured, five identical stalled runs.
+    ['security-profile-detail', 'iso.dead.length > 0'],
     ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
     ['security-profiles',     'if (classified > 0) {'],
     ['security-fundamentals', 'if (written > 0) {'],
