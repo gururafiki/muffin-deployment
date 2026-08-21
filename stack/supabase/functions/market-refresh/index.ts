@@ -1803,7 +1803,13 @@ const QUARTERS_RESOURCE = 'security-quarters'
 
       // Quarters are only worth having because they become TTM. Deriving here means one run
       // produces the whole chain rather than leaving the metrics resource to notice tomorrow.
-      const { error: dErr } = await market.rpc('derive_security_metrics', { p_limit: 2_000 })
+      //
+      // 200, NOT 2,000. The role PostgREST uses has an EIGHT SECOND statement timeout — a third
+      // limit, distinct from the 90s worker budget and the 3s anon ceiling — and 2,000 exceeded it
+      // on the very first real run, so the chain stopped at the statements and `lastError` carried
+      // a timeout beside a successful write. This run only ever adds ~10 securities' worth of
+      // periods; the metrics resource sweeps the rest on its own cadence.
+      const { error: dErr } = await market.rpc('derive_security_metrics', { p_limit: 200 })
       if (dErr) lastError = lastError ?? dErr.message
       const { data: ttm } = await market.rpc('derive_ttm', { p_security_id: null, p_limit: 100 })
 
