@@ -56,7 +56,24 @@ begin
     raise exception 'a currency with no rates at all is not queued — an anti-join written as a join drops exactly this case';
   end if;
 
-  -- 4. THE DOLLAR IS NEVER QUEUED. There is no USDUSD=X to fetch, and asking for one costs a
+  -- 4. A CURRENCY THE PROVIDER HAS NO HISTORY FOR LEAVES THE BACKLOG. Yahoo carries a SINGLE bar
+  --    for GELUSD=X, so the fetch succeeds, writes one recent row, and "has a rate older than 90
+  --    days" stays false for ever — eight requests a day, no error, nothing wrong, pure waste.
+  update market.currency set history_missing_at = now() where code = 'T1A';
+  select count(*) into n from market.pending_fx_history where currency_code = 'T1A';
+  if n <> 0 then
+    raise exception 'a currency the provider has no history for is STILL queued — it will be re-asked for ever';
+  end if;
+
+  -- 5. BUT ONLY FOR 30 DAYS. A pair not quoted today may be quoted next quarter, and asking again
+  --    monthly costs one request. `never` would be cheaper and wrong.
+  update market.currency set history_missing_at = now() - interval '31 days' where code = 'T1A';
+  select count(*) into n from market.pending_fx_history where currency_code = 'T1A';
+  if n <> 1 then
+    raise exception 'an expired negative cache did not re-queue the currency — the mark is permanent, not a cache';
+  end if;
+
+  -- 6. THE DOLLAR IS NEVER QUEUED. There is no USDUSD=X to fetch, and asking for one costs a
   --    request per run for ever.
   select count(*) into n from market.pending_fx_history where currency_code = 'USD';
   if n <> 0 then
