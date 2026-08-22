@@ -1082,6 +1082,8 @@ console.log('\nresource registry — the cron and the function agree')
     INSIDER_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     FILINGS_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the others above.
+    MANAGEMENT_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
     XBRL_RESOURCE: [],
