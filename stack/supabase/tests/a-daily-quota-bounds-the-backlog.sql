@@ -36,6 +36,25 @@ insert into market.security_identifier (kind_code, value, security_id, source_co
   ('ticker','T122C.AS','00000000-0000-0000-0000-000000012203','alpha-vantage')
 on conflict (kind_code, value) do nothing;
 
+-- EVERY security here gets a US LISTING, including the suffixed one.
+--
+-- Migration 124 added "must have a US listing" to this backlog, because OpenFIGI's US lookup hands
+-- the pipeline bare OTC foreign-ordinary tickers (`ASMLF`, `TSMWF`) that alpha_vantage answers with
+-- an empty object. Without listings this fixture's securities all vanish and the test fails for a
+-- reason unrelated to what it checks.
+--
+-- The suffixed one (`T122C.AS`) is given a US listing DELIBERATELY. Leaving it without one would
+-- make assertion 3 pass under either rule — the suffix filter it exists to pin could be deleted
+-- and nothing here would notice. With the listing present, the suffix rule is the only thing
+-- excluding it, which is the whole point of a fixture: make the candidate rules disagree.
+insert into market.exchange (exch_code, country_iso2, suffix) values ('US','US','')
+  on conflict (exch_code) do nothing;
+insert into market.listing (security_id, exch_code, symbol, is_primary) values
+  ('00000000-0000-0000-0000-000000012201','US','T122A',true),
+  ('00000000-0000-0000-0000-000000012202','US','T122B',true),
+  ('00000000-0000-0000-0000-000000012203','US','T122C',true)
+on conflict (security_id, exch_code) do nothing;
+
 -- 2.5% and 0.7%. The second is a real position and would qualify for every OTHER backlog here —
 -- `pending_management` takes anything at 0.5%. It must not qualify for this one.
 insert into market.fund_holding (fund_id, security_id, as_of, weight, source_code) values
