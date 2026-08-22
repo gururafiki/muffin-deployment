@@ -51,6 +51,11 @@ QUERIES = [
     # A non-USD filer, where the currency gate does the withholding — the branch a US-only probe
     # never reaches.
     ("stock P/E chart, local listing", "security_ratio_series?select=date,pe_ratio,currency_comparable&symbol=eq.SAP.DE&grain=eq.daily&order=date"),
+    # A self-join over the sector's members. It was 0.89s built on `security_current` (whose sector
+    # comes from a lateral, so the cost was paid per sector member) and moved to the materialised
+    # spine for that reason — a sector grows with every promoted listing, and this is the fourth
+    # view in this schema to be one filter away from the anon timeout.
+    ("stock peers", "security_peers?select=peer_symbol,peer_market_cap_usd,size_distance&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=size_distance&limit=8"),
 ]
 
 

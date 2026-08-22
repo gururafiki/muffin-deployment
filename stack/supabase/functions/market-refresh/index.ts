@@ -1801,10 +1801,28 @@ const MANAGEMENT_RESOURCE = 'security-management'
           // A refusal is about the ENDPOINT, not this company — stop rather than spend the rest of
           // the page proving it, and leave every cursor untouched.
           if (throttled(msg)) { throttledOut = true; lastError = msg; break }
+          // A 400 NAMING THE ABSENCE IS AN ANSWER. `No executive data found for ICT.PS` came back
+          // on the first real run: plenty of smaller issuers list no officers, and that is a fact
+          // about the company reached by asking. Counting it as a failure would leave the cursor
+          // untouched and bring the same securities back every run — the third time this exact
+          // shape has appeared, after `security-filings` and `security-insider`.
+          //
+          // A TRANSPORT error is excluded from that: `connection refused` means openbb-api was
+          // restarting, and advancing on it would cost six months of staleness for a thirty-second
+          // outage.
+          if (/no .* data|not found/i.test(msg) && !/connect|refused|timeout/i.test(msg)) {
+            noOfficers++
+            const { error: mErr } = await market
+              .from('security')
+              .update({ management_fetched_at: new Date().toISOString() })
+              .eq('security_id', item.securityId)
+            if (mErr) throw new Error(`management_fetched_at update failed: ${mErr.message}`)
+            continue
+          }
           failed++
           lastError = msg
-          // The cursor is NOT advanced on a failure: a security we could not ask about comes back
-          // next run rather than waiting six months because the attempt errored.
+          // The cursor is NOT advanced on a genuine failure: a security we could not ask about
+          // comes back next run rather than waiting six months because the attempt errored.
           continue
         }
 

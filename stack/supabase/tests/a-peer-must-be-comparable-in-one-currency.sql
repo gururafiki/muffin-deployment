@@ -60,6 +60,13 @@ select s.security_id, n.node_id, 'yfinance'
   ) n
 on conflict do nothing;
 
+-- A MATERIALIZED VIEW MAKES THIS A SNAPSHOT TEST. Since migration 121 the peer lookup reads
+-- `security_facets`, which is materialised — rows inserted in this transaction are invisible to it
+-- until it is rebuilt, so every assertion below would measure an empty set. The NON-concurrent form
+-- deliberately: `refresh ... concurrently` cannot run inside a transaction block, and a test that
+-- cannot roll back is not a test.
+refresh materialized view market.security_facets;
+
 do $$
 declare nearest text; d_twin numeric; d_giant numeric; n integer;
 begin
