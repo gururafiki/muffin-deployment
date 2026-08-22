@@ -468,6 +468,14 @@ jobs:
           #     (120 days against 90): a few days over means the cron is late, which
           #     `check_resource_health` reports better; a month over means the delete is not
           #     happening at all.
+          # A number that is merely present TWICE, with both copies agreeing, is invisible to every
+          # other check here — no floor, no unit band and no freshness rule can see it. It was
+          # visible only on the rendered chart, as AAPL's 2025 revenue plotted at both 2025-09-27
+          # (the filing) and 2025-09-30 (the provider's rounded month end).
+          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_one_period_one_point.py; then
+            fail=1
+          fi
+
           if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_retention_is_enforced.py; then
             fail=1
           fi
