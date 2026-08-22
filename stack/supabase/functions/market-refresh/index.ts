@@ -32,7 +32,7 @@ import {
 } from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
-import { SUBUNITS, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
+import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, type ConceptSpec } from './xbrl.ts'
 import { candidateSymbols } from './symbol-repair.ts'
@@ -1767,12 +1767,27 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // a run over a population bounded to meaningful fund holdings, rather than 300 over everything.
     // DEEP EPS HISTORY — actual against estimate, going back years.
     //
-    // THREE A RUN, AND THAT NUMBER IS THE DESIGN. alpha_vantage allows **25 calls a DAY** in total
-    // and FMP's copy of this endpoint is 402 premium (measured, even for AAPL), so there is no
-    // second source and no way to widen it. Three securities over eight cron runs is 24 calls a
-    // day — inside the limit with one to spare — aimed at the largest fund holdings. The
-    // alternative is not a slower drain, it is exhausting the day's quota on the first run.
+    // CALLED DIRECTLY, NOT THROUGH openbb-api, and that is the whole reason this resource is safe.
+    // Alpha Vantage's free key allows 25 requests a DAY, and when it is spent it answers 200 with an
+    // `Information` field about the limit — which openbb translates into an empty **204**, exactly
+    // what it returns for a symbol it genuinely has nothing for. Measured 2026-08-22: MSFT returned
+    // full data from the raw API in the same minute openbb reported 204 for it.
+    //
+    // A resource that could not tell those apart would negative-cache real companies for 90 days
+    // every time the quota ran out, which at 24 calls a day against a 25 limit is most days. So it
+    // reads the field that carries the difference.
+    //
+    // THREE A RUN because of that same quota, over holdings above 1% with a 90-day cursor — ~2,000
+    // calls a year against a ~9,000 budget.
     if (resource === EPS_HISTORY_RESOURCE) {
+      const avKey = Deno.env.get('ALPHA_VANTAGE_API_KEY') ?? ''
+      if (!avKey) {
+        // ABSENT, NOT BROKEN. The stack renders this variable empty when no key is configured, and
+        // saying so is more useful than 25 failed requests.
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, securities: 0, note: 'ALPHA_VANTAGE_API_KEY is not set' })
+      }
+
       const { data: pending, error: pendErr } = await market
         .from('pending_eps_history')
         .select('security_id,symbol')
@@ -1783,9 +1798,10 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         securityId: r.security_id as string,
         symbol: String(r.symbol),
       }))
+      const remaining = await backlogSize(market, 'pending_eps_history')
       if (wanted.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, written: 0, securities: 0, note: 'every large holding is current' })
+        return json({ resource, written: 0, securities: 0, remaining, note: 'every large holding is current' })
       }
 
       const deadline = Date.now() + 60_000
@@ -1793,72 +1809,50 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       let securities = 0
       let noHistory = 0
       let failed = 0
-      let quotaOut = false
+      let rateLimited = false
       let lastError: string | null = null
 
       for (const item of wanted) {
         if (Date.now() > deadline - TAIL_RESERVE_MS) break
-        let rows: Record<string, unknown>[] = []
+        let got: Awaited<ReturnType<typeof fetchAlphaVantageEarnings>>
         try {
-          rows = await fetcher(
-            `/api/v1/equity/fundamental/historical_eps?symbol=${encodeURIComponent(item.symbol)}` +
-              `&provider=alpha_vantage`,
-            Math.min(20_000, deadline - Date.now()),
-          )
+          got = await fetchAlphaVantageEarnings(item.symbol, avKey, Math.min(20_000, deadline - Date.now()))
         } catch (e) {
-          const msg = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
-          // THE DAILY QUOTA IS NOT A FACT ABOUT THIS SECURITY. alpha_vantage reports exhaustion in
-          // the body rather than with a distinct status, and continuing would spend the rest of the
-          // page proving the same thing. Stop, mark nothing, and leave every cursor untouched — the
-          // same rule `throttled()` expresses for yfinance.
-          if (/rate limit|higher api call|premium|quota|too many/i.test(msg)) {
-            quotaOut = true
-            lastError = msg
-            break
-          }
-          // A 400 naming the absence is an answer; a transport error is not.
-          if (/no .* data|not found/i.test(msg) && !/connect|refused|timeout/i.test(msg)) {
-            noHistory++
-            const { error: cErr } = await market
-              .from('security')
-              .update({ eps_history_fetched_at: new Date().toISOString() })
-              .eq('security_id', item.securityId)
-            if (cErr) throw new Error(`eps_history_fetched_at update failed: ${cErr.message}`)
-            continue
-          }
           failed++
-          lastError = msg
+          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           continue
         }
 
-        const out: Record<string, unknown>[] = []
-        for (const r of rows) {
-          const period = String(r.date ?? r.period_ending ?? '').slice(0, 10)
-          if (!period) continue
-          const actual = Number(r.eps_actual)
-          const est = Number(r.eps_estimated)
-          const surp = Number(r.surprise)
-          const surpPct = Number(r.surprise_percent)
-          out.push({
-            security_id: item.securityId,
-            period_ending: period,
-            // NOT `|| null` — a genuine EPS of 0 is a real figure and must survive. Only a
-            // non-finite value is an absence.
-            eps_actual: Number.isFinite(actual) ? actual : null,
-            eps_estimated: Number.isFinite(est) ? est : null,
-            surprise: Number.isFinite(surp) ? surp : null,
-            // A FRACTION, NOT A PERCENT — measured on the wire: MSFT's Q2 2026 beat is
-            // `surprise: 0.53` against `eps_estimated: 4.21` and `surprise_percent: 0.125891`,
-            // which is 12.59%. Storing it raw in a column named `_pct` is the units bug this
-            // schema has shipped twice: OpenBB returns performance as a fraction while every
-            // reader wants percent, and one shared formatter once put NVIDIA on the deployed page
-            // at a 46% dividend yield. Converted here, once, at the boundary.
-            surprise_pct: Number.isFinite(surpPct) ? surpPct * 100 : null,
-            reported_date: r.reported_date ? String(r.reported_date).slice(0, 10) : null,
-            source_code: 'alpha-vantage',
-            as_of: new Date().toISOString(),
-          })
+        // THE QUOTA IS NOT A FACT ABOUT THIS SECURITY. Stop the run, mark nothing, leave every
+        // cursor untouched — continuing would spend the remaining calls proving the same thing.
+        if (got.rateLimited) {
+          rateLimited = true
+          lastError = got.note
+          break
         }
+        if (got.quarters === null) {
+          // An unexpected shape or a transport-level refusal. Reported, never marked: if the
+          // provider renames a field, this must be loud rather than quietly concluding that every
+          // security in the page has no earnings history.
+          failed++
+          lastError = got.note
+          continue
+        }
+
+        const out = got.quarters.map((q) => ({
+          security_id: item.securityId,
+          period_ending: q.periodEnding,
+          // NOT `|| null` — a genuine EPS of 0 is a real figure and must survive.
+          eps_actual: q.actual,
+          eps_estimated: q.estimated,
+          surprise: q.surprise,
+          // Already a PERCENT from the raw API (12.5891), unlike openbb's wrapper which sends the
+          // fraction 0.125891. Reading the provider directly means reading ITS units.
+          surprise_pct: q.surprisePct,
+          reported_date: q.reportedDate,
+          source_code: 'alpha-vantage',
+          as_of: new Date().toISOString(),
+        }))
 
         if (out.length > 0) {
           const { error } = await market
@@ -1869,6 +1863,8 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           written += out.length
           securities++
         } else {
+          // An ANSWER with no quarters — the provider replied and has nothing for this symbol.
+          // Safe to mark only because `rateLimited` and the null-shape case were handled above.
           noHistory++
         }
 
@@ -1879,15 +1875,15 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         if (cErr) throw new Error(`eps_history_fetched_at update failed: ${cErr.message}`)
       }
 
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: !quotaOut })
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: !rateLimited })
       return json({
         resource,
         written,
         securities,
         noHistory,
         failed,
-        // Reported so an exhausted day is legible as itself rather than as a broken resource.
-        quotaExhausted: quotaOut,
+        // Reported so an exhausted day reads as itself rather than as a broken resource.
+        rateLimited,
         lastError,
         remaining: await backlogSize(market, 'pending_eps_history'),
       })
