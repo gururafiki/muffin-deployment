@@ -669,8 +669,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       }
 
       // A run where NOTHING answered is a provider event, not 60 dividend-less securities.
+      //
+      // `p_error` is passed so the LEDGER says why. Without it `refresh_log` holds `ok = false,
+      // error = null`, which is a failure that cannot be diagnosed from the log at all — measured
+      // 2026-08-22, exactly that row sat there while the resource was in fact fine (the next run
+      // wrote 28 rows). A guard that declines to mark is right; one that declines to explain sends
+      // the next reader to the source.
       if (!anyAnswer && failed > 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false })
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: lastError })
         return json({ resource, ok: false, written: 0, failed, lastError }, 200)
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })

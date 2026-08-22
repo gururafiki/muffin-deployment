@@ -642,11 +642,21 @@ services:
       SUPABASE_SERVICE_KEY: "{{ supabase_service_role_key }}"
       AUTH_JWT_SECRET: "{{ supabase_jwt_secret }}"
       ENABLED_FEATURES_LOGS_ALL: "false"
+      # THE MOUNT ALONE WAS NOT ENOUGH, AND THE PAGE'S OWN ERROR MESSAGE SENT ME THE WRONG WAY.
+      #
+      # Studio said "Edge functions could not be read from disk. The functions directory may be
+      # missing, not mounted into Studio, or unreadable" — and all three were false. Measured on
+      # the node 2026-08-22: the bind mount is present on the running service, and the container
+      # lists both `main/` and `market-refresh/` under /home/deno/functions quite happily.
+      #
+      # The real cause was in Studio's own log, one line:
+      #     AssertionError [ERR_ASSERTION]: EDGE_FUNCTIONS_MANAGEMENT_FOLDER is required
+      # It never looked, because it was not told where. Read the SERVICE LOG, not the page.
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /home/deno/functions
     volumes:
-      # Studio's Functions page reads them off disk, and nothing was mounted — hence "Edge
-      # functions could not be read from disk". READ-ONLY on purpose: self-hosted Studio cannot
-      # deploy a function anyway (Ansible copies them and edge-runtime serves them), so this makes
-      # the page work without implying it can write.
+      # Studio's Functions page reads them off disk. READ-ONLY on purpose: self-hosted Studio
+      # cannot deploy a function anyway (Ansible copies them and edge-runtime serves them), so
+      # this makes the page work without implying it can write.
       - /home/ubuntu/supabase/functions:/home/deno/functions:ro
     networks:
       - muffin-net
