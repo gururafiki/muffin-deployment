@@ -181,6 +181,15 @@ jobs:
           # refuses to judge. Driven offline against a stub fetcher.
           deno run --allow-read stack/supabase/functions/market-refresh/isolation-check.ts
 
+      # The quarter-shape check in market-verify rests on one number: that year-to-date stacking
+      # gives a last/first quarter ratio near 3 while discrete quarters give near 1. That claim was
+      # asserted in a docstring and never demonstrated — and three EARLIER versions of the same
+      # check cried wolf on production for want of exactly this kind of proof. `--self-test` runs
+      # the real statistic over synthetic discrete and cumulative series and fails if the threshold
+      # does not separate them. No database, so it runs on every PR.
+      - name: Offline check — the quarter-shape threshold separates the two cases
+        run: python3 .github/scripts/check_quarter_is_a_quarter.py --self-test
+
   terraform:
     runs-on: ubuntu-latest
     steps:
