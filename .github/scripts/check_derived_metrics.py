@@ -91,17 +91,28 @@ def main() -> int:
         # habit: a 500-value `in.()` is a ~6.5 KB URL and the proxy answers a bare 502.
         plist = ",".join(sorted(periods))
         stmts = get(
-            "security_statement?select=statement,period_ending,data,source_code"
+            "security_statement?select=statement,period_ending,period_type,data,source_code"
             f"&security_id=eq.{sec_id}&period_ending=in.({urllib.parse.quote(plist)})"
         )
-        index = {(s["statement"], s["period_ending"]): s for s in stmts}
+        # PERIOD TYPE IS PART OF THE KEY, BECAUSE A FISCAL-YEAR END IS BOTH AN ANNUAL PERIOD AND A
+        # FOURTH-QUARTER ONE.
+        #
+        # Indexed on (statement, period_ending) alone, a security holding both an annual and a
+        # quarterly filing for 2025-12-31 keeps whichever row this dict happened to see LAST, and
+        # the annual metric is then compared against three months of revenue. Measured 2026-08-22:
+        # 27 "disagreements", every one a served annual figure against a quarterly filing, ratios of
+        # 2.9-4.8 — the arithmetic signature of a year over a quarter, not of drift. The data was
+        # right throughout; this check predates migration 106, which added quarterly statements and
+        # put `period_type` into the primary key and into both writers' conflict and dedupe keys.
+        # It was the one place the column never reached.
+        index = {(s["statement"], s["period_ending"], s["period_type"]): s for s in stmts}
 
         for m in metrics:
             for stmt_kind in ("income", "balance", "cash"):
                 field = mapping.get((m["metric_code"], m["source_code"], stmt_kind))
                 if field is None:
                     continue
-                src = index.get((stmt_kind, m["as_of"]))
+                src = index.get((stmt_kind, m["as_of"], m["period_type"]))
                 if src is None:
                     continue
                 raw = (src.get("data") or {}).get(field)
