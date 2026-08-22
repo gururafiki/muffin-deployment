@@ -1812,10 +1812,11 @@ console.log('\nsecurity-symbol-repair')
 // Multiplying would report a 12.59% beat as 1,259% and dividing would report it as 0.13%; both are
 // plausible enough to survive a glance, which is why this is pinned rather than left to a comment.
 //
-// HONEST LIMIT: openbb's 0.125891 is exactly one hundredth of the documented percent, and that is
-// what says the raw field is the percent. The raw `quarterlyEarnings` payload has NOT been read
-// directly — probing exhausted the 25-a-day quota — so the first real run must be checked against a
-// known beat before this number is shown on a page.
+// SETTLED BY MEASUREMENT, 2026-08-22. The raw payload was read directly once the quota reset:
+// MSFT's 2026-06-30 quarter reports 4.74 against an estimated 4.21, and `surprisePercentage` is
+// 12.5891 — which is (4.74 - 4.21) / 4.21 as a PERCENT, not a fraction. openbb's wrapper sends
+// 0.125891 for the same quarter, so it is the wrapper that divides. The earlier note here recorded
+// this as inferred-but-unverified; it is now arithmetic against a known beat.
 {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   const fx = await Deno.readTextFile(new URL('./fx.ts', import.meta.url))
@@ -1825,6 +1826,40 @@ console.log('\nsecurity-symbol-repair')
   check(/surprise_pct:\s*q\.surprisePct,/.test(src) && !/q\.surprisePct\s*\*\s*100/.test(src),
     'the raw provider percent is stored unscaled — it is already a percent',
     'multiplying would report a 12.59% beat as 1,259%')
+
+  // ── AN EMPTY BODY IS AN ANSWER ABOUT THE SYMBOL; AN EMPTY ARRAY IS NOT ───────────────────────
+  //
+  // Measured 2026-08-22: `ASMLF` returns `{}` with ZERO keys while `ASML` returns 108 quarters in
+  // the same minute. That zero-key test is the whole discriminator — a renamed field would leave
+  // `symbol` and `annualEarnings` behind, so it can never be mistaken for a symbol the provider
+  // does not carry. Pinned on the KEY COUNT specifically: relaxing it to "no quarterlyEarnings"
+  // would let a renamed field mark every security in the page as uncovered.
+  check(/Object\.keys\(body\)\.length === 0/.test(fx) && /notCovered: true/.test(fx),
+    'an empty provider body is classified as "does not carry this symbol", by key count',
+    'fx.ts must distinguish a zero-key body from a shape it did not expect')
+
+  // And the caller may mark ONLY on that flag. The backlog is ordered by fund weight, so a symbol
+  // the provider cannot answer sits at the head and is re-asked every run until something records
+  // that we asked — the fifth stall of this shape in this schema. Marking on `quarters.length === 0`
+  // instead would re-introduce the defect the flag exists to prevent, because a throttled or
+  // renamed response is empty too.
+  //
+  // Anchored on the LOOP, not on the handler's first `finish_refresh` — this handler calls that
+  // three times (the missing-key return, the drained-backlog return, and the tail), so the obvious
+  // window ends 290 characters in, before the loop it is meant to cover. Written that way first,
+  // and it failed rather than passing vacuously only because the branch it looks for sits after
+  // the cut. That is the same "anchored on the first match in the file" trap logic-check already
+  // records one level down.
+  const eps = src.slice(src.indexOf('resource === EPS_HISTORY_RESOURCE'))
+  const loopAt = eps.indexOf('for (const [i, item] of wanted.entries())')
+  const marking = eps.slice(loopAt, eps.indexOf('p_ok: !rateLimited'))
+  check(loopAt > 0 && marking.length > 500,
+    'the EPS marking window covers the loop',
+    `window is ${marking.length} chars — the anchors have moved`)
+  check(/if \(got\.notCovered\) \{/.test(marking) &&
+        !/quarters\.length === 0[\s\S]{0,200}eps_history_fetched_at/.test(marking),
+    'the EPS backlog marks a symbol only when the provider said it does not carry it',
+    'marking on an empty result would mark every security in a throttled page')
 }
 
 // ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────

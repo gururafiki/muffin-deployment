@@ -1808,18 +1808,25 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       let written = 0
       let securities = 0
       let noHistory = 0
+      let notCovered = 0
       let failed = 0
       let rateLimited = false
       let lastError: string | null = null
+      let firstError: string | null = null
 
-      for (const item of wanted) {
+      for (const [i, item] of wanted.entries()) {
         if (Date.now() > deadline - TAIL_RESERVE_MS) break
+        // THE PROVIDER NAMES ITS OWN PACE — "1 request per second" is in the throttle text it
+        // returns. Three calls back to back tripped it on the second, and a tripped run marks
+        // nothing, so the sleep costs a few seconds and buys the whole page.
+        if (i > 0) await new Promise((r) => setTimeout(r, 1_500))
         let got: Awaited<ReturnType<typeof fetchAlphaVantageEarnings>>
         try {
           got = await fetchAlphaVantageEarnings(item.symbol, avKey, Math.min(20_000, deadline - Date.now()))
         } catch (e) {
           failed++
           lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          firstError ??= `${item.symbol}: ${lastError}`
           continue
         }
 
@@ -1830,12 +1837,28 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           lastError = got.note
           break
         }
+
+        // ASKED, AND NOT CARRIED. Marking here is what lets the head advance: the backlog is
+        // ordered by fund weight, so an unanswerable symbol at the top is re-asked on every run
+        // until something records that we asked. The cursor gives it 90 days, not for ever — a
+        // company can gain a US listing, and 90 days is the same quarterly cadence a covered
+        // security refreshes on.
+        if (got.notCovered) {
+          notCovered++
+          const { error: nErr } = await market
+            .from('security')
+            .update({ eps_history_fetched_at: new Date().toISOString() })
+            .eq('security_id', item.securityId)
+          if (nErr) throw new Error(`eps_history_fetched_at update failed: ${nErr.message}`)
+          continue
+        }
         if (got.quarters === null) {
           // An unexpected shape or a transport-level refusal. Reported, never marked: if the
           // provider renames a field, this must be loud rather than quietly concluding that every
           // security in the page has no earnings history.
           failed++
           lastError = got.note
+          firstError ??= `${item.symbol}: ${got.note}`
           continue
         }
 
@@ -1881,9 +1904,17 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         written,
         securities,
         noHistory,
+        // Asked and not carried — the head advanced. Counted apart from `failed` because it is an
+        // answer, and apart from `noHistory` because that one HAS a US listing and simply has no
+        // earnings on file.
+        notCovered,
         failed,
         // Reported so an exhausted day reads as itself rather than as a broken resource.
         rateLimited,
+        // BOTH ENDS OF THE RUN. `lastError` alone is whatever happened last, and a rate limit at
+        // call two overwrites the real failure at call one — which is exactly how the first
+        // production run reported a quota problem while an unanswerable symbol was the story.
+        firstError,
         lastError,
         remaining: await backlogSize(market, 'pending_eps_history'),
       })

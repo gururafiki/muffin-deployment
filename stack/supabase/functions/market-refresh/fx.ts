@@ -191,6 +191,11 @@ export interface AvEarnings {
   quarters: { periodEnding: string; reportedDate: string | null; actual: number | null;
               estimated: number | null; surprise: number | null; surprisePct: number | null }[] | null
   rateLimited: boolean
+  /**
+   * The provider ANSWERED and does not carry this symbol. Distinct from `quarters: null`, which
+   * means it never answered at all — the caller may mark on this one and must not mark on that.
+   */
+  notCovered: boolean
   note: string | null
 }
 
@@ -204,21 +209,37 @@ export async function fetchAlphaVantageEarnings(
       `&apikey=${encodeURIComponent(apiKey)}`,
     { signal: AbortSignal.timeout(timeoutMs) },
   )
-  if (!res.ok) return { quarters: null, rateLimited: false, note: `http ${res.status}` }
+  if (!res.ok) return { quarters: null, rateLimited: false, notCovered: false, note: `http ${res.status}` }
 
   const body = (await res.json()) as Record<string, unknown>
 
   // THE RATE LIMIT ARRIVES AS A 200 WITH PROSE. `Information` carries it; `Note` is the older
   // spelling and still appears. Either means the answer is about our quota, not about the company.
   const info = String(body.Information ?? body.Note ?? '')
-  if (info) return { quarters: null, rateLimited: true, note: info.slice(0, 200) }
+  if (info) return { quarters: null, rateLimited: true, notCovered: false, note: info.slice(0, 200) }
 
+  // AN EMPTY OBJECT IS "I DO NOT CARRY THAT SYMBOL", AND IT IS AN ANSWER.
+  //
+  // Measured 2026-08-22, seconds apart on one key: `ASMLF` (ASML's thin OTC foreign-ordinary line)
+  // returns `{}` — not one key, not even `symbol` — while `ASML` returns 108 quarters and `MSFT`
+  // 122. So the empty object is about the SYMBOL, not about our quota and not about the endpoint.
+  //
+  // The distinction is what lets the caller mark. Alpha Vantage serves US listings, and OpenFIGI's
+  // US lookup hands this pipeline the OTC `F`-line for most foreign companies (`ASMLF`, `BUDFF`,
+  // `ICTEF`) — bare tickers, so migration 123's suffix filter passes them through. Without a way to
+  // record "asked, not carried", a weight-ordered backlog re-asks the same unanswerable head every
+  // run and the 25-a-day quota buys nothing, for ever. Fifth instance of that stall in this schema.
   const raw = body.quarterlyEarnings
+  if (Object.keys(body).length === 0) {
+    return { quarters: [], rateLimited: false, notCovered: true, note: 'provider does not carry this symbol' }
+  }
   // A SHAPE WE DID NOT EXPECT IS REPORTED, NEVER TREATED AS ABSENCE. If Alpha Vantage renames this
   // field the resource must say so loudly rather than quietly concluding that every security in the
-  // page has no earnings history.
+  // page has no earnings history. Note this is reached only when the body HAS keys — a renamed
+  // field still leaves `symbol` and `annualEarnings` behind, so it can never look like the empty
+  // object above.
   if (!Array.isArray(raw)) {
-    return { quarters: null, rateLimited: false, note: 'no quarterlyEarnings array in the response' }
+    return { quarters: null, rateLimited: false, notCovered: false, note: 'no quarterlyEarnings array in the response' }
   }
 
   const num = (v: unknown): number | null => {
@@ -237,11 +258,12 @@ export async function fetchAlphaVantageEarnings(
       actual: num(r.reportedEPS),
       estimated: num(r.estimatedEPS),
       surprise: num(r.surprise),
-      // Already a PERCENT here — the raw API sends 12.5891 where openbb's wrapper sends the
-      // fraction 0.125891. Reading the provider directly means reading its units, not the
-      // wrapper's.
+      // Already a PERCENT here, VERIFIED against the arithmetic rather than inferred: MSFT's
+      // 2026-06-30 quarter reports 4.74 against an estimated 4.21, and (4.74 - 4.21) / 4.21 is
+      // 12.589% — which is what `surprisePercentage` carries (12.5891). openbb's wrapper divides
+      // it by 100 and sends 0.125891; reading the provider directly means reading ITS units.
       surprisePct: num(r.surprisePercentage),
     }]
   })
-  return { quarters, rateLimited: false, note: null }
+  return { quarters, rateLimited: false, notCovered: false, note: null }
 }
