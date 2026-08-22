@@ -1800,18 +1800,31 @@ console.log('\nsecurity-symbol-repair')
 }
 
 
-// ── A FRACTION IS NOT A PERCENT, AND THE COLUMN NAME PROMISES ONE ──────────────────────────────
+// ── THE EPS SURPRISE UNIT IS DECIDED IN ONE PLACE, AND THE SOURCE DECIDES IT ───────────────────
 //
-// alpha_vantage's `surprise_percent` is a FRACTION: MSFT's Q2 2026 beat arrives as 0.125891, which
-// is 12.59%. `security_eps_history.surprise_pct` promises a percent, so the resource must multiply
-// at the boundary. This schema has shipped the fraction/percent confusion twice — most visibly a
-// shared `pct()` that put NVIDIA on the deployed page at a 46% dividend yield — and the failure is
-// silent because 0.13 and 12.59 are both plausible numbers for a surprise.
+// Two spellings of the same number exist and they differ by 100x:
+//
+//   openbb's wrapper   `surprise_percent`     0.125891   a FRACTION
+//   the raw provider   `surprisePercentage`   12.5891    a PERCENT
+//
+// The resource calls the provider DIRECTLY — it has to, because a rate-limited response arrives as
+// a 200 that openbb turns into a 204 indistinguishable from "no data" — so it must NOT multiply.
+// Multiplying would report a 12.59% beat as 1,259% and dividing would report it as 0.13%; both are
+// plausible enough to survive a glance, which is why this is pinned rather than left to a comment.
+//
+// HONEST LIMIT: openbb's 0.125891 is exactly one hundredth of the documented percent, and that is
+// what says the raw field is the percent. The raw `quarterlyEarnings` payload has NOT been read
+// directly — probing exhausted the 25-a-day quota — so the first real run must be checked against a
+// known beat before this number is shown on a page.
 {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  check(/surprise_pct:\s*Number\.isFinite\(surpPct\)\s*\?\s*surpPct\s*\*\s*100\s*:/.test(src),
-    'the EPS surprise fraction is converted to a percent at the boundary',
-    'surprise_pct must be `surpPct * 100` — alpha_vantage sends a fraction')
+  const fx = await Deno.readTextFile(new URL('./fx.ts', import.meta.url))
+  check(/surprisePct:\s*num\(r\.surprisePercentage\)/.test(fx),
+    'the surprise percent is read from the raw provider field',
+    'fx.ts must map `surprisePercentage`, not the wrapper\'s `surprise_percent`')
+  check(/surprise_pct:\s*q\.surprisePct,/.test(src) && !/q\.surprisePct\s*\*\s*100/.test(src),
+    'the raw provider percent is stored unscaled — it is already a percent',
+    'multiplying would report a 12.59% beat as 1,259%')
 }
 
 // ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────
