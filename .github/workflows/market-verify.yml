@@ -455,6 +455,23 @@ jobs:
             fail=1
           fi
 
+          # 12. IS THE DATA THAT IS SUPPOSED TO BE DELETED ACTUALLY BEING DELETED?
+          #
+          #     Every other check here asserts data EXISTS and is shaped right. None of them can
+          #     see a retention rule that has stopped running: a table that only grows looks
+          #     exactly like a healthy one, the counts go up and every floor stays green.
+          #
+          #     `earnings_calendar` and `security_news` are both bounded to 90 days, and both
+          #     prunes live in TypeScript inside their resource rather than in the database — so a
+          #     resource that starts failing, or a cutoff someone edits, silently turns a bounded
+          #     table into an unbounded one. The threshold is deliberately looser than the rule
+          #     (120 days against 90): a few days over means the cron is late, which
+          #     `check_resource_health` reports better; a month over means the delete is not
+          #     happening at all.
+          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_retention_is_enforced.py; then
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
