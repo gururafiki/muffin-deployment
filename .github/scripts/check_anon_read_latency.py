@@ -60,7 +60,12 @@ QUERIES = [
     # with a security filter AND two orderings — the shape that has broken four views here. SK hynix
     # deliberately: it is the non-USD case the currency expression exists for, so a probe against a
     # US company would never evaluate the branch that does the work.
-    ("stock leadership", "security_leadership?select=name,title,pay,pay_currency,is_ceo&security_id=eq.09a147af-5ec6-45f3-8db7-fe0f2403e6ed&order=is_ceo.desc&order=pay.desc.nullslast&limit=12"),
+    #
+    # ONE COMMA-JOINED `order`, NOT TWO PARAMETERS. Written as `&order=a&order=b` first, which is
+    # what chaining two `.order()` calls LOOKS like it produces; PostgREST silently honours only one
+    # of them. Measured — the two forms return different rows — so that probe was timing a query the
+    # app never sends, which is precisely what this guard exists to prevent.
+    ("stock leadership", "security_leadership?select=name,title,pay,pay_currency,is_ceo&security_id=eq.09a147af-5ec6-45f3-8db7-fe0f2403e6ed&order=is_ceo.desc,pay.desc.nullslast&limit=12"),
 ]
 
 
