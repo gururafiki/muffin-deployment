@@ -32,8 +32,25 @@
 --
 -- Verified against the top 400 by weight before shipping: of the 233 excluded, every single one is
 -- a foreign-ordinary line whose only venue is foreign (Amsterdam, Manila, Helsinki, Taipei, Milan,
--- Dublin). No US company is dropped, and each excluded company is separately held under the
--- security row that carries its US listing — `TSMWF` sits beside `TSM`, `ASMLF` beside `ASML`.
+-- Dublin). No US company is dropped.
+--
+-- ── AND A CORRECTION, BECAUSE THE FIRST VERSION OF THIS COMMENT OVERSTATED IT ──────────────────
+--
+-- I wrote that each excluded company is separately held under the row carrying its US listing,
+-- having checked `ASMLF`/`ASML` and `TSMWF`/`TSM`. Measured properly afterwards: of the top 40
+-- excluded by weight, only **2** have a US-listed sibling. The two I checked were the exception.
+-- That is this file's own "probe an endpoint with symbols you expect to FAIL" rule, ignored while
+-- writing the rule down.
+--
+-- The DECISION is unchanged, because the excluded rows cannot answer either way: AB InBev is held
+-- only as `BUDFF` (its US rows are BONDS — `ANHEUSER-BUSCH INBEV WOR`/`FIN`, no symbol), Novo
+-- Nordisk only as `NONOF`, and alpha_vantage returns `{}` for those spellings. The filter spends no
+-- call to learn it; it does not create the gap.
+--
+-- But the gap is REAL and worth naming: ~610 large holdings have no symbol this pipeline holds that
+-- alpha_vantage can serve. Closing it means resolving the ADR — `NVO` for Novo Nordisk, `BUD` for
+-- AB InBev — which is a symbol-resolution problem, not an EPS one, and is deliberately not
+-- attempted here.
 --
 -- This is a bound, not a guarantee: a US-listed name whose `listing` row we never recorded still
 -- gets asked and now gets MARKED rather than re-asked for ever, which is the half of this fix that

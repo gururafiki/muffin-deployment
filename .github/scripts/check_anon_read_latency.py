@@ -56,6 +56,11 @@ QUERIES = [
     # spine for that reason — a sector grows with every promoted listing, and this is the fourth
     # view in this schema to be one filter away from the anon timeout.
     ("stock peers", "security_peers?select=peer_symbol,peer_market_cap_usd,size_distance&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=size_distance&limit=8"),
+    # Leadership joins `security_officer` to `security` for the pay currency, and the app sends it
+    # with a security filter AND two orderings — the shape that has broken four views here. SK hynix
+    # deliberately: it is the non-USD case the currency expression exists for, so a probe against a
+    # US company would never evaluate the branch that does the work.
+    ("stock leadership", "security_leadership?select=name,title,pay,pay_currency,is_ceo&security_id=eq.09a147af-5ec6-45f3-8db7-fe0f2403e6ed&order=is_ceo.desc&order=pay.desc.nullslast&limit=12"),
 ]
 
 
