@@ -90,6 +90,7 @@ jobs:
               earnings-calendar \
               security-insider \
               security-filings \
+              security-management \
               security-industries \
               security-fundamentals \
               security-statements \

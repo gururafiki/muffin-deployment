@@ -311,6 +311,7 @@ const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
 const EARNINGS_RESOURCE = 'earnings-calendar'
 const INSIDER_RESOURCE = 'security-insider'
 const FILINGS_RESOURCE = 'security-filings'
+const MANAGEMENT_RESOURCE = 'security-management'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -367,6 +368,7 @@ const FILINGS_RESOURCE = 'security-filings'
     [EARNINGS_RESOURCE]: PRICES_TTL_MINUTES,
     [INSIDER_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FILINGS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [MANAGEMENT_RESOURCE]: BACKLOG_TTL_MINUTES,
     [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1754,6 +1756,115 @@ const FILINGS_RESOURCE = 'security-filings'
     // symbol resolution here at all: no `symbol_security` lookup, no US-ticker-versus-display-symbol
     // question, and none of the `CIK not found for symbol BG.VI` failures that cost the insider
     // resource 12 of 26 securities on its first run. The backlog already filters on the CIK.
+    // WHO RUNS THE COMPANY. Global — SAP, Samsung and BHP all return ten officers.
+    //
+    // A DELIBERATELY SMALL PAGE. This does not batch (two symbols return zero rows), so it is one
+    // YFINANCE call per security on the budget `security-quarters`, `security-profile-detail`,
+    // `security-prices` and `security-performance` are already queued behind. It is also the least
+    // urgent thing on that budget: a list of names must never out-compete a price series. Hence 15
+    // a run over a population bounded to meaningful fund holdings, rather than 300 over everything.
+    if (resource === MANAGEMENT_RESOURCE) {
+      const { data: pending, error: pendErr } = await market
+        .from('pending_management')
+        .select('security_id,symbol')
+        .order('best_weight', { ascending: false })
+        .limit(scopeLimit ?? 15)
+      if (pendErr) throw new Error(`pending_management read failed: ${pendErr.message}`)
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: String(r.symbol),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, securities: 0, note: 'every significant holding is current' })
+      }
+
+      const deadline = Date.now() + 60_000
+      let written = 0
+      let securities = 0
+      let noOfficers = 0
+      let failed = 0
+      let throttledOut = false
+      let lastError: string | null = null
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - TAIL_RESERVE_MS) break
+        let rows: Record<string, unknown>[] = []
+        try {
+          rows = await fetcher(
+            `/api/v1/equity/fundamental/management?symbol=${encodeURIComponent(item.symbol)}` +
+              `&provider=yfinance`,
+            Math.min(15_000, deadline - Date.now()),
+          )
+        } catch (e) {
+          const msg = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+          // A refusal is about the ENDPOINT, not this company — stop rather than spend the rest of
+          // the page proving it, and leave every cursor untouched.
+          if (throttled(msg)) { throttledOut = true; lastError = msg; break }
+          failed++
+          lastError = msg
+          // The cursor is NOT advanced on a failure: a security we could not ask about comes back
+          // next run rather than waiting six months because the attempt errored.
+          continue
+        }
+
+        const out: Record<string, unknown>[] = []
+        for (const r of rows) {
+          const name = String(r.name ?? '').trim()
+          if (!name) continue
+          const pay = Number(r.pay)
+          const born = Number(r.year_born)
+          const age = Number(r.age)
+          const fy = Number(r.fiscal_year)
+          out.push({
+            security_id: item.securityId,
+            name,
+            title: r.title ? String(r.title) : null,
+            // A COMPENSATION FIGURE OF ZERO IS NOT A SALARY. yfinance sends 0 for officers whose
+            // pay it does not carry, and rendering "$0" would state something false about a person.
+            pay: Number.isFinite(pay) && pay > 0 ? pay : null,
+            year_born: Number.isFinite(born) && born > 1900 ? Math.round(born) : null,
+            age: Number.isFinite(age) && age > 0 ? Math.round(age) : null,
+            fiscal_year: Number.isFinite(fy) && fy > 1900 ? Math.round(fy) : null,
+            source_code: 'yfinance-profile',
+            as_of: new Date().toISOString(),
+          })
+        }
+
+        if (out.length > 0) {
+          const { error } = await market
+            .from('security_officer')
+            .upsert(dedupeBy(out, (r) => `${r.security_id}|${r.name}`),
+              { onConflict: 'security_id,name' })
+          if (error) throw new Error(`security_officer upsert failed: ${error.message}`)
+          written += out.length
+          securities++
+        } else {
+          // Asked and answered with nothing, which is ordinary — plenty of smaller issuers list no
+          // officers. The cursor still advances: this is "we looked".
+          noOfficers++
+        }
+
+        const { error: cErr } = await market
+          .from('security')
+          .update({ management_fetched_at: new Date().toISOString() })
+          .eq('security_id', item.securityId)
+        if (cErr) throw new Error(`management_fetched_at update failed: ${cErr.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: !throttledOut })
+      return json({
+        resource,
+        written,
+        securities,
+        noOfficers,
+        failed,
+        throttled: throttledOut,
+        lastError,
+        remaining: await backlogSize(market, 'pending_management'),
+      })
+    }
+
     if (resource === FILINGS_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_filings')
