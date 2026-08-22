@@ -1084,6 +1084,8 @@ console.log('\nresource registry — the cron and the function agree')
     FILINGS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     MANAGEMENT_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the others above.
+    EPS_HISTORY_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
     XBRL_RESOURCE: [],
@@ -1797,6 +1799,20 @@ console.log('\nsecurity-symbol-repair')
   )
 }
 
+
+// ── A FRACTION IS NOT A PERCENT, AND THE COLUMN NAME PROMISES ONE ──────────────────────────────
+//
+// alpha_vantage's `surprise_percent` is a FRACTION: MSFT's Q2 2026 beat arrives as 0.125891, which
+// is 12.59%. `security_eps_history.surprise_pct` promises a percent, so the resource must multiply
+// at the boundary. This schema has shipped the fraction/percent confusion twice — most visibly a
+// shared `pct()` that put NVIDIA on the deployed page at a 46% dividend yield — and the failure is
+// silent because 0.13 and 12.59 are both plausible numbers for a surprise.
+{
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  check(/surprise_pct:\s*Number\.isFinite\(surpPct\)\s*\?\s*surpPct\s*\*\s*100\s*:/.test(src),
+    'the EPS surprise fraction is converted to a percent at the boundary',
+    'surprise_pct must be `surpPct * 100` — alpha_vantage sends a fraction')
+}
 
 // ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────
 //

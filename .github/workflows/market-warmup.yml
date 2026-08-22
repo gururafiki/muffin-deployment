@@ -91,6 +91,7 @@ jobs:
               security-insider \
               security-filings \
               security-management \
+              security-eps-history \
               security-industries \
               security-fundamentals \
               security-statements \
