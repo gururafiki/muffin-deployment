@@ -990,7 +990,13 @@ services:
     networks:
       - muffin-net
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/healthz | grep -q ok"]
+      # 127.0.0.1, NEVER `localhost`. The container's /etc/hosts maps localhost to BOTH 127.0.0.1
+      # and ::1, wget tries the IPv6 entry first, and `listen 8080` binds IPv4 only — so the probe
+      # gets "connection refused" while nginx is healthy and listening on 0.0.0.0:8080. Swarm then
+      # stops the task, nginx exits 0 on SIGTERM, and the task reads "Complete" with EMPTY logs:
+      # a restart loop with no error anywhere. Measured on the node 2026-08-26; Docker Desktop on
+      # macOS resolves this differently, so local testing cannot catch it.
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8080/healthz | grep -q ok"]
       interval: 10s
       timeout: 5s
       retries: 5
