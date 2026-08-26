@@ -79,6 +79,16 @@
 #
 # RequiresMountsFor makes dockerd refuse to start instead — services down and loud, rather than up
 # and lying.
+# `copy` does NOT create parent directories, and /etc/systemd/system/docker.service.d does not
+# exist by default on Ubuntu + docker-ce. Second instance of this exact bug in one change — the
+# other was /home/ubuntu/proxy for the http-cache config. Any `copy`/`template` whose parent is
+# not guaranteed needs this.
+- name: Ensure the docker systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+
 - name: Make dockerd hard-depend on the data mount
   ansible.builtin.copy:
     dest: /etc/systemd/system/docker.service.d/10-data-root.conf
