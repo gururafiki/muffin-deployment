@@ -25,6 +25,9 @@ secrets:
     external: true               # Cloudflare Zone:DNS:Edit token for Traefik DNS-01
 
 volumes:
+  # Cache entries are rebuildable by definition, but a rebuild costs a full re-fetch at the
+  # providers' rate limits — which is the whole reason this exists.
+  http-cache-data:
   # Still declared after the Supabase cutover even though langgraph-postgres is no
   # longer rendered (see the service block): it keeps the pre-cutover checkpointer
   # data on disk so flipping use_supabase_db back is a genuine rollback.
@@ -101,7 +104,10 @@ services:
       # Sign-in is optional: no credential -> anonymous (Cloudflare Access remains
       # the perimeter); a presented-but-invalid credential still 401s.
       MUFFIN_AUTH_OPTIONAL: "{{ muffin_auth_optional | default('true') }}"
-      OPENBB_MCP_URL: http://openbb-mcp:8001/mcp
+      # Through http-cache so duplicate tool calls across agents collapse to one provider call.
+      # Keyed on (tool name, sorted arguments) — the same semantic key the agent-side
+      # ToolResultCacheMiddleware uses, one layer lower and shared across processes.
+      OPENBB_MCP_URL: "{{ 'http://http-cache:8080/mcp/' if http_cache_enabled | default(true) else 'http://openbb-mcp:8001/mcp' }}"
       OPENSANDBOX_URL: opensandbox-server:8080
       FIRECRAWL_MCP_URL: http://firecrawl-mcp:3000/mcp
       SEARXNG_URL: http://searxng:8080
@@ -531,8 +537,18 @@ services:
       SUPABASE_ANON_KEY: "{{ supabase_anon_key }}"
       SUPABASE_SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
       SUPABASE_DB_URL: postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres
-      # The market-refresh function reaches OpenBB over the overlay (internal only).
-      OPENBB_API_URL: http://openbb-api:6900
+      # Every upstream is reached through http-cache, which is a read-through cache and nothing
+      # else — see stack/proxy/nginx.conf for the TTLs. Unset any of these and that provider is
+      # called directly, exactly as before; the defaults in `origins.ts` are the real origins, so
+      # removing the cache service cannot take ingestion down.
+      OPENBB_API_URL: "{{ 'http://http-cache:8080/openbb' if http_cache_enabled | default(true) else 'http://openbb-api:6900' }}"
+      SEC_WWW_BASE_URL: "{{ 'http://http-cache:8080/sec' if http_cache_enabled | default(true) else '' }}"
+      SEC_DATA_BASE_URL: "{{ 'http://http-cache:8080/sec-data' if http_cache_enabled | default(true) else '' }}"
+      SEC_FTS_BASE_URL: "{{ 'http://http-cache:8080/sec-fts' if http_cache_enabled | default(true) else '' }}"
+      OPENFIGI_BASE_URL: "{{ 'http://http-cache:8080/openfigi' if http_cache_enabled | default(true) else '' }}"
+      YAHOO_BASE_URL: "{{ 'http://http-cache:8080/yahoo' if http_cache_enabled | default(true) else '' }}"
+      ALPHAVANTAGE_BASE_URL: "{{ 'http://http-cache:8080/alphavantage' if http_cache_enabled | default(true) else '' }}"
+      TIINGO_BASE_URL: "{{ 'http://http-cache:8080/tiingo' if http_cache_enabled | default(true) else '' }}"
       # OPTIONAL. Without it OpenFIGI allows 25 requests/min x 10 ISINs, so ticker resolution is
       # incremental across runs; a free key raises that to 250 x 100 and finishes the backlog in one.
       OPENFIGI_API_KEY: "{{ openfigi_api_key | default('') }}"
@@ -689,6 +705,13 @@ services:
       ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
       TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
       BIZTOC_API_KEY: "{{ biztoc_api_key | default('') }}"
+      # WITHOUT THIS THE MCP ENDPOINT IS UNCACHEABLE. Streamable HTTP answers `text/event-stream`
+      # by default and a client sending `Accept: application/json` alone gets 406 — the SERVER
+      # chooses, so no client can opt in. `openbb-mcp` exposes `--transport` but not this; it is a
+      # FastMCP setting. Measured 2026-08-23: langchain-mcp-adapters loads all 219 tools
+      # identically either way, so this is invisible to the agent and is what lets http-cache key
+      # on (tool, arguments).
+      FASTMCP_JSON_RESPONSE: "true"
     networks:
       - muffin-net
     healthcheck:
@@ -942,3 +965,41 @@ services:
       resources:
         limits:
           memory: 512M
+
+  # --- HTTP cache in front of every external market-data provider (internal) ------
+  # Read-through cache. Callers reach a provider through a base URL (`origins.ts`,
+  # `OPENBB_API_URL`, `OPENBB_MCP_URL`), so every cache decision lives in nginx.conf and no
+  # calling code knows a cache exists.
+  #
+  # NEVER GIVE THIS TRAEFIK LABELS. It proxies requests carrying provider API keys
+  # (alphavantage `apikey=`, tiingo `token=`) and holds their responses on disk.
+  #
+  # OPENRESTY, NOT nginx, and that is not a preference. The cache key must contain the request
+  # body — OpenFIGI POSTs different job arrays to one URL — and plain nginx has two SILENT
+  # failures doing that, both measured 2026-08-23: `$request_body` is empty once the body spills
+  # to a temp file (a 62 KB body then keyed on the URL alone and served the WRONG cached answer),
+  # and a key containing the body can exceed `proxy_buffer_size`, at which point nginx logs an
+  # error and stops caching entirely while still answering correctly. Hashing the body in Lua
+  # fixes both. See nginx.conf's header.
+  http-cache:
+    image: openresty/openresty:alpine
+    volumes:
+      - /home/ubuntu/proxy/nginx.conf:/etc/nginx/conf.d/muffin-cache.conf:ro
+      - /home/ubuntu/proxy/openresty.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - http-cache-data:/var/cache/muffin
+    networks:
+      - muffin-net
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 192M

@@ -17,6 +17,8 @@
 //   * SEC IGNORES `Range` headers (it returns 200 and the whole body), so reading "just the
 //     header" means streaming and cancelling client-side, which is what probeSeriesId does
 
+import { secWww, secData, secFts } from './origins.ts';
+
 /**
  * SEC's fair-access policy REQUIRES a descriptive User-Agent with contact details.
  *
@@ -83,7 +85,7 @@ export interface FundRef {
  */
 export async function loadFundDirectory(): Promise<Map<string, FundRef>> {
   const raw = await getJson<{ fields: string[]; data: (string | number)[][] }>(
-    'https://www.sec.gov/files/company_tickers_mf.json',
+    `${secWww()}/files/company_tickers_mf.json`,
   );
   const col = Object.fromEntries(raw.fields.map((f, i) => [f, i]));
   const out = new Map<string, FundRef>();
@@ -114,7 +116,7 @@ export interface FilingRef {
 export async function listNportFilings(cik: string): Promise<FilingRef[]> {
   const sub = await getJson<{
     filings: { recent: Record<string, (string | number)[]> };
-  }>(`https://data.sec.gov/submissions/CIK${cik}.json`);
+  }>(`${secData()}/submissions/CIK${cik}.json`);
   const r = sub.filings.recent;
   const out: FilingRef[] = [];
   for (let i = 0; i < (r.form?.length ?? 0); i++) {
@@ -130,7 +132,7 @@ export async function listNportFilings(cik: string): Promise<FilingRef[]> {
 }
 
 const docUrl = (cik: string, accession: string) =>
-  `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession}/primary_doc.xml`;
+  `${secWww()}/Archives/edgar/data/${Number(cik)}/${accession}/primary_doc.xml`;
 
 /**
  * Read a filing's seriesId without downloading all of it.
@@ -178,7 +180,7 @@ async function searchLatestFiling(fund: FundRef): Promise<FilingRef | null> {
   const start = new Date(Date.now() - 300 * 86_400_000).toISOString().slice(0, 10);
   const end = new Date().toISOString().slice(0, 10);
   const url =
-    `https://efts.sec.gov/LATEST/search-index?q=%22${fund.seriesId}%22&forms=NPORT-P` +
+    `${secFts()}/LATEST/search-index?q=%22${fund.seriesId}%22&forms=NPORT-P` +
     `&startdt=${start}&enddt=${end}`;
   // Deliberately NOT caught here: a throttled request must not read as "this fund does not file".
   const res = await secFetch(url);

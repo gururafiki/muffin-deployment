@@ -19,6 +19,7 @@
 // and it worsens as a backlog drains and the unanswerable ones concentrate.
 
 import type { VenueMap } from './exchanges.ts'
+import { yahoo } from './origins.ts'
 
 export interface YahooHit {
   symbol: string
@@ -106,7 +107,7 @@ export function pickHomeListing(hits: YahooHit[], iso2: string, venueMap: VenueM
  */
 export async function searchByIsin(isin: string, timeoutMs: number): Promise<YahooHit[]> {
   const url =
-    `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(isin)}` +
+    `${yahoo()}/v1/finance/search?q=${encodeURIComponent(isin)}` +
     `&quotesCount=10&newsCount=0`
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; muffin/1.0)', accept: 'application/json' },

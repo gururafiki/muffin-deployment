@@ -14,6 +14,8 @@
  */
 
 /** SEC's stated requirement: a real contact. Not a browser string. */
+import { secWww, secData } from './origins.ts'
+
 const SEC_UA = 'muffin-market-data admin@rafiki.guru'
 
 export interface XbrlFact {
@@ -81,7 +83,7 @@ async function secJson(url: string, timeoutMs: number): Promise<unknown> {
 
 /** ticker -> CIK, from the file SEC publishes for exactly this purpose (776 KB, ~10,400 filers). */
 export async function fetchCikMap(timeoutMs = 30_000): Promise<Map<string, number>> {
-  const d = await secJson('https://www.sec.gov/files/company_tickers.json', timeoutMs)
+  const d = await secJson(`${secWww()}/files/company_tickers.json`, timeoutMs)
   const out = new Map<string, number>()
   if (!d || typeof d !== 'object') return out
   for (const v of Object.values(d as Record<string, unknown>)) {
@@ -201,5 +203,5 @@ export function factsFromCompanyFacts(
 
 export async function fetchCompanyFacts(cik: number, timeoutMs = 30_000): Promise<unknown> {
   const padded = String(cik).padStart(10, '0')
-  return await secJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`, timeoutMs)
+  return await secJson(`${secData()}/api/xbrl/companyfacts/CIK${padded}.json`, timeoutMs)
 }
