@@ -463,6 +463,14 @@ services:
     networks:
       - muffin-net
     deploy:
+      # PINNED because this service owns a NAMED VOLUME, and a local volume lives on ONE
+      # node. Without this, adding a worker lets Swarm reschedule the service there, where
+      # it gets a BRAND NEW EMPTY volume — for a cache that silently means re-fetching the
+      # universe at provider rate limits; for storage it would mean silent data loss.
+      # Every other volume-owning service here (supabase-db, firecrawl-postgres, traefik)
+      # already carries this constraint.
+      placement:
+        constraints: [node.role == manager]
       replicas: 1
       restart_policy:
         condition: any
@@ -484,6 +492,14 @@ services:
     networks:
       - muffin-net
     deploy:
+      # PINNED because this service owns a NAMED VOLUME, and a local volume lives on ONE
+      # node. Without this, adding a worker lets Swarm reschedule the service there, where
+      # it gets a BRAND NEW EMPTY volume — for a cache that silently means re-fetching the
+      # universe at provider rate limits; for storage it would mean silent data loss.
+      # Every other volume-owning service here (supabase-db, firecrawl-postgres, traefik)
+      # already carries this constraint.
+      placement:
+        constraints: [node.role == manager]
       replicas: 1
       restart_policy:
         condition: any
@@ -968,6 +984,14 @@ services:
       retries: 5
       start_period: 15s
     deploy:
+      # PINNED because this service owns a NAMED VOLUME, and a local volume lives on ONE
+      # node. Without this, adding a worker lets Swarm reschedule the service there, where
+      # it gets a BRAND NEW EMPTY volume — for a cache that silently means re-fetching the
+      # universe at provider rate limits; for storage it would mean silent data loss.
+      # Every other volume-owning service here (supabase-db, firecrawl-postgres, traefik)
+      # already carries this constraint.
+      placement:
+        constraints: [node.role == manager]
       replicas: 1
       restart_policy:
         condition: any
