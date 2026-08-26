@@ -154,6 +154,30 @@
         src: "{{ muffin_template_dir }}/traefik.yml"
         dest: /home/ubuntu/traefik.yml
 
+    - name: Ensure the http-cache config directory exists
+      # `template`/`copy` do NOT create parent directories — measured: they fail with
+      # "Destination directory ... does not exist". Every other staged config lands in a directory
+      # that already exists (/home/ubuntu, or one a directory-copy created), so this is the first
+      # task here that needs it spelled out.
+      file:
+        path: /home/ubuntu/proxy
+        state: directory
+        mode: "0755"
+
+    - name: Render http-cache nginx config
+      # Templated (not copied) because max_size is sized per deployment. nginx.conf must be
+      # world-readable: OpenResty drops to a non-root worker and has to read it.
+      template:
+        src: "{{ muffin_template_dir }}/proxy/nginx.conf"
+        dest: /home/ubuntu/proxy/nginx.conf
+        mode: "0644"
+
+    - name: Stage http-cache OpenResty main config
+      copy:
+        src: "{{ muffin_template_dir }}/proxy/openresty.conf"
+        dest: /home/ubuntu/proxy/openresty.conf
+        mode: "0644"
+
     - name: Stage Supabase db init scripts (verbatim upstream; run on first db boot only)
       copy:
         src: "{{ muffin_template_dir }}/supabase/db/"

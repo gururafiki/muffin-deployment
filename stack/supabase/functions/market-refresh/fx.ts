@@ -12,6 +12,8 @@
  */
 
 /** USD per ONE unit. Multiply a figure in this currency by it to reach USD. */
+import { yahoo, alphaVantage } from './origins.ts'
+
 export interface FxQuote {
   currency: string;
   usdPerUnit: number;
@@ -45,7 +47,7 @@ export async function fetchUsdPerUnit(
   if (currency === 'USD') return { currency, usdPerUnit: 1, asOf: new Date().toISOString().slice(0, 10) };
 
   const res = await fetch(
-    `https://query2.finance.yahoo.com/v8/finance/chart/${currency}USD=X?range=5d&interval=1d`,
+    `${yahoo()}/v8/finance/chart/${currency}USD=X?range=5d&interval=1d`,
     {
       // The default fetch UA is refused by Yahoo often enough to matter, and the failure reads like
       // an outage rather than a header problem.
@@ -133,7 +135,7 @@ export async function fetchUsdPerUnitHistory(
   if (currency === 'USD') return [];
 
   const res = await fetch(
-    `https://query2.finance.yahoo.com/v8/finance/chart/${currency}USD=X?range=10y&interval=1wk`,
+    `${yahoo()}/v8/finance/chart/${currency}USD=X?range=10y&interval=1wk`,
     {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; muffin-market-data)' },
       signal: AbortSignal.timeout(timeoutMs),
@@ -205,7 +207,7 @@ export async function fetchAlphaVantageEarnings(
   timeoutMs = 20_000,
 ): Promise<AvEarnings> {
   const res = await fetch(
-    `https://www.alphavantage.co/query?function=EARNINGS&symbol=${encodeURIComponent(symbol)}` +
+    `${alphaVantage()}/query?function=EARNINGS&symbol=${encodeURIComponent(symbol)}` +
       `&apikey=${encodeURIComponent(apiKey)}`,
     { signal: AbortSignal.timeout(timeoutMs) },
   )

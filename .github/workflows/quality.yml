@@ -64,6 +64,55 @@ jobs:
           print(f"ok  {len(services)} services parsed")
           PY
 
+  # Every provider the edge functions reach must have a `location` in the cache config.
+  #
+  # WHY THIS IS A CI GATE AND NOT A COMMENT. `origins.ts` defaults to the REAL origin, so a
+  # provider with no cache location keeps working — it just silently bypasses the cache forever.
+  # Nothing in production can report that: the resource succeeds, the data is right, and the only
+  # symptom is a provider bill and a rate limit nobody connected to the omission. Same shape as
+  # logic-check's rule that a `source_code` literal must be seeded by a migration.
+  http-cache-covers-every-provider:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Every origin has a cache location
+        run: |
+          python - <<'PY'
+          import re, sys, pathlib
+          conf = pathlib.Path('stack/proxy/nginx.conf').read_text()
+          origins = pathlib.Path('stack/supabase/functions/market-refresh/origins.ts').read_text()
+          # Each exported origin helper names its upstream host in the fallback.
+          hosts = re.findall(r"origin\('[A-Z_]+',\s*'https://([^/']+)'\)", origins)
+          proxied = set(re.findall(r'set \$up "([^":]+)', conf))
+          missing = [h for h in hosts if h not in proxied]
+          if missing:
+              print(f"::error::providers with no location in nginx.conf: {', '.join(missing)}")
+              sys.exit(1)
+          # And the reverse: a location for a host nothing reaches is dead config.
+          extra = [h for h in proxied if h not in hosts and h not in {'openbb-api', 'openbb-mcp'}]
+          if extra:
+              print(f"::error::nginx.conf proxies hosts no caller uses: {', '.join(extra)}")
+              sys.exit(1)
+          # A location nothing ROUTES to cannot fail and cannot be wrong — the same blind spot that
+          # left `exchange-listings` absent from the cron for weeks. Assert the wiring, not just
+          # the config: if nginx.conf caches /mcp/, the agent must be pointed at it, and openbb-mcp
+          # must be in JSON mode or streamable HTTP answers SSE and the location is unreachable.
+          compose = pathlib.Path('stack/docker-compose.yaml').read_text()
+          if 'location /mcp/' in conf:
+              if 'http-cache:8080/mcp' not in compose:
+                  print("::error::nginx.conf caches /mcp/ but OPENBB_MCP_URL does not point at http-cache")
+                  sys.exit(1)
+              if 'FASTMCP_JSON_RESPONSE: "true"' not in compose:
+                  print("::error::/mcp/ is cached but openbb-mcp lacks FASTMCP_JSON_RESPONSE=true — "
+                        "streamable HTTP answers SSE and the location is unreachable")
+                  sys.exit(1)
+          # Same for the REST hop and each provider base URL.
+          if 'http-cache:8080/openbb' not in compose:
+              print("::error::OPENBB_API_URL does not point at http-cache")
+              sys.exit(1)
+          print(f"ok  {len(hosts)} providers cached, MCP + REST hops wired")
+          PY
+
   # Apply every migration against a throwaway Postgres, TWICE.
   #
   # This exists because three separate migration defects reached production, and each failed the

@@ -15,8 +15,9 @@
 // trying to do 9,786 in one worker.
 
 import { pickLocalSymbol, type VenueMap } from './exchanges.ts';
+import { openFigi } from './origins.ts'
 
-const ENDPOINT = 'https://api.openfigi.com/v3/mapping';
+const ENDPOINT = () => `${openFigi()}/v3/mapping`;
 
 /** Anonymous limits. A key lifts both, which is why they are read at call time, not baked in. */
 const ANON_JOBS_PER_REQUEST = 10;
@@ -120,7 +121,7 @@ export async function mapIsinsToTickers(
       exchCode: 'US',
     }));
 
-    const res = await fetch(ENDPOINT, {
+    const res = await fetch(ENDPOINT(), {
       method: 'POST',
       headers,
       body: JSON.stringify(jobs),
@@ -212,7 +213,7 @@ export async function mapIsinsToLocalSymbols(
   for (let i = 0; i < requests.length && requestsUsed < maxRequests; i += perRequest) {
     if (Date.now() > deadline) break;
     const batch = requests.slice(i, i + perRequest);
-    const res = await fetch(ENDPOINT, {
+    const res = await fetch(ENDPOINT(), {
       method: 'POST',
       headers,
       body: JSON.stringify(batch.map((r) => ({ idType: 'ID_ISIN', idValue: r.isin }))),
@@ -330,7 +331,7 @@ export async function mapTickers(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.apiKey?.trim()) headers['X-OPENFIGI-APIKEY'] = opts.apiKey.trim();
 
-  const res = await fetch('https://api.openfigi.com/v3/mapping', {
+  const res = await fetch(`${openFigi()}/v3/mapping`, {
     method: 'POST',
     headers,
     body: JSON.stringify(
@@ -422,7 +423,7 @@ export async function listExchange(
   for (; pages < maxPages; pages++) {
     if (Date.now() > deadline) break;
     requests++;
-    const res = await fetch('https://api.openfigi.com/v3/filter', {
+    const res = await fetch(`${openFigi()}/v3/filter`, {
       method: 'POST',
       headers,
       body: JSON.stringify({

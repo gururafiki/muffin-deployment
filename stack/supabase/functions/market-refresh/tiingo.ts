@@ -22,6 +22,8 @@
  * for must be the ones that matter. That is why the backlog is ordered by fund weight.
  */
 
+import { tiingo as tiingoOrigin } from './origins.ts'
+
 export interface CorporateAction {
   exDate: string;
   kind: 'split' | 'dividend';
@@ -46,7 +48,7 @@ export async function corporateActions(
   timeoutMs = 15_000,
 ): Promise<CorporateAction[]> {
   const url =
-    `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(symbol)}/prices` +
+    `${tiingoOrigin()}/tiingo/daily/${encodeURIComponent(symbol)}/prices` +
     `?startDate=${startDate}&token=${encodeURIComponent(token)}`;
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
