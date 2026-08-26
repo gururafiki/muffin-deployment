@@ -1,0 +1,107 @@
+---
+# Mount the persistent OCI block volume that holds Docker's data-root.
+#
+# RUNS BEFORE THE `docker` ROLE, and that ordering is load-bearing: on a fresh or REPLACED node it
+# means dockerd is configured with the correct data-root from its very first start, so a replaced
+# node never runs a migration at all — it reattaches the volume and finds everything already there.
+#
+# Every task here is idempotent and safe on the every-deploy re-run (`replayable = true`). The one
+# genuinely non-idempotent operation — copying an existing /var/lib/docker across — deliberately
+# lives OUTSIDE this playbook, in stack/muffin-migrate-docker-root.sh, triggered by hand exactly
+# once. See that script's header for why.
+
+- name: Check the data volume device is present
+  ansible.builtin.stat:
+    path: "{{ data_volume_device_hint }}"
+  register: data_device
+
+- name: Fail clearly when the volume is not attached
+  ansible.builtin.fail:
+    msg: >-
+      {{ data_volume_device_hint }} is not present. The OCI block volume
+      (oci_core_volume_attachment.data) is not attached to this instance. Docker's data-root depends
+      on it — refusing to continue rather than silently running on the boot volume.
+  when: not data_device.stat.exists
+
+# The module's NON-force default IS the mkfs guard: it refuses to reformat a device that already
+# carries a filesystem. That is what makes this safe to re-run on every single deploy.
+#
+# Whole device, no partition table — growing later is then just `resize2fs`, with no partition
+# dance, and "is it formatted?" stays a single blkid.
+#
+# ext4 rather than xfs because overlay2 requires d_type, which ext4 has unconditionally while xfs
+# needs -n ftype=1 at mkfs time. Don't create the question.
+- name: Ensure an ext4 filesystem exists on the data volume
+  community.general.filesystem:
+    fstype: ext4
+    dev: "{{ data_volume_device_hint }}"
+    resizefs: true
+
+- name: Read the filesystem UUID
+  ansible.builtin.command: "blkid -s UUID -o value {{ data_volume_device_hint }}"
+  register: data_uuid
+  changed_when: false
+
+# Mount BY UUID, never by /dev/sdX — device names are not stable across attachment order or a
+# future second volume, and a wrong-device mount here is a data-loss path.
+#
+# nofail: a missing volume must never block boot, or a detached volume locks you out of SSH
+# entirely. The systemd drop-in below is what stops nofail becoming silent data loss.
+# noatime: this holds a cache of hundreds of thousands of small files.
+- name: Mount the data volume and persist it in fstab
+  ansible.posix.mount:
+    path: "{{ data_mount_point }}"
+    src: "UUID={{ data_uuid.stdout }}"
+    fstype: ext4
+    opts: defaults,noatime,nofail
+    state: mounted
+
+- name: Write the sentinel that proves this is the real volume
+  ansible.builtin.copy:
+    dest: "{{ data_mount_point }}/.muffin-data-volume"
+    content: "muffin persistent data volume\n"
+    mode: "0644"
+
+# Assert rather than assume. Without this, a volume that silently failed to mount leaves the
+# sentinel on the BOOT volume's empty mountpoint directory and everything downstream looks fine.
+- name: Verify the mount is real
+  ansible.builtin.command: "findmnt --mountpoint {{ data_mount_point }}"
+  register: data_mounted
+  changed_when: false
+  failed_when: data_mounted.rc != 0
+
+# THE MOST IMPORTANT TASK IN THIS ROLE.
+#
+# `nofail` is correct for boot, but combined with a data-root on this mount it is exactly the
+# combination that lets dockerd start on an EMPTY directory: Postgres then runs initdb, and the
+# whole stack comes up GREEN with blank databases. That is the 2026-07-20 failure wearing a
+# different hat, and no healthcheck anywhere would catch it.
+#
+# RequiresMountsFor makes dockerd refuse to start instead — services down and loud, rather than up
+# and lying.
+- name: Make dockerd hard-depend on the data mount
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/10-data-root.conf
+    content: |
+      # Managed by Ansible (roles/block_storage). Do not edit on the node.
+      [Unit]
+      RequiresMountsFor={{ data_mount_point }}
+    mode: "0644"
+  register: docker_mount_dep
+
+- name: Reload systemd after changing the docker unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: docker_mount_dep.changed
+
+- name: Detect whether the data-root migration has already run
+  ansible.builtin.stat:
+    path: "{{ data_mount_point }}/docker/.migrated"
+  register: data_root_marker
+
+# MARKER-DRIVEN, and that is what removes the whole "non-idempotent step on a replayable playbook"
+# hazard: the playbook can never switch data-root by itself. It only FOLLOWS a migration that has
+# already completed and verified itself.
+- name: Point Docker at the data volume only once the migration has completed
+  ansible.builtin.set_fact:
+    docker_data_root: "{{ (data_mount_point ~ '/docker') if data_root_marker.stat.exists else '/var/lib/docker' }}"

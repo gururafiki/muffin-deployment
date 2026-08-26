@@ -1,0 +1,4 @@
+---
+# Overridden from terraform/ansible.tf's extra_vars. Defaults keep the role runnable standalone.
+data_mount_point: /mnt/data
+data_volume_device_hint: /dev/sdb

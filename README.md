@@ -64,9 +64,9 @@ the Access service-token id/secret.
 
 ## Data durability & the node-replacement hazard (read before deploying)
 
-**All persistent data lives in local Docker named volumes on the single node's boot volume**
-(`supabase-db-data`, `langgraph-data`, `supabase-storage-data`, `firecrawl-postgres-data`) — there
-is no separate block volume, so **anything that replaces the instance wipes every database.**
+**All persistent data lives on a dedicated OCI Block Volume** mounted at `/mnt/data`, which
+Docker's entire `data-root` points at. A block volume **survives instance replacement**; a boot
+volume does not. That is the whole reason it exists — see "Disk layout" below.
 
 The instance image comes from the `oci_core_images` data source, which resolves to the *newest*
 matching Canonical Ubuntu image. Oracle rotates that image periodically, so a routine `terraform
@@ -83,8 +83,58 @@ Guards now in `terraform/main.tf`:
   recovery instead of deleted.
 
 **Automated backups: done** (nightly `pg_dumpall` of `supabase-db` → Object Storage — see below).
-**Still TODO (durability):** move the DB volumes onto a persistent OCI **block volume** so a node
-replacement can't lose data in the first place (the backups make it *recoverable*, not immune).
+**Block volume: done** (2026-08-26) — a replacement can no longer lose the data in the first place,
+rather than merely leaving it recoverable.
+
+### Disk layout
+
+`terraform/storage.tf` creates a 100 GB `oci_core_volume` (`prevent_destroy`, paravirtualized
+attachment) and `ansible/roles/block_storage` formats it ext4, mounts it at `/mnt/data` **by UUID**
+with `nofail`, and points Docker's `data-root` at `/mnt/data/docker`. Images, every named volume,
+container layers and swarm state all live there together, so a replaced instance reattaches the
+volume and finds everything already present — nothing to restore.
+
+Three things here are load-bearing and easy to undo by accident:
+
+- **`RequiresMountsFor=/mnt/data`** (a systemd drop-in on `docker.service`) is the most important
+  line in the whole arrangement. `nofail` is correct for boot — a missing volume must not lock you
+  out of SSH — but combined with `data-root` it is *precisely* what would let dockerd start on an
+  **empty directory**: Postgres runs `initdb` and the entire stack comes up **green with blank
+  databases**. `RequiresMountsFor` makes dockerd refuse to start instead. Down and loud beats up
+  and lying.
+- **`prevent_destroy` on the volume, and NOT on the attachment.** The attachment must stay
+  replaceable or a genuine instance replacement deadlocks — which is the recovery this exists for.
+- **The mount is by UUID, never `/dev/sdX`.** Device names are not stable across attachment order.
+
+**`docker volume prune` is NOT safe on this node.** It removes any volume not referenced by a
+*running or stopped* container, which includes anything whose service is temporarily at 0 replicas.
+Use the name-filtered form, which can only ever touch anonymous volumes:
+
+```bash
+docker volume ls -qf dangling=true | grep -E '^[0-9a-f]{64}$' | xargs -r docker volume rm
+```
+
+Never add `--volumes` to the `docker system prune -af` in `muffin_stack.yml` — its "never volumes"
+comment is load-bearing.
+
+### Browsing files on the node
+
+SFTP, over the SSH key you already have:
+
+```bash
+sftp -i ~/.ssh/oci_key ubuntu@<node-ip>
+```
+
+Any GUI client (Cyberduck, FileZilla, Finder) connects the same way. Note this required a fix: the
+`ssh` role **replaces** `/etc/ssh/sshd_config` wholesale, and the distro's file is where the
+`Subsystem sftp` line normally lives — so SFTP was silently disabled from the day the node was
+built (`subsystem request failed on channel 0`), which is why `maintenance.yml` pipes scripts
+through `ssh cat` instead of `scp`. The role now sets `Subsystem` explicitly. It adds no attack
+surface: same key auth, and anyone who can SSH can already read any file.
+
+**No file browser can tell you what is in the HTTP cache** — those are MD5-named blobs with a
+binary header. See `docs/data-ingestion.md` §9c for the recipe that reads them, and why MinIO and
+Supabase Storage both cannot.
 
 ## Database backups
 

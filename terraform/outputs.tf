@@ -6,3 +6,4 @@ output "instance_private_ips" {
   value = oci_core_instance.node[*].private_ip
 }
 
+output "data_volume_id" { value = oci_core_volume.data.id }

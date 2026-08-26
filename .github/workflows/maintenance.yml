@@ -21,13 +21,15 @@ on:
           - checkpoint-report
           - thread-namespaces
           - prune-thread
+          - migrate-docker-root
+          - reclaim-old-docker-root
         default: checkpoint-report
       thread_id:
         description: Thread UUID (prune-thread only)
         type: string
         default: ""
       confirm:
-        description: prune-thread is a DRY RUN unless this is "delete"
+        description: prune-thread needs delete; migrate-docker-root needs migrate; reclaim-old-docker-root needs reclaim
         type: string
         default: "dry-run"
 
@@ -166,3 +168,44 @@ jobs:
           ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
             -n ubuntu@"$NODE_IP" \
             "chmod +x /tmp/muffin-prune-thread.sh && sudo /tmp/muffin-prune-thread.sh '${{ inputs.thread_id }}' $FLAG"
+
+      # Move Docker's data-root onto the block volume. ONCE, EVER — a replaced node never needs it
+      # (roles/block_storage runs before roles/docker, so a fresh node is correct from first boot).
+      # This never touches /var/lib/docker; the old store stays intact and is the rollback.
+      - name: Migrate Docker data-root to the block volume
+        if: inputs.action == 'migrate-docker-root'
+        run: |
+          if [ "${{ inputs.confirm }}" != "migrate" ]; then
+            echo "::error::set confirm=migrate to run this. It stops dockerd briefly."; exit 2
+          fi
+          # Piped over ssh rather than scp — see the prune-thread step for why.
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            ubuntu@"$NODE_IP" 'cat > /tmp/muffin-migrate-docker-root.sh' \
+            < stack/muffin-migrate-docker-root.sh
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=60 \
+            -n ubuntu@"$NODE_IP" \
+            "chmod +x /tmp/muffin-migrate-docker-root.sh && sudo /tmp/muffin-migrate-docker-root.sh"
+
+      # Delete the OLD /var/lib/docker. THE ONE IRREVERSIBLE STEP in the whole migration — run it
+      # only after a soak spanning at least two nightly backups. Renames first, verifies the stack
+      # is healthy on the new root, and only then removes.
+      - name: Reclaim the old Docker root
+        if: inputs.action == 'reclaim-old-docker-root'
+        run: |
+          if [ "${{ inputs.confirm }}" != "reclaim" ]; then
+            echo "::error::set confirm=reclaim to run this. It is IRREVERSIBLE."; exit 2
+          fi
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 -n ubuntu@"$NODE_IP" '
+              set -e
+              [ -f /mnt/data/docker/.migrated ] || { echo "not migrated — refusing"; exit 1; }
+              root=$(sudo docker info --format "{{.DockerRootDir}}")
+              [ "$root" = "/mnt/data/docker" ] || { echo "docker root is $root — refusing"; exit 1; }
+              down=$(sudo docker service ls --format "{{.Replicas}}" | grep -c "^0/" || true)
+              [ "$down" -eq 0 ] || { echo "$down service(s) at 0 replicas — refusing"; exit 1; }
+              echo "stack healthy on the new root; reclaiming"
+              sudo du -sh /var/lib/docker
+              sudo rm -rf /var/lib/docker
+              df -h / /mnt/data
+            '

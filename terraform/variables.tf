@@ -150,3 +150,21 @@ variable "ssh_private_key_path" {
   description = "Path to the SSH PRIVATE key (pair of ssh_public_key_path) used by Ansible to reach the node."
   type        = string
 }
+
+variable "data_volume_size_in_gbs" {
+  description = "Size of the persistent data volume holding Docker's data-root. Can only GROW in place — shrinking forces replacement, so size generously."
+  type        = number
+  default     = 100
+}
+
+variable "data_volume_vpus_per_gb" {
+  description = "Block volume performance tier. 10 = Balanced (matches the boot volume); 0 = Lower Cost, a real regression for Postgres."
+  type        = number
+  default     = 10
+}
+
+variable "data_volume_device_hint" {
+  description = "Device the paravirtualized data volume is expected to appear as. The node has only sda, so a single attachment is deterministic."
+  type        = string
+  default     = "/dev/sdb"
+}

@@ -28,10 +28,6 @@ volumes:
   # Cache entries are rebuildable by definition, but a rebuild costs a full re-fetch at the
   # providers' rate limits — which is the whole reason this exists.
   http-cache-data:
-  # Still declared after the Supabase cutover even though langgraph-postgres is no
-  # longer rendered (see the service block): it keeps the pre-cutover checkpointer
-  # data on disk so flipping use_supabase_db back is a genuine rollback.
-  langgraph-data:
   firecrawl-postgres-data:
   traefik-acme:
   supabase-db-data:
@@ -90,14 +86,22 @@ services:
     environment:
       # --- wiring (internal service URLs) ---
       REDIS_URI: redis://langgraph-redis:6379
-      # LangGraph checkpointer/store DB. Flip use_supabase_db in config.yml to cut over to
-      # the Supabase Postgres (see README runbook); langgraph-postgres stays deployed until the
-      # cutover is verified. On Supabase, langgraph-api uses the `postgres` database directly and
-      # keeps its tables in `public` — the same database Supabase Studio browses, so LangGraph's
-      # data is visible there. (langgraph-api connects as `postgres` on the default search_path and
-      # recreates its tables in public if missing, so a dedicated non-public schema isn't reliable
-      # here — see README "LangGraph DB cutover".)
-      DATABASE_URI: "{{ 'postgres://postgres:' ~ supabase_db_password ~ '@supabase-db:5432/postgres?sslmode=disable' if use_supabase_db | default(false) else 'postgres://postgres:' ~ postgres_password ~ '@langgraph-postgres:5432/postgres?sslmode=disable' }}"
+      # LangGraph checkpointer/store DB — Supabase Postgres, unconditionally.
+      #
+      # This used to be a use_supabase_db conditional whose else-branch pointed at
+      # langgraph-postgres. That service was RETIRED on 2026-08-26, so the branch would have
+      # resolved to a host that no longer exists — a config that renders fine and fails at
+      # runtime. The cutover completed 2026-07-04 and there is nothing to roll back TO: the old
+      # volume was verified EMPTY before deletion (0 tables — its pre-cutover contents were
+      # already lost in the 2026-07-20 node-replacement incident and it had been re-initialised
+      # empty ever since). A dump of it sits in the backups bucket under volumes/ regardless.
+      #
+      # langgraph-api uses the `postgres` database directly and keeps its tables in `public` —
+      # the same database Supabase Studio browses, so LangGraph's data is visible there. (It
+      # connects as `postgres` on the default search_path and recreates its tables in public if
+      # missing, so a dedicated non-public schema isn't reliable here — see README "LangGraph
+      # DB cutover".)
+      DATABASE_URI: "postgres://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres?sslmode=disable"
       # Supabase JWT verification (auth.py mode 4): user Bearer tokens minted by GoTrue.
       SUPABASE_URL: "https://{{ supabase_subdomain | default('supabase') }}.{{ domain }}"
       SUPABASE_JWT_SECRET: "{{ supabase_jwt_secret | default('') }}"
@@ -230,44 +234,6 @@ services:
         - "traefik.http.services.app.loadbalancer.server.port=80"
 
   # --- LangGraph state + streaming (internal) -----------------------------
-{% if not (use_supabase_db | default(false)) %}
-  # Rendered ONLY before the Supabase cutover. Once use_supabase_db is true,
-  # langgraph-api points at supabase-db and this service is pure overhead (1 GB) —
-  # so it is omitted from the stack rather than left running idle, which is what
-  # pays for the openbb-api service below.
-  #
-  # The `langgraph-data` volume is deliberately still DECLARED (see the volumes
-  # block): removing the service leaves the old checkpointer data on disk and
-  # recoverable, so flipping use_supabase_db back is a full rollback. Nothing here
-  # deletes data — that would need an explicit `docker volume rm`.
-  langgraph-postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets:
-      - postgres_password
-    volumes:
-      - langgraph-data:/var/lib/postgresql/data
-    networks:
-      - muffin-net
-    healthcheck:
-      test: pg_isready -U postgres
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    deploy:
-      replicas: 1
-      placement:
-        constraints: [node.role == manager]
-      restart_policy:
-        condition: any
-      resources:
-        limits:
-          memory: 1G
-{% endif %}
 
   langgraph-redis:
     image: redis:6
