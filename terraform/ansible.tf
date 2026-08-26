@@ -19,9 +19,22 @@ resource "ansible_playbook" "muffin" {
     ansible_user                 = "ubuntu"
     ansible_ssh_private_key_file = pathexpand(var.ssh_private_key_path)
     # disable host-key checking per-connection (no reliance on ansible.cfg discovery / env)
-    ansible_ssh_common_args = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    # ServerAliveInterval keeps a CI-driven session up through a long task. Without it an SSH
+    # drop mid-play is exactly how a storage change ends up half-applied.
+    ansible_ssh_common_args = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
     private_ip              = oci_core_instance.node[0].private_ip
+    # The persistent data volume. `extra_vars` is map(string) — an unquoted number or bool here is
+    # a plan-time type error, so keep every value a string.
+    data_mount_point        = "/mnt/data"
+    data_volume_device_hint = var.data_volume_device_hint
   }
 
-  depends_on = [oci_core_instance.node, cloudflare_dns_record.muffin, oci_objectstorage_bucket.db_backups]
+  # The volume attachment is a hard prerequisite: without it the playbook can run before the
+  # device exists and the block_storage role fails on a node that is otherwise fine.
+  depends_on = [
+    oci_core_instance.node,
+    cloudflare_dns_record.muffin,
+    oci_objectstorage_bucket.db_backups,
+    oci_core_volume_attachment.data,
+  ]
 }

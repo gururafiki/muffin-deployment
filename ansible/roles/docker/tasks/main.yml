@@ -26,11 +26,16 @@
     name: docker-ce
     state: present
 
-- name: Rotate container logs so they cannot fill the boot volume
+# `data-root` is MARKER-DRIVEN (roles/block_storage sets docker_data_root only when
+# /mnt/data/docker/.migrated exists), so this playbook can never move the store by itself — it
+# only follows a migration that already completed and verified itself. The default is
+# /var/lib/docker, so a node that has not migrated renders exactly what it rendered before.
+- name: Rotate container logs, and point Docker at the data volume once migrated
   copy:
     dest: /etc/docker/daemon.json
     content: |
       {
+        "data-root": "{{ docker_data_root | default('/var/lib/docker') }}",
         "log-driver": "json-file",
         "log-opts": {
           "max-size": "10m",

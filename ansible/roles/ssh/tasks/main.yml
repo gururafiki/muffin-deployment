@@ -14,6 +14,13 @@
       PermitEmptyPasswords no
       ClientAliveInterval 300
       ClientAliveCountMax 2
+      # SFTP. This config REPLACES the distro's sshd_config wholesale, and the distro's is where
+      # the Subsystem line normally lives — so omitting it silently disabled sftp/scp entirely
+      # ("subsystem request failed on channel 0"). Measured 2026-08-26: sftp to this node failed
+      # and `maintenance.yml` had already worked around it by piping scripts through `ssh cat`.
+      # This adds no attack surface: it is the same key-based auth, and anyone who can ssh can
+      # already read any file. It is what makes a GUI client (Cyberduck, FileZilla, Finder) work.
+      Subsystem sftp /usr/lib/openssh/sftp-server
     owner: root
     group: root
     mode: "0600"

@@ -21,6 +21,12 @@
   include_role:
     name: iptables
 
+# BEFORE Docker, deliberately: on a fresh or replaced node this means dockerd is configured with
+# the right data-root from its first start, so a replaced node never needs a migration at all.
+- name: Mount the persistent data volume
+  include_role:
+    name: block_storage
+
 - name: Setup Docker
   include_role:
     name: docker
