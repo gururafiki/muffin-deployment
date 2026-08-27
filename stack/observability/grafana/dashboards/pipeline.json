@@ -10,7 +10,7 @@
     "muffin"
   ],
   "time": {
-    "from": "now-7d",
+    "from": "now-2d",
     "to": "now"
   },
   "timepicker": {},
@@ -44,8 +44,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -80,8 +83,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -116,8 +122,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           },
           "unit": "ms"
         },
@@ -153,8 +162,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -189,8 +201,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
