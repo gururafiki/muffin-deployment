@@ -1,0 +1,20 @@
+# Where alerts go. One e-mail contact point, address from the environment so the recipient is a
+# secret like every other and not committed here.
+#
+# If `alert_email_to` is unset, GF_SMTP_ENABLED is false (see docker-compose.yaml) and Grafana
+# still EVALUATES every rule and shows firing alerts in its UI — it just cannot mail them. That is
+# a degraded mode, not a broken one, and it is why nothing here is conditional.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: muffin-email
+    receivers:
+      - uid: muffin-email
+        type: email
+        settings:
+          addresses: $MUFFIN_ALERT_EMAIL_TO
+          singleEmail: true
+        # An alert that resolves should say so, or the only way to learn a problem ended is to go
+        # and look — which is the habit this whole exercise exists to replace.
+        disableResolveMessage: false

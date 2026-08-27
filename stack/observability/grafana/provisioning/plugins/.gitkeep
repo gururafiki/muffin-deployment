@@ -1,0 +1,3 @@
+# Grafana logs `Failed to read plugin provisioning files from directory` at ERROR level when this
+# directory is absent. It is harmless — no plugins are provisioned — but an ERROR in a startup log
+# is exactly the kind of thing that costs someone twenty minutes during a real incident.

@@ -221,7 +221,7 @@ async function writeCurrencyFor(
   return { written: true, overruled }
 }
 
-Deno.serve(async (req: Request) => {
+async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok')
 
   let resource = 'sector-performance'
@@ -271,6 +271,7 @@ Deno.serve(async (req: Request) => {
   const TICKERS_RESOURCE = 'security-tickers'
   const DERIVE_RESOURCE = 'derive-classifications'
   const FACETS_RESOURCE = 'facets-refresh'
+  const OBSERVABILITY_RESOURCE = 'observability-sample'
   const MACRO_RESOURCE = 'macro-indicators'
   const PROMOTE_WAVE_RESOURCE = 'promote-wave'
   const DIVIDENDS_RESOURCE = 'security-dividends'
@@ -405,6 +406,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // correct here, unlike every backlog resource. Daily, because that is the cadence of the
     // underlying reference rates.
     [FX_RESOURCE]: PRICES_TTL_MINUTES,
+    // TEN MINUTES, which is shorter than anything else here and is the point. This resource takes
+    // a MEASUREMENT; a TTL on a measurement means "the last reading is still true", which is
+    // exactly the assumption that makes a gauge useless. It is called twice per sweep — once
+    // before the resources run and once after — so the TTL only has to be shorter than the gap
+    // between those two calls (~19 minutes of paced sweep). A backlog-length TTL would silently
+    // collapse the pair into one sample and the "what did this sweep drain" reading would be lost.
+    [OBSERVABILITY_RESOURCE]: 10,
   }
   const EXTRA = Object.keys(EXTRA_TTL_MINUTES)
   const spec = RESOURCES[resource]
@@ -834,6 +842,37 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       }
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ resource, series: rows.length, answered, wrote, detail: out })
+    }
+
+    if (resource === OBSERVABILITY_RESOURCE) {
+      // Two separate RPCs rather than one, because they fail differently and only one of them can.
+      // Counting every market TABLE totals 771 ms (measured 2026-08-27, `security_price` at
+      // 10,874,625 rows included), while counting the 26 `pending_*` VIEWS totals ~8,400 ms — of
+      // which `pending_prices` alone is 5,380 ms, already over the 8s statement timeout the
+      // PostgREST role carries. `sample_backlogs` therefore isolates each view and carries a
+      // deadline; `sample_universe` needs neither.
+      const { data: backlogs, error: bErr } = await market.rpc('sample_backlogs', {
+        p_deadline_seconds: 60,
+      })
+      // A sampler that fails must SAY so rather than leaving a gap that reads as a quiet period.
+      if (bErr) throw new Error(`sample_backlogs failed: ${bErr.message}`)
+
+      const { data: metrics, error: uErr } = await market.rpc('sample_universe')
+      if (uErr) throw new Error(`sample_universe failed: ${uErr.message}`)
+
+      // Retention runs here rather than on its own schedule: a table that only GROWS looks exactly
+      // like a healthy one, and a prune with nowhere to be called from is a prune that stops
+      // happening. `check_retention_is_enforced.py` watches the ceiling regardless.
+      const { data: pruned, error: pErr } = await market.rpc('prune_observability', { p_days: 400 })
+      if (pErr) throw new Error(`prune_observability failed: ${pErr.message}`)
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        backlogs: Number(backlogs ?? 0),
+        metrics: Number(metrics ?? 0),
+        pruned: Number(pruned ?? 0),
+      })
     }
 
     if (resource === FACETS_RESOURCE) {
@@ -5436,4 +5475,94 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // bare 502 means what the docs say again.
     return json({ resource, ok: false, error: message })
   }
+}
+
+/**
+ * Append one row to `market.refresh_run` describing what an invocation did.
+ *
+ * WHY THIS IS A WRAPPER AND NOT ~40 EDITS. `market.refresh_log` is keyed `resource text PRIMARY
+ * KEY`, so it holds the LATEST run and nothing else — this pipeline has no history by
+ * construction. The reports that would BE the history are already assembled at every `return
+ * json(...)` site in this file, and were being echoed into a GitHub Actions log and discarded:
+ * 38 resources x 8 runs a day. Recording them at the ~40 return sites would mean the next resource
+ * added below one of them is silently unrecorded, so the record is taken from the RESPONSE
+ * instead, in one place that every path must pass through.
+ *
+ * It is deliberately taken here rather than in `market-warmup.yml`, which also holds the body:
+ * this catches UI-triggered and `force` runs too, and the workflow cannot see either.
+ *
+ * THREE THINGS THIS MUST NOT DO:
+ *
+ *   1. Fail the request. Everything is inside one try/catch and the worst case is a missing row.
+ *      A metrics write that breaks a refresh is strictly worse than no metrics.
+ *   2. Hang. It is AWAITED — a dropped record defeats the point, and `EdgeRuntime.waitUntil` is
+ *      not something to bet a complete record on — but bounded by `abortSignal`, so a slow or
+ *      unreachable database costs 5 seconds of a 90-second budget rather than the whole run.
+ *   3. Call a failure a success, or a skip a failure. `{ skipped: true, reason: 'fresh or in
+ *      flight' }` is a 200 and a SUCCESS: the TTL guard did its job. And since 2026-08-13 an
+ *      application failure is ALSO a 200, carrying `"ok": false` — so the HTTP status alone is
+ *      not the verdict. Both are recorded, separately, because a resource that only ever skips
+ *      and one that genuinely runs are different facts and `ok` alone cannot tell them apart.
+ */
+async function recordRun(res: Response, fallbackResource: string, startedAt: Date): Promise<void> {
+  try {
+    const finishedAt = new Date()
+
+    let report: Record<string, unknown> | null = null
+    try {
+      report = await res.json()
+    } catch {
+      // Not JSON. A proxy-synthesized `error code: 502` lands here — which is exactly the case
+      // worth recording, since it is the signature of a dead worker.
+      report = null
+    }
+
+    // Every ordinary path echoes `resource`; the two early 400/500s do not, which is what the
+    // fallback read off the request is for.
+    const resource = typeof report?.resource === 'string' ? report.resource : fallbackResource
+    const skipped = report?.skipped === true
+    const error = typeof report?.error === 'string' ? report.error : null
+    // `ok: false` is explicit and beats the status code. Otherwise a 2xx with no `error` is a
+    // success — including a skip.
+    const ok = report?.ok === false ? false : res.ok && error === null
+
+    await observability.from('refresh_run').insert({
+      resource,
+      started_at: startedAt.toISOString(),
+      finished_at: finishedAt.toISOString(),
+      duration_ms: finishedAt.getTime() - startedAt.getTime(),
+      ok,
+      skipped,
+      http_status: res.status,
+      error,
+      // `written`, `remaining` and `failed` are GENERATED from this column — never sent, so they
+      // cannot drift from the report they claim to summarise.
+      report,
+    }).abortSignal(AbortSignal.timeout(5_000))
+  } catch (e) {
+    console.error(`refresh_run insert failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+/** Its own client: the handler builds one per request, and this outlives the handler's scope. */
+const observability = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
+}).schema('market')
+
+Deno.serve(async (req: Request) => {
+  const startedAt = new Date()
+
+  // From a CLONE. A Request body can only be read once and `handle` reads it itself; without the
+  // clone this would consume the body and every resource would silently fall back to the default.
+  let requested = 'sector-performance'
+  try {
+    const body = await req.clone().json()
+    if (body?.resource) requested = String(body.resource)
+  } catch {
+    // No body, or not JSON — `handle` applies the same default.
+  }
+
+  const res = await handle(req)
+  await recordRun(res.clone(), requested, startedAt)
+  return res
 })

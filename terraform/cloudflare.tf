@@ -17,6 +17,12 @@ locals {
     chat   = "${var.cloudflare_chat_subdomain}.${var.cloudflare_domain}"
     api    = "${var.cloudflare_api_subdomain}.${var.cloudflare_domain}"
     studio = "${var.cloudflare_studio_subdomain}.${var.cloudflare_domain}"
+    # Both are ADMIN surfaces and both belong here rather than in cf_public_hostnames: Grafana can
+    # query the production database, and Portainer holds the Docker socket, which is root on the
+    # node. Being in this map is what gives each one a Zero-Trust Access application — the DNS
+    # record and the policy both come from the `for_each` below.
+    grafana   = "${var.cloudflare_grafana_subdomain}.${var.cloudflare_domain}"
+    portainer = "${var.cloudflare_portainer_subdomain}.${var.cloudflare_domain}"
   } : {}
   # Hostnames that stay PUBLIC (no Access app): the Supabase API gateway must be
   # reachable by browsers/native apps directly — it is protected by its own

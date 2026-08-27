@@ -6,23 +6,26 @@ retention rule that has stopped running, because a table that only grows looks e
 healthy one — the counts go up, the floors stay green, and the rows nobody meant to keep accumulate
 until something slow gets slower.
 
-Two bounded tables have such a rule, and both are enforced in TypeScript rather than by the
-database, which is precisely why they need watching from outside:
+Five bounded tables have such a rule, and every one is enforced by application code rather than by
+the database, which is precisely why they need watching from outside:
 
   * `earnings_calendar` prunes at 90 days. It is a CALENDAR, not an archive of every earnings date
     ever announced — 90 days of history so a page can say "reported on the 26th" as well as
     "reports on the 26th".
   * `security_news` is bounded to 90 days for the same reason.
+  * `refresh_run`, `backlog_sample` and `universe_sample` prune at 400 days — a full year plus
+    margin, so a year-on-year comparison always has both ends. 16 samples a day across 26 backlogs
+    and ~148 universe metrics is ~2,800 rows a day, which is small until it is left for two years.
 
 The delete path in each runs only when its resource runs, so a resource that starts failing, or a
 cutoff someone edits, silently turns a bounded table into an unbounded one. Verified by hand once
 (a row seeded 200 days back was pruned on the next run and a 30-day row survived); this is what
 keeps that true.
 
-The threshold is deliberately LOOSER than the rule: 120 days against a 90-day retention. A row a few
-days past the cutoff means the resource has not run since yesterday, which `check_resource_health`
-already reports and reports better. A row a MONTH past it means the delete is not happening at all,
-which is what this is for.
+The threshold is deliberately LOOSER than each rule — a 30-day grace on top of the retention, so
+120 days for the 90-day tables and 430 for the 400-day ones. A row a few days past the cutoff means
+the resource has not run since yesterday, which `check_resource_health` already reports and reports
+better. A row a MONTH past it means the delete is not happening at all, which is what this is for.
 """
 import datetime
 import json
@@ -39,6 +42,16 @@ UA = "muffin-market-verify/1.0"
 BOUNDED = [
     ("earnings_calendar", "report_date", 90),
     ("security_news", "published_at", 90),
+    # The observability tables (migration 127). 400 days so a year-on-year comparison always has
+    # both ends, pruned by `market.prune_observability` — which is called from inside the
+    # `observability-sample` resource, exactly like the two above and for the same reason: a prune
+    # with nowhere to be called from is a prune that stops happening.
+    #
+    # These are the ones MOST likely to grow unnoticed, because they are the ones nobody looks at
+    # except through a dashboard that only ever plots a recent window.
+    ("refresh_run", "started_at", 400),
+    ("backlog_sample", "sampled_at", 400),
+    ("universe_sample", "sampled_at", 400),
 ]
 # Slack over the documented retention, so a late cron is not reported as a broken delete.
 GRACE_DAYS = 30

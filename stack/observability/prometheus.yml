@@ -1,0 +1,63 @@
+# Prometheus scrape config for the muffin stack.
+#
+# WHAT IS DELIBERATELY ABSENT: anything about backlogs, run outcomes or the size of the universe.
+# Those live in Postgres (`market.refresh_run`, `backlog_sample`, `universe_sample` — migration
+# 127) and Grafana reads them through its Postgres datasource. Exporting them here would mean a
+# second copy with a shorter retention and a sampling rate that hides the very stalls it exists to
+# show, and the domain history has to outlive any container.
+#
+# Every target is resolved by Docker's embedded DNS on the muffin-net overlay. None is published to
+# the host and none is routed through Traefik.
+
+global:
+  # 30s rather than the usual 15s. Nothing here changes faster than that — cAdvisor's own
+  # housekeeping is 30s, so a 15s scrape would return the same numbers twice and double the TSDB
+  # for nothing. This is a 4-OCPU Always-Free node.
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    deployment: muffin
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  # Per-container cpu/memory/restarts. The memory series is the important one: it is compared
+  # against each container's OWN limit in the dashboard, because "1.4 GB" means nothing until you
+  # know whether the ceiling is 1.5 GB or 4 GB.
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      # Swarm task names carry a slot and a task id (`muffin_openbb-api.1.e833qrc…`), so the raw
+      # label changes on EVERY redeploy and each deploy would start a brand-new series. Stripping
+      # it back to the service name is what makes a memory graph continuous across a deploy —
+      # without this, the panel that is supposed to show a slow leak resets to zero instead.
+      - source_labels: [container_label_com_docker_swarm_service_name]
+        target_label: service
+      - regex: "container_label_com_docker_swarm_.*"
+        action: labeldrop
+
+  # Host cpu/memory/disk. Disk is the reason this is not redundant with OCI Monitoring: `/` sits at
+  # 70% because images live under /var/lib/containerd, which the data-root move did not cover.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Provider calls: volume, cache hit ratio, latency and status class per provider.
+  # See stack/proxy/nginx.conf — the counters are Lua in a `log_by_lua_block`, and the KNOWN blind
+  # spot is that openbb-api's own outbound yfinance/finviz/FMP calls do not pass through the proxy.
+  - job_name: http-cache
+    static_configs:
+      - targets: ["http-cache:8080"]
+
+  # Per-router request rate, status codes and latency for every PUBLIC request.
+  - job_name: traefik
+    static_configs:
+      - targets: ["traefik:8082"]
+
+  # Postgres server internals — connections, locks, transaction age. Connects as `metrics_ro`.
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]

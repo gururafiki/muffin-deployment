@@ -1897,5 +1897,64 @@ console.log('\nsecurity-symbol-repair')
     offenders.join(' | '))
 }
 
+
+// ── every invocation is recorded, in ONE place ───────────────────────────────
+// `market.refresh_log` is keyed `resource text PRIMARY KEY`, so it holds the latest run and
+// nothing else — no history, by construction. `market.refresh_run` is the history, and it is
+// written by a wrapper around the handler rather than at the ~40 `return json(...)` sites, so that
+// a resource added below one of them cannot be silently unrecorded.
+//
+// That design only holds while the wrapper is the ONLY entrypoint. These assertions are what stops
+// someone reinstating an inline `Deno.serve(async (req) => { ...5,200 lines... })` and quietly
+// ending the record.
+console.log('\nrefresh_run — every invocation is recorded')
+{
+  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+
+  const serves = [...index.matchAll(/Deno\.serve\(/g)].length
+  check(serves === 1, 'exactly one Deno.serve entrypoint', `found ${serves}`)
+  check(/async function handle\(req: Request\): Promise<Response>/.test(index),
+    'the handler is a named function the wrapper can call')
+
+  const wrapper = index.slice(index.lastIndexOf('Deno.serve('))
+  check(/const res = await handle\(req\)/.test(wrapper),
+    'the wrapper delegates to handle()')
+  // AWAITED, not fire-and-forget. `void recordRun(...)` returns before the insert lands and the
+  // edge worker can be torn down underneath it — a record that is usually there is not a record.
+  check(/await recordRun\(res\.clone\(\), /.test(wrapper),
+    'recordRun is AWAITED and reads a CLONE (the original response still has to reach the caller)')
+  check(!/void\s+recordRun/.test(index),
+    'recordRun is never fire-and-forget')
+
+  // The request body is read from a clone too: a Request body can be read once, and `handle`
+  // reads it itself. Without this every resource silently falls back to the default.
+  check(/await req\.clone\(\)\.json\(\)/.test(wrapper),
+    'the wrapper reads the resource from a CLONED request')
+
+  const body = index.slice(index.indexOf('async function recordRun'))
+  // A metrics write that can break a refresh is strictly worse than no metrics.
+  check(/abortSignal\(AbortSignal\.timeout\(/.test(body.slice(0, body.indexOf('Deno.serve('))),
+    'the insert is bounded by a timeout, so an unreachable database cannot eat the worker budget')
+
+  // `written`, `remaining` and `failed` are GENERATED ALWAYS columns (migration 127). Postgres
+  // rejects an INSERT that supplies one — `cannot insert a non-DEFAULT value into column` — so
+  // adding them here would fail EVERY run, not just an edge case.
+  // Sliced FORWARD from the insert. `indexOf('} catch')` from the top of the function finds the
+  // INNER catch around `res.json()`, which sits before the insert — the slice came back empty and
+  // the last assertion below failed against code that was perfectly correct. Same shape as the
+  // sweep-deadline guard that matched the wrong `while (Date.now()...)`.
+  const from = body.indexOf(".from('refresh_run')")
+  const insert = body.slice(from, body.indexOf('} catch', from))
+  const generated = ['written', 'remaining', 'failed'].filter((c) =>
+    new RegExp(`^\\s*${c}\\s*[,:]`, 'm').test(insert))
+  check(generated.length === 0,
+    'the insert does not supply the generated columns',
+    generated.length ? `supplies ${generated.join(', ')}` : 'none')
+
+  // A skip is a SUCCESS and must stay distinguishable from a run that did work.
+  check(/skipped/.test(insert), 'a skipped run is recorded as such, not as a failure')
+}
+
+
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

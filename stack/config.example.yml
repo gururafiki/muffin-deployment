@@ -12,6 +12,12 @@ chat_subdomain: "muffin-chat"   # legacy agent-chat-ui (kept alongside the new a
 api_subdomain: "api"
 supabase_subdomain: "supabase"        # Supabase API gateway (Kong; public — anon key + RLS)
 studio_subdomain: "supabase-studio"   # Supabase Studio (admin; behind Cloudflare Access)
+# Ops surfaces, both behind Cloudflare Access (terraform/cloudflare.tf puts them in cf_hostnames).
+# NOT the bare `grafana`/`portainer`: a `portainer.<domain>` record already existed on this zone
+# pointing at a different host, and terraform would have taken it over. Check the zone before
+# shortening these.
+grafana_subdomain: "muffin-grafana"     # dashboards + alerts
+portainer_subdomain: "muffin-portainer" # container ops (holds the Docker socket — Access is not optional)
 acme_email: "you@example.com"   # Let's Encrypt account email (cert-expiry notices)
 
 # === Supabase / LangGraph DB cutover ===
@@ -86,6 +92,22 @@ temperature: 0.1
 llm_requests_per_second: 0.3
 
 # === Observability (non-secret bits; keys are in secrets.yaml) ===
+#
+# TWO LAYERS, split by the SHAPE of the data rather than by tool preference:
+#
+#   Postgres    slow, semantic, permanent — backlog depth, per-run outcomes, universe coverage.
+#               Written by the pipeline itself (migration 127 + the `observability-sample`
+#               resource) and read by Grafana's Postgres datasource, so it needs NO exporter.
+#               Retained 400 days.
+#   Prometheus  fast, high-cardinality, disposable — container memory, request latency, cache hit
+#               ratio. Retained 15 days.
+#
+# Agent calls are NOT here: LangSmith and Langfuse below already receive every LLM call and trace.
+#
+# A NOTE ON WHY GRAFANA READS SAMPLES. Counting the 26 `pending_*` views costs ~8.4s (measured;
+# `pending_prices` alone is 5.4s, over the PostgREST role's 8s statement timeout). A dashboard on a
+# 30s refresh would run that continuously against the database the app reads. Every panel reads
+# `market.backlog_sample` instead, which is indexed and cheap.
 langsmith_tracing: "true"
 langsmith_endpoint: "https://api.smith.langchain.com"
 langsmith_project: "muffin-prod"

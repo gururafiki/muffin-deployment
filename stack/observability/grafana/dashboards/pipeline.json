@@ -1,0 +1,272 @@
+{
+  "uid": "muffin-pipeline",
+  "title": "Muffin \u2014 Pipeline",
+  "description": "Is the ingestion actually working? Backlog depth, run outcomes and what each run did. Everything here comes from market.refresh_run / backlog_sample, which are SAMPLES \u2014 the live pending_* views cost ~8.4s to count (pending_prices alone is 5.4s, over the 8s statement timeout), so no panel may query them directly.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "tags": [
+    "muffin"
+  ],
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Total work outstanding",
+      "description": "Every backlog added together. The shape is the question: a line that descends is draining, a flat line with successful runs underneath it is the stall this system has hit five times.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, sum(depth) as \"all backlogs\"\n  from market.backlog_sample\n where $__timeFilter(sampled_at) and error is null\n group by sampled_at order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Backlog depth by resource",
+      "description": "Per backlog. A FLAT line here while the matching resource reports ok is the signature to recognise \u2014 see the 'backlog is not draining' alert.",
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, backlog as metric, depth as value\n  from market.backlog_sample\n where $__timeFilter(sampled_at) and error is null and depth > 0\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Backlogs that could not be counted",
+      "description": "NULL depth is NOT zero. A view that has started timing out would read as drained if its failure were recorded as an empty result \u2014 the same confusion between 'refused' and 'has nothing' that this pipeline has hit six times. Anything appearing here needs looking at.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 7
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, backlog as metric, duration_ms as value\n  from market.backlog_sample\n where $__timeFilter(sampled_at) and error is not null\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Run outcomes",
+      "description": "`skipped` is a SUCCESS \u2014 the TTL guard found the data fresh. But a resource that ONLY ever skips is not working, which is why the two are separate series rather than one 'ok'.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select date_trunc('hour', started_at) as time,\n       case when not ok then 'failed' when skipped then 'skipped' else 'ran' end as metric,\n       count(*) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n group by 1, 2 order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Rows written per resource",
+      "description": "Throughput \u2014 but read it beside the backlog panel. A `written` that looks healthy while the backlog is flat means the page is not advancing: derive_security_metrics returned 'written: 7386' twice, byte-identical, doing the same work forever.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at) and written > 0\n group by 1, 2 order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Time since each resource last succeeded",
+      "description": "The warm-up runs every 3 hours, so anything over 12 is four consecutive misses.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "select resource,\n       round(extract(epoch from (now() - max(finished_at) filter (where ok))) / 3600.0, 1)\n         as \"hours since ok\",\n       max(finished_at) filter (where ok) as \"last success\"\n  from market.refresh_run\n where started_at > now() - interval '30 days'\n group by resource\n order by 2 desc nulls first"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Recent failures",
+      "description": "The reason, not just the fact. Since 2026-08-13 an application failure answers 200 with `ok:false`; a bare 502 with no body means the WORKER died \u2014 look at memory, not at error handling.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "select started_at as \"when\", resource, http_status as \"http\", left(error, 160) as error\n  from market.refresh_run\n where $__timeFilter(started_at) and not ok\n order by started_at desc limit 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

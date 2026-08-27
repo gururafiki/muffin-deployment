@@ -641,6 +641,115 @@ migrations, so a hand edit is never reverted by a redeploy.
   the free `OPENFIGI_API_KEY` raises it to 250 × 100 and clears the backlog in one pass.
 - **Only US-registered funds file N-PORT**, so a non-US UCITS fund cannot be tracked at all.
 
+## Observability (Grafana, Prometheus, Portainer)
+
+Live at `https://muffin-grafana.<domain>` and `https://muffin-portainer.<domain>`, both behind
+Cloudflare Access. Added 2026-08-27.
+
+### Why it is split across two stores
+
+The split is by the SHAPE of the data, not by tool preference:
+
+| | Store | Retention | What |
+|---|---|---|---|
+| Slow, semantic, permanent | **Postgres** (`market.*`) | 400 days | backlog depth, per-run outcomes, universe coverage |
+| Fast, high-cardinality, disposable | **Prometheus** | 15 days | container memory, request latency, cache hit ratio |
+| Agent calls | **LangSmith + Langfuse** | (hosted) | every LLM call, token count and trace |
+
+Grafana reads BOTH, so one dashboard shows backlog depth beside container memory. Because it has a
+Postgres datasource, **the domain metrics need no exporter at all** — a panel is a `SELECT`.
+
+**The load-bearing rule: Grafana reads SAMPLES, never the live `pending_*` views.** Counting all 26
+costs ~8.4s (measured 2026-08-27; `pending_prices` alone is 5,380 ms, above the 8s statement
+timeout the PostgREST role carries). A dashboard on a 30s refresh would run that continuously
+against the database the app reads. `market.backlog_sample` is written 16 times a day and every
+panel reads that. By contrast `count(*)` over every market TABLE is 771 ms for all 63, which is why
+`sample_universe` needs none of this care.
+
+### Where the data comes from
+
+- **`market.refresh_run`** — one row per `market-refresh` invocation, written by a wrapper around
+  the handler in `functions/market-refresh/index.ts`. Not at the ~40 `return json(...)` sites: a
+  resource added below one of them would be silently unrecorded. `written`/`remaining`/`failed`
+  are GENERATED from the report jsonb, so they cannot drift from it.
+- **`market.backlog_sample` / `universe_sample`** — written by the `observability-sample` resource,
+  which runs FIRST AND LAST in the warm-up sweep so each sweep is bracketed and you can see what
+  it drained rather than inferring it.
+- **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
+  only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations
+  share `query2.finance.yahoo.com`).
+- **Traefik, cAdvisor, node-exporter, postgres-exporter** — scraped by Prometheus.
+
+**Known blind spot, stated rather than discovered later:** yfinance / finviz / FMP calls made
+*inside* `openbb-api` do not traverse `http-cache`. The rate-limit signal that matters most
+therefore comes from `refresh_run.error` and `report`, not from the cache counters.
+
+### The four dashboards
+
+| Dashboard | Answers |
+|---|---|
+| **Pipeline** | Is ingestion working? Backlog depth, run outcomes, rows written, recent failures |
+| **Providers & cache** | Hit ratio, requests/s and p95 per provider, non-2xx by class |
+| **Universe** | Securities/holdings/coverage over time, negative-cache populations, table sizes |
+| **Node & services** | Per-container memory **as a share of its own limit**, CPU, disk, Traefik |
+
+They are git-tracked JSON in `stack/observability/grafana/dashboards/` and provisioned from disk,
+so a rebuilt Grafana comes back with all four. UI edits are allowed and are NOT written back —
+anything worth keeping goes into the file.
+
+### Alerts
+
+Six rules, each modelled on a failure this pipeline has actually had. E-mail via the shared
+`smtp_*` credentials (Resend). If `alert_email_to` is unset, Grafana still evaluates every rule and
+shows firing alerts — it just cannot mail them.
+
+| Alert | The failure it is modelled on |
+|---|---|
+| Resource has not succeeded in 12h | Four consecutive warm-up misses = broken, not a bad afternoon |
+| **Backlog flat ≥24h while runs report ok** | **The stall signature — five occurrences.** `written: 7386` twice, byte-identical |
+| Negative cache +20% in one interval | ~8,300 securities marked unanswerable in one afternoon (2026-08-13) |
+| Container >85% of its own limit | openbb-api OOM-killed at 1 GB by one probe; supabase-kong measured 81% |
+| Cache hit ratio collapsed | `inactive=` and an oversized key both break it SILENTLY |
+| Filesystem >80% | `/` was at 70% on 2026-08-27 and grows with every image pull |
+
+### Runbook — an alert fired
+
+Each rule's `description` in Grafana is its runbook. In general:
+
+```bash
+# What did that resource actually report?
+select started_at, ok, skipped, written, remaining, left(error, 200)
+  from market.refresh_run where resource = '<name>' order by started_at desc limit 20;
+
+# Is the backlog moving?
+select sampled_at, depth from market.backlog_sample
+ where backlog = 'pending_<x>' order by sampled_at desc limit 30;
+
+# A bare 502 with no body means the WORKER died — memory, not error handling:
+docker service logs muffin_supabase-functions --tail 200
+```
+
+For a negative-cache spike, read the `market-repair-negative-cache` skill **before** clearing
+anything: a mark that was earned and a mark caused by a provider outage look identical in every
+count, and clearing an earned one re-asks a rate-limited provider for an answer already held.
+
+### Secrets it needs
+
+`metrics_ro_password` (the read-only Postgres role Grafana and postgres-exporter use — **never
+`service_role`**), `grafana_admin_password`, `alert_email_to`, and the shared `smtp_*` block. The
+role is created NOLOGIN and passwordless by migration 127, because migrations are piped into `psql`
+with no variable substitution; Ansible grants it LOGIN separately. Leave the password empty and the
+role stays inert.
+
+### Adding a metric
+
+- A **domain** number: add it to `market.sample_universe()` — or add nothing at all, since every
+  market table's row count and size is already discovered from `pg_tables`, and every
+  `%_missing_at` column from `pg_attribute`.
+- A **backlog**: nothing to do. `sample_backlogs()` discovers anything named `pending_%`.
+- An **infra** number: a scrape target in `stack/observability/prometheus.yml`, or a line in
+  `/usr/local/bin/muffin-cache-size.sh` for anything only the host can see.
+
 ## Remote state (OCI Object Storage)
 
 Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend

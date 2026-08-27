@@ -1,0 +1,40 @@
+# Grafana datasources. Provisioned from a file so a rebuilt Grafana comes back configured.
+#
+# TWO DATASOURCES, AND THE SPLIT IS THE WHOLE DESIGN:
+#
+#   Prometheus  fast, high-cardinality, disposable — container memory, request latency, cache hits.
+#   Postgres    slow, semantic, permanent — backlog depth, run outcomes, coverage of the universe.
+#
+# The Postgres one is why the domain metrics need no exporter at all. A dashboard panel is a SELECT.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: muffin-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Must match prometheus.yml's scrape_interval, or Grafana proposes `rate()` windows shorter
+      # than the scrape and every rate panel renders empty for a reason nothing explains.
+      timeInterval: 30s
+
+  - name: Muffin Postgres
+    uid: muffin-postgres
+    type: postgres
+    access: proxy
+    url: supabase-db:5432
+    database: postgres
+    user: metrics_ro
+    secureJsonData:
+      # From the environment, never written into this file: the file is bind-mounted from the node
+      # and a password in it would be readable by anything that can read the mount.
+      password: $MUFFIN_METRICS_RO_PASSWORD
+    jsonData:
+      sslmode: disable          # same overlay network, never leaves the host
+      postgresVersion: 1700
+      # READ-ONLY, and enforced twice. `metrics_ro` has SELECT and nothing else (migration 127),
+      # and this flag stops the query editor from offering anything that would need more. A
+      # dashboard that can write to the database that runs the product is not a dashboard.
+      timescaledb: false

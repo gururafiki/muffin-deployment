@@ -1,0 +1,270 @@
+{
+  "uid": "muffin-providers",
+  "title": "Muffin \u2014 Providers & cache",
+  "description": "Outbound provider traffic through http-cache. KNOWN BLIND SPOT: yfinance/finviz/FMP calls made INSIDE openbb-api do not pass through the proxy, so the rate-limit signal that matters most still comes from the Pipeline dashboard's failure panel.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "tags": [
+    "muffin"
+  ],
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Cache hit ratio",
+      "description": "Every request this serves is a provider call not made. Both ways the cache breaks are silent: `inactive=` defaults to 10 minutes and evicts by LAST ACCESS, and a cache key over proxy_buffer_size makes nginx stop caching while still answering correctly.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nsum(rate(muffin_provider_requests_total{cache_status=\"HIT\"}[$__rate_interval]))\n/ clamp_min(sum(rate(muffin_provider_requests_total{cache_status=~\"HIT|MISS|EXPIRED|STALE\"}[$__rate_interval])), 0.0001)\n* 100\n",
+          "legendFormat": "hit ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per second by provider",
+      "description": "",
+      "gridPos": {
+        "h": 7,
+        "w": 16,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "sum by (provider) (rate(muffin_provider_requests_total[$__rate_interval]))",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Hit ratio by provider",
+      "description": "OpenFIGI and Alpha Vantage matter most: 25 requests a minute and 25 a DAY respectively.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nsum by (provider) (rate(muffin_provider_requests_total{cache_status=\"HIT\"}[$__rate_interval]))\n/ clamp_min(sum by (provider) (rate(muffin_provider_requests_total[$__rate_interval])), 0.0001)\n* 100\n",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Response status by class",
+      "description": "Non-2xx only. A 4xx spike on a provider is usually a rate limit \u2014 and note nothing non-2xx is ever cached, deliberately: a cached 429 is poison.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nsum by (provider, status_class) (rate(muffin_provider_requests_total{status_class!=\"2xx\"}[$__rate_interval]))\n",
+          "legendFormat": "{{provider}} {{status_class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 latency by provider",
+      "description": "A cache HIT is served from disk, so a rising p95 usually means the hit ratio fell rather than that a provider got slower \u2014 read this with the panel above it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nhistogram_quantile(0.95, sum by (provider, le) (rate(muffin_provider_request_duration_seconds_bucket[$__rate_interval])))\n",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes served: cache vs origin",
+      "description": "SEC XBRL companyfacts alone is ~3.6 MB per filer across 3,516 filers.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nsum by (cache_status) (rate(muffin_provider_response_bytes_total[$__rate_interval]))\n",
+          "legendFormat": "{{cache_status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache size on disk",
+      "description": "Proxy for the volume; the ceiling is http_cache_max_size (8 GB). Measured 228 MB on 2026-08-27, so this is nowhere near binding yet.",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "node_filesystem_size_bytes{mountpoint=\"/mnt/data\"} - node_filesystem_avail_bytes{mountpoint=\"/mnt/data\"}",
+          "legendFormat": "/mnt/data used"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
