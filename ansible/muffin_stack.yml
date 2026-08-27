@@ -325,6 +325,10 @@
         - { name: "postgres_password", value: "{{ postgres_password }}" }
         - { name: "firecrawl_postgres_password", value: "{{ firecrawl_postgres_password }}" }
         - { name: "cf_dns_api_token", value: "{{ cf_dns_api_token }}" }
+        # NOTE this task never UPDATES an existing secret — it is idempotent by tolerating
+        # "already exists". Rotating any of these means removing the docker secret first, which
+        # in turn requires removing the services that reference it.
+        - { name: "portainer_admin_password", value: "{{ portainer_admin_password | default('') }}" }
       loop_control:
         label: "{{ item.name }}"
 
