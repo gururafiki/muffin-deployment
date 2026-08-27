@@ -153,6 +153,7 @@
       template:
         src: "{{ muffin_template_dir }}/traefik.yml"
         dest: /home/ubuntu/traefik.yml
+      register: _cfg_traefik
 
     - name: Ensure the http-cache config directory exists
       # `template`/`copy` do NOT create parent directories — measured: they fail with
@@ -171,12 +172,14 @@
         src: "{{ muffin_template_dir }}/proxy/nginx.conf"
         dest: /home/ubuntu/proxy/nginx.conf
         mode: "0644"
+      register: _cfg_nginx
 
     - name: Stage http-cache OpenResty main config
       copy:
         src: "{{ muffin_template_dir }}/proxy/openresty.conf"
         dest: /home/ubuntu/proxy/openresty.conf
         mode: "0644"
+      register: _cfg_openresty
 
     - name: Stage Supabase db init scripts (verbatim upstream; run on first db boot only)
       copy:
@@ -209,12 +212,34 @@
     # that references it, which breaks a redeploy the moment the file changes. On a single node a
     # bind mount is simply correct.
     #
-    # Grafana re-reads its provisioning directory on restart, so a dashboard edit lands with the
-    # next `docker stack deploy` and needs no separate step.
+    # Grafana re-reads its provisioning directory only at STARTUP, so a dashboard or alert-rule
+    # edit needs the service restarted — see the forced update after the stack deploy below.
     - name: Stage observability config (Prometheus scrape + Grafana provisioning)
       copy:
         src: "{{ muffin_template_dir }}/observability/"
         dest: /home/ubuntu/observability/
+      register: _cfg_observability
+
+    # A BIND-MOUNTED CONFIG CHANGE RESTARTS NOTHING. `docker stack deploy` only updates a service
+    # whose SPEC changed, and a file on disk is not part of the spec — so an edited traefik.yml or
+    # nginx.conf silently keeps the OLD config running, with no error anywhere and a `docker stack
+    # deploy` that reports success.
+    #
+    # Measured 2026-08-27: the observability deploy staged a new nginx.conf with a /metrics
+    # location and a traefik.yml with a metrics entrypoint, and BOTH kept serving the previous
+    # config — Prometheus reported `http-cache down: 404` and `traefik down: connection refused`
+    # while the files on disk were correct. Same shape as the PGRST205 incident, where migrations
+    # only ever became visible because their deploy happened to restart supabase-rest for an
+    # unrelated reason.
+    #
+    # Recorded as HOST FACTS because `register` does not survive into the later play that runs the
+    # stack deploy; `set_fact` does.
+    - name: Note which services need a forced restart for their config to take effect
+      set_fact:
+        _restart_services: >-
+          {{ ([ 'muffin_traefik' ] if _cfg_traefik.changed else [])
+           + ([ 'muffin_http-cache' ] if (_cfg_nginx.changed or _cfg_openresty.changed) else [])
+           + ([ 'muffin_prometheus', 'muffin_grafana' ] if _cfg_observability.changed else []) }}
 
     # node-exporter's textfile collector reads this. It is how anything the HOST knows but
     # Prometheus cannot scrape gets in — the http-cache volume's size being the case in hand:
@@ -321,6 +346,18 @@
 
     - name: docker stack deploy (images are public → anonymous pulls, no registry auth)
       command: "docker stack deploy -c /home/ubuntu/docker-compose.yaml muffin"
+
+    # AFTER the deploy, so a service this run has just CREATED already exists to be updated, and
+    # so a service whose spec did change is not restarted twice.
+    #
+    # `--force` is the documented way to redeploy a task with no spec change. It is a rolling
+    # restart of a one-replica service, i.e. a few seconds — and for traefik that is a few seconds
+    # of ingress, which is why it is conditional on the file having actually changed rather than
+    # run on every deploy.
+    - name: Restart services whose bind-mounted config changed
+      command: "docker service update --force --detach {{ item }}"
+      loop: "{{ _restart_services | default([]) }}"
+      changed_when: true
 
 # --- 6. Supabase post-deploy migrations ------------------------------------
 # App tables reference auth.users, which GoTrue creates on ITS first boot — so these
