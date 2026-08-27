@@ -1,0 +1,14 @@
+# Notification routing.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: muffin-email
+    group_by: [alertname]
+    # These are SLOW-BURN failures — a backlog stalls for weeks, a disk fills over months. Nothing
+    # here needs to arrive within seconds, and batching keeps a provider outage that trips three
+    # rules at once from arriving as three separate e-mails.
+    group_wait: 5m
+    group_interval: 10m
+    # Four hours. A daily repeat is easy to start ignoring and an hourly one guarantees it.
+    repeat_interval: 4h

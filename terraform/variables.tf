@@ -134,6 +134,21 @@ variable "cloudflare_studio_subdomain" {
   default     = "supabase-studio"
 }
 
+variable "cloudflare_grafana_subdomain" {
+  description = "Subdomain for Grafana (ops dashboards; behind an Access app)."
+  type        = string
+  # NOT the bare `grafana`/`portainer`: measured 2026-08-27, `portainer.rafiki.guru` ALREADY EXISTS
+  # on this zone pointing at a different host (130.162.186.229) and is unproxied with no Access app.
+  # Terraform would take the record over and silently move somebody's existing service.
+  default = "muffin-grafana"
+}
+
+variable "cloudflare_portainer_subdomain" {
+  description = "Subdomain for Portainer (container ops; behind an Access app). See the note on the Grafana subdomain — a bare `portainer` record may already exist on the zone."
+  type        = string
+  default     = "muffin-portainer"
+}
+
 variable "cloudflare_access_emails" {
   description = "Emails allowed through Cloudflare Access (Zero Trust)."
   type        = list(string)

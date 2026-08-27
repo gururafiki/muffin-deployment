@@ -63,6 +63,15 @@ jobs:
           if [ -n "${ONLY:-}" ]; then
             RESOURCES="$ONLY"
           else
+            # observability-sample runs FIRST AND LAST, and the pair is the feature. It samples every
+            # backlog's depth and the size of the universe into `market.backlog_sample` /
+            # `universe_sample`, so bracketing the sweep says exactly what THIS sweep drained rather
+            # than leaving it to be inferred from two readings hours apart. Its TTL is 10 minutes —
+            # shorter than the ~19 minutes of paced sweep between the two calls, or the second would
+            # be skipped as "fresh" and the pair would collapse into one reading.
+            #
+            # It is also the only resource here that touches no provider at all: it reads our own
+            # tables, so running it twice costs nothing anyone else is queuing for.
             # security-yahoo-symbols runs BEFORE the resources that consume symbols, because a
             # symbol it resolves clears that security's negative caches — so the profile, industry
             # and performance passes later in this same sweep pick it up immediately instead of
@@ -74,6 +83,7 @@ jobs:
             # including it here costs one cheap 200 and keeps N-PORT current without a
             # second schedule.
             RESOURCES=$(printf '%s\n' \
+              observability-sample \
               sector-performance \
               country-performance \
               group-performance \
@@ -111,7 +121,8 @@ jobs:
               derive-classifications \
               macro-indicators \
               promote-wave \
-              facets-refresh)
+              facets-refresh \
+              observability-sample)
           fi
 
           total=0

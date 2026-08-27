@@ -186,6 +186,23 @@ jobs:
           supabase_github_secret: "${{ secrets.SUPABASE_GITHUB_SECRET }}"
           supabase_google_client_id: "${{ secrets.SUPABASE_GOOGLE_CLIENT_ID }}"
           supabase_google_secret: "${{ secrets.SUPABASE_GOOGLE_SECRET }}"
+          # --- Generic SMTP: ONE mailbox for GoTrue's auth mail and Grafana's alerts.
+          # Falls back to the SUPABASE_SMTP_* secrets that already exist, so adopting the generic
+          # names costs no new secret and no deployment loses its mail on the way past.
+          smtp_host: "${{ secrets.SMTP_HOST || secrets.SUPABASE_SMTP_HOST }}"
+          smtp_port: "${{ secrets.SMTP_PORT || secrets.SUPABASE_SMTP_PORT || '587' }}"
+          smtp_user: "${{ secrets.SMTP_USER || secrets.SUPABASE_SMTP_USER }}"
+          smtp_pass: "${{ secrets.SMTP_PASS || secrets.SUPABASE_SMTP_PASS }}"
+          smtp_from: "${{ secrets.SMTP_FROM || secrets.SUPABASE_SMTP_ADMIN_EMAIL }}"
+          # --- Observability.
+          # `metrics_ro_password` empty -> migration 127's role stays NOLOGIN and inert, Grafana's
+          # Postgres datasource cannot connect and the domain dashboards are BLANK. Nothing errors,
+          # which is exactly the failure this stack is bad at noticing, so set it.
+          metrics_ro_password: "${{ secrets.METRICS_RO_PASSWORD }}"
+          grafana_admin_password: "${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+          # Where alerts go. Defaults to the ACME contact — already the address that receives
+          # operational mail for this deployment — rather than to nobody.
+          alert_email_to: "${{ secrets.ALERT_EMAIL_TO || vars.ACME_EMAIL }}"
           EOF
       - name: Terraform ${{ inputs.mode || 'apply' }}
         working-directory: terraform

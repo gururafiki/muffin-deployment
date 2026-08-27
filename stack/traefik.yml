@@ -24,6 +24,12 @@ entryPoints:
           permanent: true
   websecure:
     address: ":443"
+  # Metrics on their OWN entrypoint, not on websecure. Traefik's Prometheus endpoint carries every
+  # router name and request count in the deployment; served on 443 it would be one routing rule
+  # away from public. Nothing publishes 8082 to the host (only traefik's 80/443 are published), so
+  # this is reachable on the muffin-net overlay and nowhere else.
+  metrics:
+    address: ":8082"
 
 providers:
   swarm:
@@ -49,3 +55,17 @@ certificatesResolvers:
 api:
   dashboard: false
   insecure: false
+
+# Per-router request counts, status codes and latency histograms for every public request — the
+# app, the chat UI, the API, Supabase and Studio. This is the only place the request path is
+# measured end to end: http-cache sees provider calls and cAdvisor sees containers, but neither
+# knows what a visitor experienced.
+#
+# `addRoutersLabels` is what makes it useful rather than a single global counter, and the label set
+# is bounded by the routers defined in this stack, so it cannot grow with traffic.
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true

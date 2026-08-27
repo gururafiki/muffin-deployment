@@ -1,0 +1,236 @@
+{
+  "uid": "muffin-universe",
+  "title": "Muffin \u2014 Universe",
+  "description": "How much data we hold and how complete it is. From market.universe_sample, which counts every market table (771 ms for all 63, measured) plus every negative cache.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "tags": [
+    "muffin"
+  ],
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Securities",
+      "description": "A FLOOR matters more than the value: the placeholder-CUSIP bug collapsed thousands of securities into hundreds while every request still returned 200.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at)\n   and metric in ('rows.security', 'equities', 'rows.issuer', 'rows.fund_holding')\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Identifier coverage",
+      "description": "ISIN coverage has measured 98%+. A sharp drop means parsing broke.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'identifiers.%'\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Negative caches",
+      "description": "'We asked and the provider has nothing.' A STEP UP is the shape to fear: on 2026-08-13 an over-eager drain tripped yfinance's rate limit and ~8,300 securities were recorded as permanently unanswerable \u2014 INTC, PEP, XOM, REGN \u2014 in one afternoon, with every other count staying plausible. Gradual growth is ordinary.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time,\n       replace(metric, 'missing.security.', '') as metric,\n       value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'missing.%'\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Rows by table",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, replace(metric, 'rows.', '') as metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'rows.%' and value > 1000\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage by table",
+      "description": "Tables over 10 MB. This is the one that says when the nightly pg_dumpall stops being cheap.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, replace(metric, 'bytes.', '') as metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'bytes.%' and value > 10000000\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Funds tracked and ingested",
+      "description": "Enabled vs actually ingested. A gap that persists means an N-PORT filing could not be found \u2014 and SEC THROTTLING LOOKS LIKE ABSENCE, so check before concluding a fund does not file.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "muffin-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "muffin-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select sampled_at as time, metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'tracked_funds.%'\n order by sampled_at"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# Load dashboards from disk. They are git-tracked JSON under stack/observability/grafana/dashboards
+# and staged to the node by Ansible, so a rebuilt Grafana comes back with all four.
+apiVersion: 1
+
+providers:
+  - name: muffin
+    orgId: 1
+    folder: Muffin
+    type: file
+    # FALSE: a dashboard deleted in the UI comes back on restart. That is intended — these are
+    # code, and the file is the source of truth.
+    disableDeletion: false
+    # Edits in the UI are allowed and are NOT written back to disk, so they last until the next
+    # restart. Anything worth keeping goes into the JSON file and through review.
+    allowUiUpdates: true
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,271 @@
+{
+  "uid": "muffin-node",
+  "title": "Muffin \u2014 Node & services",
+  "description": "The single Always-Free node: 24 GB, 4 OCPU, arm64. OCI Monitoring covers the VM but cannot see inside a container, and per-container memory is exactly what bites here.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "tags": [
+    "muffin"
+  ],
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Memory used, as a share of each container's OWN limit",
+      "description": "THE PANEL THAT MATTERS. '1.4 GB' means nothing until you know the ceiling is 1.5 GB and not 4 GB. openbb-api was OOM-killed at its 1 GB limit by ONE exploratory request \u2014 `Exited (137)`, ~15s of every market tool down, host memory fine throughout. supabase-kong measured 81% of its 512 MB on 2026-08-27.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nmax by (service) (container_memory_working_set_bytes{service!=\"\"})\n/ max by (service) (container_spec_memory_limit_bytes{service!=\"\"} > 0)\n* 100\n",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Host memory",
+      "description": "Measured 2026-08-27: 7,913 MB used of 23,974, i.e. 16 GB available \u2014 against ~21.9 GB of declared limits across 32 services, because usage runs far under the ceilings.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\n(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100\n",
+          "legendFormat": "used"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory by service",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "max by (service) (container_memory_working_set_bytes{service!=\"\"})",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Filesystem used",
+      "description": "`/` was at 70% on 2026-08-27 and GROWS WITH EVERY IMAGE PULL: Docker uses the containerd image store, so images live in /var/lib/containerd (20 G) rather than the migrated data-root on /mnt/data (9% of 98 G). daemon.json's `data-root` does not control that. See todos.md.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\n100 - (node_filesystem_avail_bytes{mountpoint=~\"/|/mnt/data\"}\n       / node_filesystem_size_bytes{mountpoint=~\"/|/mnt/data\"} * 100)\n",
+          "legendFormat": "{{mountpoint}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU by service",
+      "description": "Percent of ONE core; the node has 4.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nsum by (service) (rate(container_cpu_usage_seconds_total{service!=\"\"}[$__rate_interval])) * 100\n",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Public requests by router",
+      "description": "Everything a visitor actually hit \u2014 the app, the chat UI, the API, Supabase and Studio. The only place the request path is measured end to end.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nsum by (router) (rate(traefik_router_requests_total[$__rate_interval]))\n",
+          "legendFormat": "{{router}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Public p95 latency by router",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "muffin-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "muffin-prometheus"
+          },
+          "expr": "\nhistogram_quantile(0.95, sum by (router, le) (rate(traefik_router_request_duration_seconds_bucket[$__rate_interval])))\n",
+          "legendFormat": "{{router}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

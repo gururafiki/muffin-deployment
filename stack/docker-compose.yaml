@@ -33,6 +33,14 @@ volumes:
   supabase-db-data:
   supabase-db-config:
   supabase-storage-data:
+  # Prometheus' TSDB. Rebuildable in the sense that the data can be re-scraped, but the HISTORY
+  # cannot — 15 days of per-container memory is exactly what tells you whether today's number is
+  # unusual, which is the whole reason any of this exists.
+  prometheus-data:
+  # Dashboards edited in the UI, users, and the alert rules' state. Provisioned dashboards come
+  # from files and would survive without this; anything anyone edits in the browser would not.
+  grafana-data:
+  portainer-data:
 
 networks:
   muffin-net:
@@ -335,15 +343,22 @@ services:
       GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
       # SMTP is optional (secrets.yaml). Unset -> signups auto-confirm and password
       # recovery is unavailable. Set -> real confirmation/recovery e-mails.
-      # Works with Cloudflare Email Service SMTP (smtp.mx.cloudflare.net:465,
-      # user "api_token", password = CF API token) or any provider — see README.
-      GOTRUE_MAILER_AUTOCONFIRM: "{{ 'false' if supabase_smtp_host | default('') else 'true' }}"
-      GOTRUE_SMTP_HOST: "{{ supabase_smtp_host | default('') }}"
-      GOTRUE_SMTP_PORT: "{{ supabase_smtp_port | default('465') }}"
-      GOTRUE_SMTP_USER: "{{ supabase_smtp_user | default('') }}"
-      GOTRUE_SMTP_PASS: "{{ supabase_smtp_pass | default('') }}"
-      GOTRUE_SMTP_ADMIN_EMAIL: "{{ supabase_smtp_admin_email | default('no-reply@' ~ domain) }}"
-      GOTRUE_SMTP_SENDER_NAME: "{{ supabase_smtp_sender_name | default('Muffin') }}"
+      #
+      # EACH FALLS BACK TO THE GENERIC `smtp_*`, which Grafana's alerting also reads. Auth mail and
+      # alert mail are the same mailbox in every deployment anyone actually runs, and keeping two
+      # copies of one credential is how the two drift — so `supabase_smtp_*` is now an OVERRIDE for
+      # the case where GoTrue genuinely needs a different sender, not the place the value lives.
+      #
+      # `a | default('') or b` and not `a | default(b)`: the keys EXIST in secrets.example.yaml as
+      # empty strings, and `default()` only fires on UNDEFINED. An empty string would sail through
+      # it and silently disable mail while a perfectly good generic value sat unused.
+      GOTRUE_MAILER_AUTOCONFIRM: "{{ 'false' if (supabase_smtp_host | default('') or smtp_host | default('')) else 'true' }}"
+      GOTRUE_SMTP_HOST: "{{ supabase_smtp_host | default('') or smtp_host | default('') }}"
+      GOTRUE_SMTP_PORT: "{{ supabase_smtp_port | default('') or smtp_port | default('587') }}"
+      GOTRUE_SMTP_USER: "{{ supabase_smtp_user | default('') or smtp_user | default('') }}"
+      GOTRUE_SMTP_PASS: "{{ supabase_smtp_pass | default('') or smtp_pass | default('') }}"
+      GOTRUE_SMTP_ADMIN_EMAIL: "{{ supabase_smtp_admin_email | default('') or smtp_from | default('') or 'no-reply@' ~ domain }}"
+      GOTRUE_SMTP_SENDER_NAME: "{{ supabase_smtp_sender_name | default('') or smtp_sender_name | default('Muffin') }}"
       GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
       GOTRUE_SMS_AUTOCONFIRM: "false"
       # OAuth providers — each is enabled only when its client id/secret are set
@@ -999,3 +1014,245 @@ services:
       resources:
         limits:
           memory: 192M
+
+  # ===========================================================================
+  # OBSERVABILITY
+  #
+  # WHY THIS EXISTS AND WHAT IT DELIBERATELY DOES NOT DO.
+  #
+  # The pipeline's own history lives in Postgres (`market.refresh_run`, `backlog_sample`,
+  # `universe_sample`, migration 127) because it is slow, semantic and must outlive any container.
+  # Grafana reads it through its Postgres datasource, so NOTHING here exports it — the domain
+  # metrics need no exporter at all, which is what keeps this section small.
+  #
+  # What IS here is the fast, high-cardinality, disposable half that Postgres is the wrong store
+  # for: per-container memory, request latency, cache hit ratio.
+  #
+  # AGENT CALLS ARE NOT HERE ON PURPOSE. LangSmith and Langfuse already receive every LLM call,
+  # token count and trace (see langgraph-api's environment above). Rebuilding that locally would
+  # cost memory to produce a worse version of something that already works.
+  #
+  # MEASURED BEFORE ADDING (2026-08-27, on the node): 23,974 MB total, 7,913 used, 16,061
+  # available — against ~20.4 GB of declared limits across 26 services, because actual usage runs
+  # far under the ceilings. ~1.55 GB of new limits here is comfortable. Re-measure before adding
+  # more; this is a single Always-Free node and its documented failure mode is an OOM kill.
+  # ===========================================================================
+
+  # --- Metrics store (internal only; never routed) -------------------------
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # 15 DAYS. Long enough to answer "is this normal for a Tuesday" and short enough that the
+      # TSDB stays well inside the disk budget. Anything needing a longer memory is a DOMAIN
+      # metric and lives in Postgres at 400 days, which is the split this whole section rests on.
+      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.retention.size=4GB"
+      - "--web.enable-lifecycle"
+    volumes:
+      - /home/ubuntu/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - muffin-net
+    healthcheck:
+      # 127.0.0.1, NEVER `localhost` — see the note on http-cache's healthcheck. The container's
+      # /etc/hosts maps localhost to ::1 as well, the probe gets connection-refused against an
+      # IPv4-only listener, and Swarm reports the resulting restart loop as a clean `Complete`
+      # with an empty Error field and no logs at all.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      # PINNED: owns a named volume, and a local volume lives on ONE node. Every volume-owning
+      # service in this file carries this for the same reason.
+      placement:
+        constraints: [node.role == manager]
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+
+  # --- Dashboards + alerting (EXPOSED via Traefik, behind Cloudflare Access) ---
+  grafana:
+    image: grafana/grafana-oss:12.3.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password | default('admin') }}"
+      GF_SERVER_ROOT_URL: "https://{{ grafana_subdomain | default('muffin-grafana') }}.{{ domain }}"
+      # Anonymous access OFF. Cloudflare Access is the perimeter, but a second factor costs
+      # nothing here and this UI can reach the database.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Telemetry off, matching traefik's sendAnonymousUsage: false.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # The datasource provisioning file interpolates these rather than carrying the secret, so a
+      # rotated password lands with a redeploy and never sits in a bind-mounted YAML file.
+      MUFFIN_METRICS_RO_PASSWORD: "{{ metrics_ro_password | default('') }}"
+      # --- Alerting by e-mail. Falls back to the generic `smtp_*` exactly as GoTrue does; the two
+      # are one mailbox. Unset -> Grafana still RAISES alerts and shows them, it just cannot mail
+      # them, which is a degraded mode rather than a broken one.
+      GF_SMTP_ENABLED: "{{ 'true' if (smtp_host | default('') and alert_email_to | default('')) else 'false' }}"
+      GF_SMTP_HOST: "{{ smtp_host | default('') }}:{{ smtp_port | default('587') }}"
+      GF_SMTP_USER: "{{ smtp_user | default('') }}"
+      GF_SMTP_PASSWORD: "{{ smtp_pass | default('') }}"
+      GF_SMTP_FROM_ADDRESS: "{{ smtp_from | default('no-reply@' ~ domain) }}"
+      GF_SMTP_FROM_NAME: "{{ smtp_sender_name | default('Muffin') }}"
+      # Read by the contact-point provisioning file.
+      MUFFIN_ALERT_EMAIL_TO: "{{ alert_email_to | default('') }}"
+    volumes:
+      - /home/ubuntu/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /home/ubuntu/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - muffin-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 384M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=muffin-net"
+        - "traefik.http.routers.grafana.rule=Host(`{{ grafana_subdomain | default('muffin-grafana') }}.{{ domain }}`)"
+        - "traefik.http.routers.grafana.entrypoints=websecure"
+        - "traefik.http.routers.grafana.tls.certresolver=cloudflare"
+        - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+
+  # --- Per-CONTAINER cpu/memory/restarts -----------------------------------
+  # OCI Monitoring already covers the VM. It cannot see inside a container, and per-container
+  # memory is precisely what matters here: openbb-api was OOM-killed at its 1 GB limit by a single
+  # exploratory request and took every market tool down with it, while host memory looked fine.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    command:
+      # cAdvisor's appetite is its known drawback on a small node. `docker_only` drops the raw
+      # cgroup hierarchy (which is most of the series and none of the value here) and a 30s
+      # housekeeping interval matches the scrape rather than beating it fifteen times over.
+      - "--docker_only=true"
+      - "--housekeeping_interval=30s"
+      - "--store_container_labels=false"
+      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,hugetlb,referenced_memory,cpu_topology,resctrl"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - muffin-net
+    deploy:
+      # Reads THIS host's cgroups, so it belongs wherever the containers are. Single node today;
+      # a `global` mode would be the change if a worker is ever added.
+      placement:
+        constraints: [node.role == manager]
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+
+  # --- Host cpu/memory/DISK ------------------------------------------------
+  # Disk is the reason this is not redundant with OCI. Measured 2026-08-27: `/` is at 70% because
+  # Docker uses the containerd image store, so images live under /var/lib/containerd (20 G) rather
+  # than the migrated data-root on /mnt/data (9% of 98 G). `daemon.json`'s `data-root` does not
+  # control that, and nothing was watching it.
+  node-exporter:
+    image: prom/node-exporter:v1.10.0
+    command:
+      - "--path.rootfs=/host"
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      # The textfile collector is how anything the host knows and Prometheus cannot scrape gets in
+      # — the http-cache volume's size, for one. nginx does not expose it and a cron `du` does.
+      - "--collector.textfile.directory=/host/textfile"
+      - "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)"
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+      - /var/lib/node-exporter:/host/textfile:ro
+    networks:
+      - muffin-net
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 64M
+
+  # --- Postgres server internals -------------------------------------------
+  # Connections, locks, transaction age, replication — the things that make a deploy hang. A stray
+  # exploratory query once held locks for 1,375 seconds and the deploy behind it looked merely
+  # slow, because nothing in CI says "blocked on a lock".
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.19.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://metrics_ro:{{ metrics_ro_password | default('') }}@supabase-db:5432/postgres?sslmode=disable"
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 64M
+
+  # --- Container operations UI (EXPOSED via Traefik, behind Cloudflare Access) ---
+  # NOT a metrics tool and not counted as one: it stores no history. What it buys is that this
+  # stack's signature failure — a service at 0/1 with an EMPTY Error field and zero logs — becomes
+  # one click instead of an SSH round trip through the maintenance workflow.
+  #
+  # It holds the DOCKER SOCKET, which is root on the node. Cloudflare Access in front of it is not
+  # optional; see terraform/cloudflare.tf, where its hostname is in `cf_hostnames` and therefore
+  # gets an Access application, rather than in `cf_public_hostnames`.
+  portainer:
+    image: portainer/portainer-ce:2.27.9-alpine
+    command: -H unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    networks:
+      - muffin-net
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 256M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=muffin-net"
+        - "traefik.http.routers.portainer.rule=Host(`{{ portainer_subdomain | default('muffin-portainer') }}.{{ domain }}`)"
+        - "traefik.http.routers.portainer.entrypoints=websecure"
+        - "traefik.http.routers.portainer.tls.certresolver=cloudflare"
+        - "traefik.http.services.portainer.loadbalancer.server.port=9000"

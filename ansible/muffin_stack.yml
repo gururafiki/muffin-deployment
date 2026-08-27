@@ -201,6 +201,60 @@
         src: "{{ muffin_template_dir }}/supabase/functions/"
         dest: /home/ubuntu/supabase/functions/
 
+    # Observability config: the Prometheus scrape config, and Grafana's provisioned datasources,
+    # dashboards and alert rules.
+    #
+    # BIND-MOUNTED, NOT SWARM `configs:` — the same reason traefik.yml and nginx.conf are. Swarm
+    # configs are IMMUTABLE: changing one means creating a new object and updating every service
+    # that references it, which breaks a redeploy the moment the file changes. On a single node a
+    # bind mount is simply correct.
+    #
+    # Grafana re-reads its provisioning directory on restart, so a dashboard edit lands with the
+    # next `docker stack deploy` and needs no separate step.
+    - name: Stage observability config (Prometheus scrape + Grafana provisioning)
+      copy:
+        src: "{{ muffin_template_dir }}/observability/"
+        dest: /home/ubuntu/observability/
+
+    # node-exporter's textfile collector reads this. It is how anything the HOST knows but
+    # Prometheus cannot scrape gets in — the http-cache volume's size being the case in hand:
+    # nginx does not expose it and `proxy_cache_path` has no counter for it.
+    - name: Create the node-exporter textfile collector directory
+      file:
+        path: /var/lib/node-exporter
+        state: directory
+        mode: "0755"
+
+    # `du` on the cache volume, once a minute, written atomically. The rename is not fussiness:
+    # node-exporter reads this file on ITS schedule, and reading a half-written one makes it drop
+    # the whole scrape with a parse error rather than skip a metric.
+    - name: Install the http-cache size collector
+      copy:
+        dest: /usr/local/bin/muffin-cache-size.sh
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Written by Ansible (muffin_stack.yml). Reports the http-cache volume's size to
+          # node-exporter's textfile collector.
+          set -eu
+          VOL=/var/lib/docker/volumes/muffin_http-cache-data/_data
+          OUT=/var/lib/node-exporter/muffin_http_cache.prom
+          [ -d "$VOL" ] || exit 0
+          BYTES=$(du -sb "$VOL" 2>/dev/null | cut -f1)
+          [ -n "$BYTES" ] || exit 0
+          {
+            echo "# HELP muffin_http_cache_bytes Size of the http-cache volume on disk."
+            echo "# TYPE muffin_http_cache_bytes gauge"
+            echo "muffin_http_cache_bytes $BYTES"
+          } > "$OUT.tmp"
+          mv "$OUT.tmp" "$OUT"
+
+    - name: Collect the http-cache size every minute
+      cron:
+        name: muffin-cache-size
+        minute: "*"
+        job: "/usr/local/bin/muffin-cache-size.sh"
+
     - name: Render the Swarm stack file
       template:
         src: "{{ muffin_template_dir }}/docker-compose.yaml"
@@ -353,6 +407,24 @@
       loop: "{{ query('fileglob', playbook_dir + '/../stack/supabase/migrations/*.sql') | sort }}"
       loop_control:
         label: "{{ item | basename }}"
+      changed_when: true
+
+    # Migration 127 creates `metrics_ro` NOLOGIN and passwordless, because migrations are applied
+    # by piping the file into psql with NO variable substitution — a password cannot reach that
+    # file without being committed. This is the other half: LOGIN plus the password from
+    # secrets.yaml, so the credential lives where every other credential does.
+    #
+    # SKIPPED when unset, and that is a real mode rather than an oversight: a passwordless NOLOGIN
+    # role is inert, so a deployment that has not configured observability simply does not have a
+    # metrics reader. `ALTER ROLE` is idempotent, so a rotated password lands on the next deploy.
+    - name: Give the metrics reader a login (Grafana / postgres-exporter)
+      shell: >
+        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
+        psql -U postgres -d postgres -v ON_ERROR_STOP=1
+        -c "ALTER ROLE metrics_ro LOGIN PASSWORD '{{ metrics_ro_password }}'"
+      when: metrics_ro_password | default('') | length > 0
+      # The password would otherwise be echoed into the deploy log, which CI keeps.
+      no_log: true
       changed_when: true
 
     # A new table is INVISIBLE over the API until PostgREST rebuilds its schema

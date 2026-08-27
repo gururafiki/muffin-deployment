@@ -1,0 +1,293 @@
+# Alert rules. Every one is modelled on a failure this pipeline HAS ACTUALLY HAD —
+# see each rule's `description`, which is the runbook.
+#
+# Provisioned from a file, so they are read-only in the UI and change through review.
+# `noDataState` is deliberately NOT `OK` on the SQL rules: no data there means the query
+# failed, and a guard that reports silence as health is worse than no guard.
+apiVersion: 1
+groups:
+- orgId: 1
+  name: muffin
+  folder: Muffin
+  interval: 10m
+  rules:
+  - uid: muffin-resource-stalled
+    title: A refresh resource has stopped succeeding
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "select count(*)::float8 as value\n  from (\n    select resource, max(finished_at) filter\
+          \ (where ok) as last_ok\n      from market.refresh_run\n     -- 30 days, not 12 hours: a resource\
+          \ that broke a week ago must still be counted, and a\n     -- window as short as the threshold\
+          \ can only ever see resources that are already running.\n     where started_at > now() - interval\
+          \ '30 days'\n     group by resource\n  ) t\n where last_ok is null or last_ok < now() - interval\
+          \ '12 hours'"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: '{{ $values.B }} refresh resource(s) have not succeeded in 12 hours'
+      description: "The warm-up runs every 3 hours, so 12 hours is four consecutive misses \u2014 a broken\
+        \ resource rather than a bad afternoon. KNOWN LIMIT: this can only see a resource that has run\
+        \ at some point in the last 30 days. A resource that is registered but never scheduled is invisible\
+        \ here and is caught by logic-check's scheduling guard instead."
+  - uid: muffin-backlog-stalled
+    title: A backlog is not draining while its runs report success
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "select count(*)::float8 as value\n  from (\n    select backlog, max(depth) - min(depth)\
+          \ as spread, count(*) as samples\n      from market.backlog_sample\n     where sampled_at >\
+          \ now() - interval '24 hours'\n       and error is null\n     group by backlog\n    -- An empty\
+          \ or nearly-empty backlog is legitimately flat. 500 is well above the noise and\n    -- well\
+          \ below the populations that have actually stalled here (7,175 / 9,698 / 10,074).\n    having\
+          \ max(depth) > 500\n  ) t\n -- EXACTLY zero movement across a full day of samples. A backlog\
+          \ that is merely slow moves.\n where spread = 0 and samples >= 8"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 1h
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: '{{ $values.B }} backlog(s) have not moved in 24 hours'
+      description: 'THE STALL SIGNATURE, and the reason this whole thing was built. It has happened five
+        times: pending_industry re-fetched the same top-300 for months, security-share-stats returned
+        ''stats: 0, remaining: 11136'' on eight consecutive runs, the FX history probe re-read its own
+        page, the EPS backlog re-asked the same head, and derive_security_metrics returned byte-identical
+        results twice. Every one reported success and a `written` that looked like throughput. Check refresh_run.report
+        for that backlog''s resource.'
+  - uid: muffin-negative-cache-jump
+    title: A negative cache grew sharply
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "with ranked as (\n  select metric, value,\n         row_number() over (partition by metric\
+          \ order by sampled_at desc) as rn\n    from market.universe_sample\n   where metric like 'missing.%'\n\
+          \     and sampled_at > now() - interval '6 hours'\n)\nselect count(*)::float8 as value\n  from\
+          \ (\n    select metric,\n           max(value) filter (where rn = 1) as newest,\n          \
+          \ max(value) filter (where rn = 2) as prev\n      from ranked\n     group by metric\n  ) t\n\
+          \ -- A small population can double for entirely ordinary reasons; 100 is the floor below which\n\
+          \ -- a jump says nothing.\n where prev > 100 and newest > prev * 1.2"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: '{{ $values.B }} negative cache(s) grew more than 20% in one sampling interval'
+      description: "A *_missing_at column records 'we asked and the provider has nothing'. A SPIKE means\
+        \ a provider outage or rate limit is being written down as a permanent fact about thousands of\
+        \ securities. On 2026-08-13 ~8,300 were marked this way in a single afternoon \u2014 INTC, PEP,\
+        \ XOM and REGN among them \u2014 and every other count stayed plausible throughout. See the market-repair-negative-cache\
+        \ skill before clearing anything."
+  - uid: muffin-container-near-oom
+    title: A container is near its memory limit
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-prometheus
+      model:
+        refId: A
+        expr: max by (service) (container_memory_working_set_bytes{service!=""}) / max by (service) (container_spec_memory_limit_bytes{service!=""}
+          > 0) * 100
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 85
+    noDataState: NoData
+    execErrState: Alerting
+    for: 10m
+    labels:
+      muffin: infra
+    annotations:
+      summary: '{{ $labels.service }} is at {{ $values.B }}% of its memory limit'
+      description: Per-container, because the HOST looks fine when this happens. openbb-api was OOM-killed
+        at its 1 GB limit by one exploratory request and every market tool went with it, for ~15 seconds,
+        with `Exited (137)` the only evidence. supabase-kong measured 81% of its 512 MB on 2026-08-27,
+        so this is not hypothetical.
+  - uid: muffin-cache-hit-ratio-collapsed
+    title: The provider cache has stopped serving hits
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-prometheus
+      model:
+        refId: A
+        expr: sum(rate(muffin_provider_requests_total{cache_status="HIT"}[1h])) / clamp_min(sum(rate(muffin_provider_requests_total{cache_status=~"HIT|MISS|EXPIRED|STALE"}[1h])),
+          0.0001) * 100
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 5
+    noDataState: NoData
+    execErrState: Alerting
+    for: 6h
+    labels:
+      muffin: infra
+    annotations:
+      summary: Cache hit ratio has been under 5% for 6 hours
+      description: Both ways this breaks are SILENT BY DESIGN. `inactive=` evicts by last access and defaults
+        to 10 minutes, so a `proxy_cache_valid 30d` caches nothing while looking correct; and a cache
+        key larger than proxy_buffer_size makes nginx log one line and stop caching while still answering.
+        The only symptom of either is a provider rate limit nobody connects to it. `clamp_min` keeps a
+        quiet period from dividing by zero.
+  - uid: muffin-disk-filling
+    title: A filesystem is over 80% full
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-prometheus
+      model:
+        refId: A
+        expr: max by (mountpoint) (  100 - (node_filesystem_avail_bytes{mountpoint=~"/|/mnt/data"}         /
+          node_filesystem_size_bytes{mountpoint=~"/|/mnt/data"} * 100))
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 80
+    noDataState: NoData
+    execErrState: Alerting
+    for: 30m
+    labels:
+      muffin: infra
+    annotations:
+      summary: '{{ $labels.mountpoint }} is {{ $values.B }}% full'
+      description: "`/` was already at 70% on 2026-08-27 and grows with every image pull: Docker uses\
+        \ the containerd image store, so images live in /var/lib/containerd (20 G) rather than the migrated\
+        \ data-root on /mnt/data (9% of 98 G), and daemon.json's `data-root` does not control it. Cheap\
+        \ relief: `docker image prune -a` and reclaim the stale /var/lib/docker. The real fix is containerd's\
+        \ own `root` \u2014 see todos.md."
