@@ -263,6 +263,38 @@ jobs:
       # that flags those is a guard someone disables. Blocks are bounded by INDENTATION — the first
       # version matched any indented line, ran past the task boundary, swallowed the next task and
       # blamed the wrong script.
+      # BASH-ONLY SYNTAX NEEDS `executable: /bin/bash`, AND THE FAILURE IS A DEPLOY, NOT A TEST.
+      # Ansible's `shell:` runs under /bin/sh — DASH on Ubuntu — which has no `pipefail`, so
+      # `set -euo pipefail` dies with `Illegal option -o pipefail` before the task's first real
+      # command. It failed the scheduler deploy twice. Verifying the command by hand over ssh
+      # cannot catch it, because an interactive ssh lands in bash; only Ansible uses /bin/sh.
+      # Two tasks in the playbook already declared bash — the third did not, which is precisely
+      # the "a rule written at one call site is not a rule" shape this repo keeps paying for.
+      - name: Offline check — bash-only syntax declares bash
+        run: |
+          python3 - <<'PYCHK'
+          import re, sys, glob
+          BASHISMS = ('pipefail', '<(', '>(', '[[ ', 'declare -A', '${!')
+          bad = []
+          for path in sorted(glob.glob('ansible/*.yml')):
+              lines = open(path).read().splitlines()
+              # Task blocks are bounded by the `- name:` markers at the same indentation, the same
+              # way the Jinja guard above does it: a regex over the whole file runs past the task
+              # boundary and blames whichever task happens to follow.
+              starts = [i for i, l in enumerate(lines) if re.match(r'\s*- name:', l)]
+              for n, i in enumerate(starts):
+                  end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                  block = '\n'.join(lines[i:end])
+                  hit = next((b for b in BASHISMS if b in block), None)
+                  if hit and 'executable: /bin/bash' not in block:
+                      bad.append(f"{path}:{i+1}  {lines[i].strip()}  (uses {hit!r})")
+          if bad:
+              print('::error::a task uses bash-only syntax without `args: executable: /bin/bash`')
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print('  ok  every task using bash-only syntax declares bash')
+          PYCHK
       - name: Offline check — inline-staged scripts are valid Jinja
         run: |
           pip install jinja2 --quiet

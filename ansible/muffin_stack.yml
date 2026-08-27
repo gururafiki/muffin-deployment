@@ -515,6 +515,12 @@
         select vault.create_secret(:'key',  'service_role_key')   is not null as key_stored;
         select vault.create_secret(:'base', 'functions_base_url') is not null as base_stored;
         SQL
+      args:
+        # `shell:` runs under /bin/sh, which is DASH on Ubuntu, and dash has no `pipefail` —
+        # `set -euo pipefail` dies with `Illegal option -o pipefail` before a single SQL statement
+        # runs. Verifying the SQL by hand over ssh could not catch it: that lands in bash. The two
+        # other pipefail tasks in this playbook already declare bash; this one did not.
+        executable: /bin/bash
       vars:
         # Kong on the OVERLAY, not the public hostname: pg_cron runs inside the network, so going
         # out to Cloudflare and back would make the scheduler depend on DNS, TLS and Access for a
