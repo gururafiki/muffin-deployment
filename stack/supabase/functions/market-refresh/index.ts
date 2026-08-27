@@ -935,6 +935,16 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         else coverage = Number(cov ?? 0)
       }
 
+      // DATA QUALITY, every sweep. `market-verify` computes the same invariants nightly and keeps
+      // a pass/fail bit; this is the same view sampled hourly, so a defect creeping from 0 to 3 to
+      // 11 is visible long before it trips anything. Its own function rather than folded into
+      // sample_universe: that one lives in migration 132, and a second definition here would
+      // silently win over it.
+      let defects = 0
+      const { data: dq, error: dqErr } = await market.rpc('sample_quality')
+      if (dqErr) universeError = universeError ?? `sample_quality failed: ${dqErr.message}`
+      else defects = Number(dq ?? 0)
+
       let pruned = 0
       const { data: p, error: pErr } = await market.rpc('prune_observability', { p_days: 400 })
       if (!pErr) pruned = Number(p ?? 0)
@@ -955,6 +965,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         unreadable,
         skippedByDeadline,
         metrics,
+        defects,
         coverage,
         coverageSkipped,
         pruned,

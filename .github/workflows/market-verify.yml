@@ -126,6 +126,52 @@ jobs:
             else echo "  ok   $1 = 0"; fi
           }
 
+          # ── EVERY ZERO-EXPECTED INVARIANT, FROM ONE VIEW ──────────────────────────────────
+          #
+          # These used to be ~8 hand-written PostgREST URLs and a bash pipeline. They are now
+          # `market.data_defect` (migration 134), which is ALSO sampled hourly into
+          # universe_sample — so the same predicates drive both the nightly gate and the trend,
+          # and the two cannot drift. This schema has already paid for the alternative: the venue
+          # map lived in two places, drifted to 54 rows against 38, and silently stopped sweeping
+          # sixteen venues.
+          #
+          # STILL READ AS ANON, over HTTP, which is the whole reason this job exists and does not
+          # move into the database: it exercises the anon key, RLS, grants, PostgREST's schema
+          # cache and Cloudflare. The PGRST205 incident — fifteen tables 404ing over the API while
+          # perfectly present in Postgres — is the bug only an external reader finds.
+          #
+          # `extreme_1y_returns` is a GAUGE, not an invariant: of 40 securities returning >= +300%,
+          # 34 were real. It is recorded and deliberately not asserted on.
+          defects=$(curl -sS --max-time 60 "$BASE/rest/v1/data_defect?select=defect,n,detail" \
+            -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' 2>/dev/null)
+          if ! printf '%s' "$defects" | grep -q '"defect"'; then
+            echo "::error::could not read market.data_defect as anon: $(printf '%s' "$defects" | head -c 200)"
+            fail=1
+          else
+            python3 - "$defects" <<'PYCHK' || fail=1
+          import json, sys
+          GAUGES = {'extreme_1y_returns'}
+          rows = json.loads(sys.argv[1])
+          bad = 0
+          for r in sorted(rows, key=lambda x: x['defect']):
+              name, n = r['defect'], int(r['n'])
+              if name in GAUGES:
+                  print(f"  ..   {name} = {n} (gauge, not asserted)")
+              elif n:
+                  print(f"::error::{name} = {n}, expected 0 — {r.get('detail','')}")
+                  bad = 1
+              else:
+                  print(f"  ok   {name} = 0")
+          sys.exit(bad)
+          PYCHK
+          fi
+          # The counts also land in universe_sample via the hourly sampler; recorded here too so a
+          # verify run is a complete sample even when the sampler is behind.
+          printf '%s' "$defects" | python3 -c "
+          import json,sys
+          for r in json.load(sys.stdin): print(f\"{r['defect']} {r['n']}\")" 2>/dev/null \
+            | while read -r name n; do record "defect_$name" "$n"; done || true
+
           # 1. The universe exists and is the size fund holdings actually produce. A floor
           #    catches the collapse case: the placeholder-CUSIP bug merged thousands of
           #    securities into hundreds while every request still returned 200.
@@ -141,10 +187,11 @@ jobs:
           #    the app while leaving the total — and check 1 — completely untouched.
           check_min "equities"    "$(count 'security?select=security_id&security_type_code=eq.equity')" 9000
 
-          # 2. No placeholder ever becomes an identifier again. This is the exact value that
-          #    caused the merge, asserted directly.
-          check_zero "all-zero CUSIPs" "$(count 'security_identifier?select=value&kind_code=eq.cusip&value=eq.000000000')"
-          check_zero "all-zero ISINs"  "$(count 'security_identifier?select=value&kind_code=eq.isin&value=eq.000000000000')"
+          # Superseded by the `market.data_defect` read above, which computes the same
+          # invariants in SQL: the placeholder identifiers, duplicate constituents (exactly, over
+          # EVERY sector rather than a 900-row window of one — PostgREST's PGRST_DB_MAX_ROWS made
+          # the bash version compare 1,052 against a truncated 1,000 and report duplicates that did
+          # not exist), and returns at exactly -100%.
 
           # 3. ISIN coverage. Measured at 98%+; a sharp drop means parsing broke — and note
           #    that identifiers are XML ATTRIBUTES, so reading them as element text yields
@@ -166,28 +213,6 @@ jobs:
           # 6. Ticker resolution is incremental, so this is a PROGRESS check rather than a floor
           #    on the final state — it fails only if resolution has produced essentially nothing.
           check_min "resolved tickers" "$(count 'security_identifier?select=value&kind_code=eq.ticker')" 100
-
-          # 7. NO DUPLICATE constituents. `security_taxonomy` is many-to-many over sources on
-          #    purpose, so a security classified by both a filing and a provider appeared TWICE in
-          #    the sector list and was counted twice in the donut. The views now pick by source
-          #    priority; this asserts they still do, by comparing one sector's row count against
-          #    its DISTINCT security count.
-          # Compared within a BOUNDED WINDOW, deliberately. The first version of this check
-          # counted all rows with `Prefer: count=exact` and compared that against the ids in the
-          # response body — but PostgREST caps a response at PGRST_DB_MAX_ROWS (1000 here), so it
-          # was comparing 1,052 against a truncated page of 1,000 and reporting duplicates that did
-          # not exist. Ordering by security_id puts any real duplicate adjacent, so a window under
-          # the cap still finds one.
-          dupes=$(curl -sS --max-time 60 \
-            "$BASE/rest/v1/sector_constituents?select=security_id&sector_id=eq.information-technology&order=security_id&limit=900" \
-            -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' \
-            | tr ',' '\n' | grep -oE '"security_id":"[^"]+"' | sort | uniq -d | wc -l | tr -d ' ')
-          if [ "${dupes:-1}" -ne 0 ]; then
-            echo "::error::sector_constituents has $dupes duplicated securities in a 900-row window"
-            fail=1
-          else
-            echo "  ok   sector_constituents has no duplicates (900-row window)"
-          fi
 
           # 7b. A BACKLOG MUST BE SATISFIABLE. `pending_industry` asked "has a sector, has no
           #     industry" but expressed the second half as a left join plus `where … is null`,
@@ -224,18 +249,6 @@ jobs:
               check_zero "queued for an industry but already classified" "$queued_but_done"
             fi
           fi
-
-          # 7c. NO FABRICATED TOTAL LOSS. `returnsFor` guards a zero DENOMINATOR but not the
-          #     numerator, and `Number.isFinite(0)` is true — so a provider bar with `close: 0`
-          #     as the latest point made every period compute `(0 / from - 1)` = exactly -100%.
-          #     Measured 2026-08-11: 1,078 of 20,399 rows, i.e. 154 securities each showing -100%
-          #     on ALL SEVEN periods including `1d`. A security cannot fall 100% in a day and also
-          #     100% over a year. They cluster in late timezones (India 50, Taiwan 36, mainland
-          #     China 34, Hong Kong 8) — an untraded session, not 154 bankruptcies.
-          #     Zero bars are now dropped at parse, so exactly -100% is unreachable rather than
-          #     merely unlikely: producing it requires a latest close of 0, which no longer enters.
-          check_zero "instrument returns at exactly -100%" \
-            "$(count 'performance?select=scope_id&scope=eq.instrument&change_pct=eq.-100')"
 
           # 7d. IMPLAUSIBLE RETURNS ARE BOUNDED, not banned. A large return is not by itself wrong:
           #     of the 40 securities returning >= +300% (measured 2026-08-12), 34 were real — SNDK
