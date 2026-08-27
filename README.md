@@ -508,7 +508,25 @@ which is why a page renders instantly even while a refresh is in flight.
 | manual | you | on demand | anon, or service-role for `force` |
 
 Every resource self-skips inside its TTL, so a warm-up pass costs almost nothing when the data is
-fresh. `market-verify.yml` runs separately at 03:00 UTC and asserts the result as anon.
+fresh.
+
+**`market-verify.yml` runs separately at 03:30 UTC and asserts the result AS ANON**, and it stays in
+GitHub Actions deliberately — it is a black-box test of the path a visitor takes. Run inside the
+database as `postgres` it would bypass the anon key, RLS, grants, the 3-second anon statement
+timeout, PostgREST's schema cache and Cloudflare: still checking data shape, no longer checking the
+things it exists to catch. The PGRST205 incident — fifteen tables 404ing over the API while
+perfectly present in Postgres — is precisely the bug only an external reader finds. (It moved 03:00
+→ 03:30 to stop colliding with the nightly `pg_dumpall`.)
+
+Its zero-expected invariants live in **`market.data_defect`** (migration 134), a view with two
+consumers that cannot drift: market-verify asserts on it over HTTP as anon, and the hourly sampler
+snapshots it into `universe_sample` as `defect.*` — so a defect is caught within an hour and is a
+TREND rather than a nightly pass/fail bit. This schema has already paid for the alternative: the
+venue map lived in two places, drifted to 54 rows against 38, and silently stopped sweeping sixteen
+venues.
+
+`extreme_1y_returns` is deliberately a **gauge**, not an invariant: of 40 securities returning
+≥ +300%, 34 were real, and SNDK really is up ~2,700%. Recorded, never asserted on.
 
 ### The resources
 
@@ -680,13 +698,21 @@ panel reads that. By contrast `count(*)` over every market TABLE is 771 ms for a
   the handler in `functions/market-refresh/index.ts`. Not at the ~40 `return json(...)` sites: a
   resource added below one of them would be silently unrecorded. `written`/`remaining`/`failed`
   are GENERATED from the report jsonb, so they cannot drift from it.
-- **`market.backlog_sample` / `universe_sample`** — written by the `observability-sample` resource,
-  which runs FIRST AND LAST in the warm-up sweep so each sweep is bracketed and you can see what
-  it drained rather than inferring it.
+- **`market.backlog_sample` / `universe_sample` / `coverage_sample`** — written by the
+  `observability-sample` resource, on its **own hourly pg_cron job**. It is deliberately NOT in the
+  rotation: it touches no external provider, so it is free to run often, and its rate is exactly
+  what decides whether a dashboard draws a line or a single dot. 24 samples a day at no provider
+  cost. Coverage is gated to twice daily inside the handler, since it is the expensive one.
 - **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
   only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations
   share `query2.finance.yahoo.com`).
-- **Traefik, cAdvisor, node-exporter, postgres-exporter** — scraped by Prometheus.
+- **Traefik, node-exporter, postgres-exporter** — scraped by Prometheus. **There is no cAdvisor:**
+  this node runs Docker on the containerd image store, so the graph-driver layout cAdvisor reads
+  (`/mnt/data/docker/image/overlayfs/layerdb`) does not exist and it reports zero containers.
+  `ro,rslave` and `--containerd-namespace=moby` were both tested on the node and neither produced a
+  `name=` label. Per-container memory and CPU come from `muffin-service-metrics.py`, a `docker stats`
+  wrapper writing node-exporter's textfile collector — coarser (no per-container network or disk IO,
+  60s rather than 30s) and it actually works.
 
 **Known blind spot, stated rather than discovered later:** yfinance / finviz / FMP calls made
 *inside* `openbb-api` do not traverse `http-cache`. The rate-limit signal that matters most
@@ -707,18 +733,21 @@ anything worth keeping goes into the file.
 
 ### Alerts
 
-Six rules, each modelled on a failure this pipeline has actually had. E-mail via the shared
+Nine rules, each modelled on a failure this pipeline has actually had. E-mail via the shared
 `smtp_*` credentials (Resend). If `alert_email_to` is unset, Grafana still evaluates every rule and
 shows firing alerts — it just cannot mail them.
 
 | Alert | The failure it is modelled on |
 |---|---|
-| Resource has not succeeded in 12h | Four consecutive warm-up misses = broken, not a bad afternoon |
+| Resource has not succeeded in 8h | Two missed sweeps. **Was 12h** — calibrated for GitHub Actions' 13.3-hour gaps, which meant it could only fire on GitHub's own flakiness. A 3.2h rotation makes 8h mean something |
+| **The scheduler has stopped firing** | pg_cron is now the ONLY thing driving the pipeline, and its failure mode is silent: the data just stops being refreshed while every count stays plausible for days |
 | **Backlog flat ≥24h while runs report ok** | **The stall signature — five occurrences.** `written: 7386` twice, byte-identical |
 | Negative cache +20% in one interval | ~8,300 securities marked unanswerable in one afternoon (2026-08-13) |
 | Container >85% of its own limit | openbb-api OOM-killed at 1 GB by one probe; supabase-kong measured 81% |
 | Cache hit ratio collapsed | `inactive=` and an oversized key both break it SILENTLY |
 | Filesystem >80% | `/` was at 70% on 2026-08-27 and grows with every image pull |
+| **A correctness invariant is broken** | Any `market.data_defect` row > 0. An all-zero CUSIP once merged Accenture, Seagate, TE Connectivity and NXP into ONE security, with no error anywhere |
+| **A metric's median moved >3x** | The fraction/percent confusion, which has bitten three times — invisible per row, obvious in aggregate |
 
 ### Runbook — an alert fired
 
@@ -754,7 +783,14 @@ role stays inert.
 - A **domain** number: add it to `market.sample_universe()` — or add nothing at all, since every
   market table's row count and size is already discovered from `pg_tables`, and every
   `%_missing_at` column from `pg_attribute`.
-- A **backlog**: nothing to do. `sample_backlogs()` discovers anything named `pending_%`.
+- A **backlog**: nothing to do. `backlogs_to_sample()` discovers anything named `pending_%`, and
+  the edge function calls `sample_backlog(name)` once per backlog. **The loop is in the function,
+  not in SQL, and that is not a style choice:** PostgreSQL arms the statement timer ONCE, and a
+  PostgREST RPC is one statement — so a single `sample_backlogs()` that looped internally could
+  never extend its own 8s budget (`set_config('statement_timeout', ...)` inside it does nothing)
+  and timed out at 8,068 ms. One RPC per backlog gets one budget per backlog.
+- A **correctness invariant**: add a row to `market.data_defect`'s union. It is sampled hourly AND
+  asserted on by market-verify, so one definition covers the trend and the gate.
 - An **infra** number: a scrape target in `stack/observability/prometheus.yml`, or a line in
   `/usr/local/bin/muffin-cache-size.sh` for anything only the host can see.
 
