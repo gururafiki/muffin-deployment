@@ -18,7 +18,7 @@
     {
       "type": "timeseries",
       "title": "Memory used, as a share of each container's OWN limit",
-      "description": "THE PANEL THAT MATTERS. '1.4 GB' means nothing until you know the ceiling is 1.5 GB and not 4 GB. openbb-api was OOM-killed at its 1 GB limit by ONE exploratory request \u2014 `Exited (137)`, ~15s of every market tool down, host memory fine throughout. supabase-kong measured 81% of its 512 MB on 2026-08-27.",
+      "description": "THE PANEL THAT MATTERS. '1.4 GB' means nothing until you know the ceiling is 1.5 GB and not 4 GB. openbb-api was OOM-killed at its 1 GB limit by ONE exploratory request \u2014 `Exited (137)`, ~15s of every market tool down, host memory fine throughout. From `docker stats` via node-exporter's textfile collector, once a minute: cAdvisor cannot identify a container on this node (containerd image store \u2014 see the stack file).",
       "gridPos": {
         "h": 9,
         "w": 24,
@@ -36,7 +36,7 @@
             "type": "prometheus",
             "uid": "muffin-prometheus"
           },
-          "expr": "\nmax by (service) (container_memory_working_set_bytes{service!=\"\"})\n/ max by (service) (container_spec_memory_limit_bytes{service!=\"\"} > 0)\n* 100\n",
+          "expr": "muffin_service_memory_bytes / muffin_service_memory_limit_bytes * 100",
           "legendFormat": "{{service}}"
         }
       ],
@@ -108,7 +108,7 @@
             "type": "prometheus",
             "uid": "muffin-prometheus"
           },
-          "expr": "max by (service) (container_memory_working_set_bytes{service!=\"\"})",
+          "expr": "muffin_service_memory_bytes",
           "legendFormat": "{{service}}"
         }
       ],
@@ -180,7 +180,7 @@
             "type": "prometheus",
             "uid": "muffin-prometheus"
           },
-          "expr": "\nsum by (service) (rate(container_cpu_usage_seconds_total{service!=\"\"}[$__rate_interval])) * 100\n",
+          "expr": "muffin_service_cpu_percent",
           "legendFormat": "{{service}}"
         }
       ],

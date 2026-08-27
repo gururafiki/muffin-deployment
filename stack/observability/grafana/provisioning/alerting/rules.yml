@@ -24,12 +24,18 @@ groups:
         refId: A
         format: table
         rawQuery: true
-        rawSql: "select count(*)::float8 as value\n  from (\n    select resource, max(finished_at) filter\
-          \ (where ok) as last_ok\n      from market.refresh_run\n     -- 30 days, not 12 hours: a resource\
-          \ that broke a week ago must still be counted, and a\n     -- window as short as the threshold\
-          \ can only ever see resources that are already running.\n     where started_at > now() - interval\
-          \ '30 days'\n     group by resource\n  ) t\n where last_ok is null or last_ok < now() - interval\
-          \ '12 hours'"
+        rawSql: "select count(*)::float8 as value\n  from (\n    select resource,\n           min(started_at)\
+          \                    as first_seen,\n           max(finished_at) filter (where ok) as last_ok\n\
+          \      from market.refresh_run\n     -- 30 days, not 12 hours: a resource that broke a week\
+          \ ago must still be counted, and a\n     -- window as short as the threshold can only ever see\
+          \ resources already running.\n     where started_at > now() - interval '30 days'\n     group\
+          \ by resource\n  ) t\n -- COLD-START GUARD. A resource we have only been recording for an hour\
+          \ CANNOT have been\n -- broken for twelve, and without this every fresh deployment fires this\
+          \ alert for its first\n -- half-day \u2014 which is exactly how the first alert anyone sees\
+          \ becomes one they ignore.\n -- Observed on 2026-08-27: it fired on three resources that had\
+          \ genuinely failed inside a\n -- deploy window and already recovered, because 73 minutes of\
+          \ history cannot contain a\n -- 12-hour success.\n where first_seen < now() - interval '12 hours'\n\
+          \   and (last_ok is null or last_ok < now() - interval '12 hours')"
     - refId: B
       datasourceUid: __expr__
       model:
@@ -56,9 +62,11 @@ groups:
     annotations:
       summary: '{{ $values.B }} refresh resource(s) have not succeeded in 12 hours'
       description: "The warm-up runs every 3 hours, so 12 hours is four consecutive misses \u2014 a broken\
-        \ resource rather than a bad afternoon. KNOWN LIMIT: this can only see a resource that has run\
-        \ at some point in the last 30 days. A resource that is registered but never scheduled is invisible\
-        \ here and is caught by logic-check's scheduling guard instead."
+        \ resource rather than a bad afternoon. A resource is only judged once it has been RECORDED for\
+        \ longer than the threshold, so a newly added one is silently exempt for its first 12 hours: we\
+        \ cannot tell 'broken' from 'new' before then, and guessing wrong in the noisy direction is worse.\
+        \ KNOWN LIMIT: this can only see a resource that has run at some point in the last 30 days; one\
+        \ that is registered but never scheduled is caught by logic-check's scheduling guard instead."
   - uid: muffin-backlog-stalled
     title: A backlog is not draining while its runs report success
     condition: C
@@ -171,8 +179,7 @@ groups:
       datasourceUid: muffin-prometheus
       model:
         refId: A
-        expr: max by (service) (container_memory_working_set_bytes{service!=""}) / max by (service) (container_spec_memory_limit_bytes{service!=""}
-          > 0) * 100
+        expr: muffin_service_memory_bytes / muffin_service_memory_limit_bytes * 100
         instant: true
     - refId: B
       datasourceUid: __expr__
@@ -199,10 +206,11 @@ groups:
       muffin: infra
     annotations:
       summary: '{{ $labels.service }} is at {{ $values.B }}% of its memory limit'
-      description: Per-container, because the HOST looks fine when this happens. openbb-api was OOM-killed
-        at its 1 GB limit by one exploratory request and every market tool went with it, for ~15 seconds,
-        with `Exited (137)` the only evidence. supabase-kong measured 81% of its 512 MB on 2026-08-27,
-        so this is not hypothetical.
+      description: 'Per-service, because the HOST looks fine when this happens. openbb-api was OOM-killed
+        at its 1 GB limit by one exploratory request and every market tool went with it. Measured 2026-08-27:
+        supabase-kong at 83.2% of its 512 MB and firecrawl-api at 70.2% of 4 GB, so this is not hypothetical.
+        Sourced from `docker stats` via node-exporter, not cAdvisor, which cannot identify a container
+        under Docker''s containerd image store.'
   - uid: muffin-cache-hit-ratio-collapsed
     title: The provider cache has stopped serving hits
     condition: C
