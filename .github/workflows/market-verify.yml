@@ -67,7 +67,41 @@ jobs:
             tr -d '\r' < /tmp/market-verify-hdr | awk -F'/' '/^[Cc]ontent-[Rr]ange:/ {print $2}'
           }
           last_body() { head -c 200 "$BODY" 2>/dev/null || echo '<no body>'; }
+
+          # RECORD WHAT WE ALREADY COMPUTE. Every assertion below produces a NUMBER and this job
+          # used to keep only a pass/fail bit — the identical "computed and thrown away" gap that
+          # `market.refresh_run` was built to close, one layer along. As a trend, a defect creeping
+          # from 0 to 3 to 11 is visible long before it trips a threshold, and a floor that has
+          # been drifting toward its limit for a month is visible at all.
+          #
+          # Called from inside check_min/check_zero rather than at ~30 call sites: two edits cover
+          # every check, and a check added later is recorded without anyone remembering to.
+          #
+          # ONE TIMESTAMP for the whole run, so a verify pass is a single sample rather than
+          # thirty scattered across two minutes. Never fails the job — a metrics write that can
+          # break the gate is worse than no metric.
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          record() { # name, value
+            [ -z "${2:-}" ] && return 0
+            # Digits and at most ONE dot. Integers are all `check_min`/`check_zero` produce
+            # today, but a decimal-valued check added later would otherwise be dropped in
+            # silence — and a metric that vanishes without an error is the failure mode this
+            # whole exercise exists to remove.
+            case "$2" in ''|*[!0-9.]*|*.*.*) return 0 ;; esac
+            slug=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr ' ' '_' | tr -cd 'a-z0-9_.-')
+            [ -z "$slug" ] && return 0
+            # `Content-Profile`, not `Accept-Profile`: the latter selects the schema for a READ and
+            # is silently ignored on a write, which lands the row in `public` or 404s.
+            curl -sS --max-time 30 -o /dev/null -X POST "$BASE/rest/v1/universe_sample" \
+              -H "apikey: $SRV" -H "Authorization: Bearer $SRV" \
+              -H 'Content-Profile: market' -H 'Content-Type: application/json' \
+              -H 'Prefer: resolution=ignore-duplicates' \
+              -d "{\"sampled_at\":\"$TS\",\"metric\":\"verify.$slug\",\"value\":$2}" \
+              2>/dev/null || true
+          }
+
           check_min() { # name, actual, floor
+            record "$1" "${2:-}"
             if [ -z "${2:-}" ] || [ "$2" = "*" ]; then
               echo "::error::$1 — could not read a count: $(last_body)"; fail=1; return
             fi
@@ -78,6 +112,7 @@ jobs:
             fi
           }
           check_zero() {
+            record "$1" "${2:-}"
             if [ -z "${2:-}" ] || [ "$2" = "*" ]; then
               echo "::error::$1 — could not read a count: $(last_body)"; fail=1; return
             fi
