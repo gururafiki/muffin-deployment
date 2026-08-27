@@ -845,33 +845,77 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     }
 
     if (resource === OBSERVABILITY_RESOURCE) {
-      // Two separate RPCs rather than one, because they fail differently and only one of them can.
-      // Counting every market TABLE totals 771 ms (measured 2026-08-27, `security_price` at
-      // 10,874,625 rows included), while counting the 26 `pending_*` VIEWS totals ~8,400 ms — of
-      // which `pending_prices` alone is 5,380 ms, already over the 8s statement timeout the
-      // PostgREST role carries. `sample_backlogs` therefore isolates each view and carries a
-      // deadline; `sample_universe` needs neither.
-      const { data: backlogs, error: bErr } = await market.rpc('sample_backlogs', {
-        p_deadline_seconds: 60,
+      // THE LOOP IS HERE, NOT IN SQL, AND THAT IS THE WHOLE POINT OF MIGRATION 128.
+      //
+      // `sample_backlogs()` used to loop over all 26 views inside one function, with a per-item
+      // timeout and its own exception handler. The first production call died at 8,068 ms:
+      // PostgreSQL arms the statement timer ONCE at statement start, a PostgREST RPC is a SINGLE
+      // statement, and assigning `statement_timeout` inside it does not re-arm anything — so the
+      // role's 8s bounded the whole function, per-item timeout and error handler included.
+      //
+      // One RPC per backlog means each is bounded by the slowest SINGLE view (pending_prices at
+      // 5,380 ms, comfortably under 8s), while the shared `sampledAt` keeps all 26 rows one
+      // coherent reading.
+      const sampledAt = new Date().toISOString()
+      const deadline = Date.now() + 70_000
+
+      const { data: names, error: listErr } = await market.rpc('backlogs_to_sample')
+      if (listErr) throw new Error(`backlogs_to_sample failed: ${listErr.message}`)
+
+      let sampled = 0
+      let unreadable = 0
+      let skippedByDeadline = 0
+      for (const backlog of (names ?? []) as string[]) {
+        if (Date.now() > deadline) { skippedByDeadline++; continue }
+        const { error } = await market.rpc('sample_backlog', {
+          p_backlog: backlog,
+          p_sampled_at: sampledAt,
+        })
+        if (!error) { sampled++; continue }
+        unreadable++
+        // WRITTEN FROM HERE BECAUSE IT CANNOT BE WRITTEN FROM THERE. A statement timeout aborts
+        // its transaction, so a row inserted by the function's own exception handler dies with it.
+        // NULL depth is not zero: a backlog that has begun timing out must not read as drained,
+        // which is the same "a failure is not an empty result" confusion this pipeline has had six
+        // times.
+        await market.from('backlog_sample').upsert({
+          sampled_at: sampledAt,
+          backlog,
+          depth: null,
+          error: error.message.slice(0, 300),
+        }, { onConflict: 'sampled_at,backlog' })
+      }
+
+      // INDEPENDENT of the backlogs. In the first production run `sample_backlogs` threw and took
+      // the universe snapshot with it, losing 148 metrics that would have cost 771 ms and could
+      // not have failed. Two measurements that share nothing should not share a failure.
+      let metrics = 0
+      let universeError: string | null = null
+      const { data: u, error: uErr } = await market.rpc('sample_universe')
+      if (uErr) universeError = uErr.message
+      else metrics = Number(u ?? 0)
+
+      let pruned = 0
+      const { data: p, error: pErr } = await market.rpc('prune_observability', { p_days: 400 })
+      if (!pErr) pruned = Number(p ?? 0)
+
+      // Fail only when NOTHING was measured. One unreadable backlog is a recorded fact, not a
+      // failed run — and a run that reports failure on it would train everyone to ignore the alert.
+      const ok = sampled > 0 || metrics > 0
+      await market.rpc('finish_refresh', {
+        p_resource: resource,
+        p_ok: ok,
+        p_error: ok ? null : (universeError ?? 'no backlog or universe sample could be taken'),
       })
-      // A sampler that fails must SAY so rather than leaving a gap that reads as a quiet period.
-      if (bErr) throw new Error(`sample_backlogs failed: ${bErr.message}`)
-
-      const { data: metrics, error: uErr } = await market.rpc('sample_universe')
-      if (uErr) throw new Error(`sample_universe failed: ${uErr.message}`)
-
-      // Retention runs here rather than on its own schedule: a table that only GROWS looks exactly
-      // like a healthy one, and a prune with nowhere to be called from is a prune that stops
-      // happening. `check_retention_is_enforced.py` watches the ceiling regardless.
-      const { data: pruned, error: pErr } = await market.rpc('prune_observability', { p_days: 400 })
-      if (pErr) throw new Error(`prune_observability failed: ${pErr.message}`)
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
-        backlogs: Number(backlogs ?? 0),
-        metrics: Number(metrics ?? 0),
-        pruned: Number(pruned ?? 0),
+        ok,
+        sampled,
+        unreadable,
+        skippedByDeadline,
+        metrics,
+        pruned,
+        universeError,
       })
     }
 

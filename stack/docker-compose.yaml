@@ -1183,12 +1183,16 @@ services:
       - "--path.sysfs=/host/sys"
       # The textfile collector is how anything the host knows and Prometheus cannot scrape gets in
       # — the http-cache volume's size, for one. nginx does not expose it and a cron `du` does.
-      - "--collector.textfile.directory=/host/textfile"
+      # UNDER /host, not a mount of its own. `/:/host:ro` is read-only, so a second bind mounted
+      # AT /host/textfile cannot have its mountpoint created inside it — the first deploy failed
+      # with `make mountpoint "/host/textfile": read-only file system` and the service restart-
+      # looped at 0/1. The directory is already visible through the rootfs mount, so the extra
+      # bind was never needed.
+      - "--collector.textfile.directory=/host/var/lib/node-exporter"
       - "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)"
     pid: host
     volumes:
       - /:/host:ro,rslave
-      - /var/lib/node-exporter:/host/textfile:ro
     networks:
       - muffin-net
     deploy:
