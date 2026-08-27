@@ -248,6 +248,10 @@ jobs:
             python3 -m py_compile "$f"
             echo "  ok  $(basename "$f")"
           done
+          for f in stack/observability/collectors/*.sh; do
+            sh -n "$f"
+            echo "  ok  $(basename "$f")"
+          done
 
       # Ansible renders inline `copy: content:` through JINJA. The per-service collector shipped
       # that way first and killed a deploy — it is full of braces (`{{json .}}` for docker's format
