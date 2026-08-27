@@ -271,59 +271,15 @@
     # `du` on the cache volume, once a minute, written atomically. The rename is not fussiness:
     # node-exporter reads this file on ITS schedule, and reading a half-written one makes it drop
     # the whole scrape with a parse error rather than skip a metric.
-    # NOTE this one is inline `content:` and survives only because it contains no braces. Anything
-    # added to it that looks like Jinja — `{{ }}` or `{% %}` — will be TEMPLATED and fail the
-    # deploy, exactly as the python collector above did. Move it to a `src:` file if it grows.
+    # `copy:` WITH A `src:`, like the python collector beside it. It was inline `content:` and
+    # survived only because it happened to contain no braces — Ansible renders inline content
+    # through Jinja, and one `{{ }}` added to it would fail the deploy exactly as the python one
+    # did. As a file it is also shell-checkable in CI.
     - name: Install the http-cache size collector
       copy:
+        src: "{{ muffin_template_dir }}/observability/collectors/muffin-cache-size.sh"
         dest: /usr/local/bin/muffin-cache-size.sh
         mode: "0755"
-        content: |
-          #!/bin/sh
-          # Written by Ansible (muffin_stack.yml). Reports the http-cache volume's size to
-          # node-exporter's textfile collector.
-          set -eu
-          VOL=/var/lib/docker/volumes/muffin_http-cache-data/_data
-          OUT=/var/lib/node-exporter/muffin_http_cache.prom
-          [ -d "$VOL" ] || exit 0
-          BYTES=$(du -sb "$VOL" 2>/dev/null | cut -f1)
-          [ -n "$BYTES" ] || exit 0
-          {
-            echo "# HELP muffin_http_cache_bytes Size of the http-cache volume on disk."
-            echo "# TYPE muffin_http_cache_bytes gauge"
-            echo "muffin_http_cache_bytes $BYTES"
-          } > "$OUT.tmp"
-          mv "$OUT.tmp" "$OUT"
-
-    # Per-service memory and CPU, into the same textfile collector. This replaces cAdvisor, which
-    # cannot identify a container on this node — see the note on node-exporter in
-    # docker-compose.yaml. `docker stats` asks Docker, which knows both the service name and the
-    # limit, so nothing has to be inferred from a cgroup path.
-    #
-    # The task name is stripped back to the SERVICE name (`muffin_openbb-api.1.abc123` ->
-    # `muffin_openbb-api`): the slot and task id change on every redeploy, so keeping them would
-    # start a brand-new series each time and a memory graph would reset to zero at each deploy
-    # rather than showing a leak.
-    # Per-service memory and CPU, into the same textfile collector. This replaces cAdvisor, which
-    # cannot identify a container on this node — see the note on node-exporter in
-    # docker-compose.yaml.
-    #
-    # `copy:` WITH A `src:`, NEVER INLINE `content:`. Ansible renders inline content through JINJA,
-    # and the script is full of braces — `{{json .}}` for docker's format string and
-    # `{{service="..."}}` for the Prometheus label. Measured: the deploy died with
-    # `template error while templating string: expected name or number`. A `src:` file is copied
-    # verbatim, and has the side benefit of being lintable and syntax-checkable like ordinary code.
-    - name: Install the per-service metrics collector
-      copy:
-        src: "{{ muffin_template_dir }}/observability/collectors/muffin-service-metrics.py"
-        dest: /usr/local/bin/muffin-service-metrics.py
-        mode: "0755"
-
-    - name: Collect per-service metrics every minute
-      cron:
-        name: muffin-service-metrics
-        minute: "*"
-        job: "/usr/local/bin/muffin-service-metrics.py"
 
     - name: Collect the http-cache size every minute
       cron:
