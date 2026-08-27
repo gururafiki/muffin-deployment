@@ -245,4 +245,38 @@ do $$ begin
   create policy cron_cursor_read on market.cron_cursor for select to metrics_ro using (true);
 end $$;
 
+-- ── Watching the scheduler itself ─────────────────────────────────────────────────────────────
+--
+-- Removing GitHub Actions makes pg_cron the ONLY thing driving the pipeline, and its failure mode
+-- is silent: the data simply stops being refreshed and every count stays plausible for days.
+--
+-- But pg_cron is MORE observable than GitHub ever was. `cron.job_run_details` records every
+-- firing INSIDE the database, where the sampler can read it — GitHub's reliability was invisible
+-- to monitoring, which is why nobody noticed it dropping 40% of runs. This view is what
+-- `sample_universe()` reads to emit `scheduler.*`, and what the "scheduler has gone silent" alert
+-- fires on.
+--
+-- SECURITY INVOKER is wrong here and DEFINER is deliberate: `cron.job_run_details` is owned by the
+-- superuser and `metrics_ro` cannot read it directly.
+create or replace function market.scheduler_health()
+returns table (ticks_1h bigint, failed_1h bigint, minutes_since_tick numeric)
+language plpgsql
+security definer
+set search_path = cron, pg_catalog, pg_temp
+as $$
+begin
+  return query
+  select
+    count(*) filter (where start_time > now() - interval '1 hour'),
+    count(*) filter (where start_time > now() - interval '1 hour' and status <> 'succeeded'),
+    round(extract(epoch from (now() - max(start_time))) / 60.0, 1)
+  from cron.job_run_details;
+exception when others then
+  -- No pg_cron (the migration-test image). Report nothing rather than failing the sampler.
+  return;
+end $$;
+
+revoke all on function market.scheduler_health() from public;
+grant execute on function market.scheduler_health() to service_role, metrics_ro;
+
 notify pgrst, 'reload schema';

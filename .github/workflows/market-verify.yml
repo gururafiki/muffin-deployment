@@ -16,8 +16,14 @@ name: Market data verify
 
 on:
   schedule:
-    # 03:00 UTC — after the 02:10 warm-up has had time to land.
-    - cron: "0 3 * * *"
+    # 03:30 UTC. Was 03:00, which collided EXACTLY with the nightly `pg_dumpall`
+    # (muffin-db-backup.sh, also 03:00). `pg_dumpall` takes ACCESS SHARE so it never blocked these
+    # reads, but the database did both at once every night for no reason.
+    #
+    # No longer keyed to the warm-up either: that moved into the database as a pg_cron rotation
+    # (migration 133) and now runs continuously rather than in sweeps, so there is no "after the
+    # sweep lands" to aim for.
+    - cron: "30 3 * * *"
   workflow_dispatch:
 
 concurrency:

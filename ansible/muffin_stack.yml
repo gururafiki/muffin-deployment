@@ -474,6 +474,47 @@
       no_log: true
       changed_when: true
 
+    # THE SCHEDULER'S CREDENTIALS, IN VAULT. pg_cron calls the edge function over HTTP and needs
+    # the service-role key; migrations are piped into psql with NO variable substitution, so a key
+    # in a migration would be a key in git. `vault.secrets` is Supabase's documented home for
+    # exactly this and the extension is already installed.
+    #
+    # `vault.create_secret` FAILS on a duplicate name, so this is upsert-shaped: update when the
+    # name exists, create when it does not. Migrations re-run on every deploy and so does this.
+    #
+    # Absent secrets are not an error — `market.cron_post()` returns a reason and posts NOTHING,
+    # rather than firing 288 unauthenticated requests a day at the edge function.
+    - name: Store the scheduler's credentials in vault (pg_cron -> edge function)
+      shell: |
+        docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)" \
+          psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+        do $$
+        declare v_id uuid;
+        begin
+          select id into v_id from vault.secrets where name = 'service_role_key';
+          if v_id is null then
+            perform vault.create_secret({{ supabase_service_role_key | to_json }}, 'service_role_key');
+          else
+            perform vault.update_secret(v_id, {{ supabase_service_role_key | to_json }});
+          end if;
+
+          select id into v_id from vault.secrets where name = 'functions_base_url';
+          if v_id is null then
+            perform vault.create_secret({{ _functions_base_url | to_json }}, 'functions_base_url');
+          else
+            perform vault.update_secret(v_id, {{ _functions_base_url | to_json }});
+          end if;
+        end $$;
+        SQL
+      vars:
+        # The edge functions are reached through Kong on the overlay, NOT through the public
+        # hostname: pg_cron runs inside the network, so going out to Cloudflare and back would add
+        # a dependency on DNS, TLS and Access for a call that never needs to leave the node.
+        _functions_base_url: "http://supabase-kong:8000/functions/v1"
+      when: supabase_service_role_key | default('') | length > 0
+      no_log: true
+      changed_when: true
+
     # A new table is INVISIBLE over the API until PostgREST rebuilds its schema
     # cache. Every migration ends with `notify pgrst, 'reload schema'`, but that
     # proved unreliable here — 10-reference-model.sql's tables 404'd as PGRST205

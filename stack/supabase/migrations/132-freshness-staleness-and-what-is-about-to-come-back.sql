@@ -142,6 +142,22 @@ begin
   exception when others then null;
   end;
 
+  -- THE SCHEDULER ITSELF. With GitHub Actions gone, pg_cron is the only thing driving the
+  -- pipeline and its failure is silent — the data just stops. `minutes_since_tick` is what the
+  -- "scheduler has gone silent" alert watches; the rotation fires every 5 minutes, so anything
+  -- past 30 means it has stopped.
+  begin
+    insert into market.universe_sample (sampled_at, metric, value)
+    select ts, m, v from (
+      select 'scheduler.ticks_1h' as m, ticks_1h::numeric as v from market.scheduler_health()
+      union all select 'scheduler.failed_1h', failed_1h from market.scheduler_health()
+      union all select 'scheduler.minutes_since_tick', minutes_since_tick from market.scheduler_health()
+    ) s where v is not null
+    on conflict do nothing;
+    taken := taken + 3;
+  exception when others then null;   -- no pg_cron in the test image
+  end;
+
   -- EXACT, because market-verify.yml asserts floors on exactly these.
   insert into market.universe_sample (sampled_at, metric, value)
   select ts, m, v from (

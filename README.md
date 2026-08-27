@@ -267,13 +267,20 @@ curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
 `force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
 forced refreshes still collapse into one upstream fetch.
 
-**Scheduled warm-up.** `.github/workflows/market-warmup.yml` nudges every resource at 02/08/14/20
-UTC. Reads are stale-while-revalidate, so a visitor is never blocked — but without this the FIRST
-visitor after a TTL expiry sees the previous values until the background fetch lands. Four runs a
-day rather than one per TTL: the TTLs are 30–60 min, so a per-TTL schedule would be ~48 runs a day
-against finviz and yfinance, and **yfinance rate-limits**. It uses the ANON key (the refresh
-endpoint applies its own TTL guard, so a warm-up needs no elevated rights) and a `skipped` reply
-counts as success — that is the warm-up finding data already fresh.
+**Scheduled warm-up — a pg_cron ROTATION inside the database** (migration 133), not a GitHub
+workflow. `market.cron_tick()` fires every 5 minutes and posts the NEXT resource from
+`market.cron_resource`, so 38 resources make a full sweep every 3.2 hours and **cannot burst** —
+seventeen back-to-back is what tripped yfinance's rate limit on 2026-08-13.
+`observability-sample` is not in the rotation; it touches no provider and gets its own hourly job.
+
+It moved out of GitHub Actions because the schedule was not being honoured. Measured over four
+days: **19 runs against 32 expected**, every one 19–127 minutes late, gaps from 2.5 to **13.3
+hours** against a nominal 3. That last figure exceeded the 12-hour "resource has stopped
+succeeding" alert, so the scheduler's flakiness would eventually have fired our own alarm.
+
+Reads are stale-while-revalidate, so a visitor is never blocked — the warm-up only stops the FIRST
+visitor after a TTL expiry seeing stale values. Every resource self-skips inside its TTL, and a
+`skipped` reply counts as success: that is the warm-up finding data already fresh.
 
 **`priced = false`** (cash, a bond yield) is excluded from the performance refresh on purpose:
 a price return there is meaningless rather than missing, so the UI shows no number.
@@ -496,7 +503,7 @@ which is why a page renders instantly even while a refresh is in flight.
 
 | Trigger | Who | When | Credential |
 |---|---|---|---|
-| `market-warmup.yml` | GitHub Actions cron | every 3 hours, from 02:10 UTC | anon key |
+| `market.cron_tick()` | pg_cron, in the database | one resource every 5 min (full sweep ~3.2 h) | service-role, from `vault` |
 | stale-while-revalidate | the app itself | a reader touches a row past `stale_after` | anon key |
 | manual | you | on demand | anon, or service-role for `force` |
 
@@ -583,8 +590,9 @@ control is not rendered at all.
 ### Running one by hand
 
 ```bash
-# Any resource, via CI (uses the anon key; respects the TTL):
-gh workflow run market-warmup.yml -f resource=fund-holdings
+# Any resource, from the node (respects the TTL). The rotation calls this same path:
+docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)" \
+  psql -U postgres -c "select market.cron_post('fund-holdings')"
 
 # Directly, with `force` to bypass the TTL — SERVICE-ROLE ONLY, because the anon key is public
 # and a public cache-buster is a free way to hammer the provider:
