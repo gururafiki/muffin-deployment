@@ -863,6 +863,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       if (listErr) throw new Error(`backlogs_to_sample failed: ${listErr.message}`)
 
       let sampled = 0
+      let estimated = 0
       let unreadable = 0
       let skippedByDeadline = 0
       for (const backlog of (names ?? []) as string[]) {
@@ -872,6 +873,17 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           p_sampled_at: sampledAt,
         })
         if (!error) { sampled++; continue }
+
+        // The exact count did not fit. Fall back to the PLANNER's estimate, which costs nothing
+        // and is written flagged as an estimate — `pending_prices` was 5,380 ms when this was
+        // built and is now past the 8s limit, so the one queue big enough to matter would
+        // otherwise be the one with no number at all.
+        const { error: estErr } = await market.rpc('sample_backlog_estimate', {
+          p_backlog: backlog,
+          p_sampled_at: sampledAt,
+        })
+        if (!estErr) { estimated++; continue }
+
         unreadable++
         // WRITTEN FROM HERE BECAUSE IT CANNOT BE WRITTEN FROM THERE. A statement timeout aborts
         // its transaction, so a row inserted by the function's own exception handler dies with it.
@@ -901,7 +913,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
 
       // Fail only when NOTHING was measured. One unreadable backlog is a recorded fact, not a
       // failed run — and a run that reports failure on it would train everyone to ignore the alert.
-      const ok = sampled > 0 || metrics > 0
+      const ok = sampled > 0 || estimated > 0 || metrics > 0
       await market.rpc('finish_refresh', {
         p_resource: resource,
         p_ok: ok,
@@ -911,6 +923,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         resource,
         ok,
         sampled,
+        estimated,
         unreadable,
         skippedByDeadline,
         metrics,
