@@ -200,6 +200,7 @@ jobs:
           # which is exactly the failure this stack is bad at noticing, so set it.
           metrics_ro_password: "${{ secrets.METRICS_RO_PASSWORD }}"
           grafana_admin_password: "${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+          portainer_admin_password: "${{ secrets.PORTAINER_ADMIN_PASSWORD }}"
           # Where alerts go. Defaults to the ACME contact — already the address that receives
           # operational mail for this deployment — rather than to nobody.
           alert_email_to: "${{ secrets.ALERT_EMAIL_TO || vars.ACME_EMAIL }}"

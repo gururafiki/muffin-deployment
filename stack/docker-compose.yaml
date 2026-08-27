@@ -23,6 +23,8 @@ secrets:
     external: true
   cf_dns_api_token:
     external: true               # Cloudflare Zone:DNS:Edit token for Traefik DNS-01
+  portainer_admin_password:
+    external: true               # see the note on the portainer service
 
 volumes:
   # Cache entries are rebuildable by definition, but a rebuild costs a full re-fetch at the
@@ -87,6 +89,13 @@ services:
       resources:
         limits:
           memory: 256M
+      labels:
+        # THE CONFIG'S HASH, IN THE SPEC. traefik.yml is bind-mounted, and a bind-mounted file is
+        # not part of a service's spec — so `docker stack deploy` sees no change and traefik keeps
+        # serving the OLD static config, silently. Putting the hash here makes an edited
+        # traefik.yml a spec change, so exactly the services whose config moved get restarted.
+        # This label is inert otherwise: traefik reads OTHER services' labels, never its own.
+        - "muffin.config-hash={{ cfg_hash_traefik | default('none') }}"
 
   # --- LangGraph agent server (EXPOSED via Traefik: api.<domain>) ---------
   langgraph-api:
@@ -1014,6 +1023,11 @@ services:
       resources:
         limits:
           memory: 192M
+      labels:
+        # See the note on traefik. Covers nginx.conf AND openresty.conf — the shared dict the
+        # /metrics counters live in is declared in the latter, so a change to either has to
+        # restart this service or the counters silently do not exist.
+        - "muffin.config-hash={{ cfg_hash_http_cache | default('none') }}"
 
   # ===========================================================================
   # OBSERVABILITY
@@ -1077,6 +1091,8 @@ services:
       resources:
         limits:
           memory: 512M
+      labels:
+        - "muffin.config-hash={{ cfg_hash_observability | default('none') }}"
 
   # --- Dashboards + alerting (EXPOSED via Traefik, behind Cloudflare Access) ---
   grafana:
@@ -1134,6 +1150,9 @@ services:
         - "traefik.http.routers.grafana.entrypoints=websecure"
         - "traefik.http.routers.grafana.tls.certresolver=cloudflare"
         - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+        # Grafana reads its provisioning directory at STARTUP ONLY, so without this a new dashboard
+        # or alert rule is staged to the node and never loaded.
+        - "muffin.config-hash={{ cfg_hash_observability | default('none') }}"
 
   # --- Per-CONTAINER cpu/memory/restarts -----------------------------------
   # OCI Monitoring already covers the VM. It cannot see inside a container, and per-container
@@ -1237,7 +1256,20 @@ services:
   # gets an Access application, rather than in `cf_public_hostnames`.
   portainer:
     image: portainer/portainer-ce:2.27.9-alpine
-    command: -H unix:///var/run/docker.sock
+    # `--admin-password-file` IS NOT A CONVENIENCE. Portainer CE only accepts the creation of its
+    # initial admin account within FIVE MINUTES of first start, then locks itself:
+    #
+    #   the Portainer instance timed out for security purposes, to re-enable your Portainer
+    #   instance, you will need to restart Portainer
+    #
+    # Measured 2026-08-27 — it started at 11:52 during a deploy, nobody was watching, and by 11:57
+    # the UI served nothing but that message. Left unprovisioned, every deploy is a five-minute
+    # race against a timer, and losing it means a restart before anyone can log in.
+    #
+    # Portainer requires at least 12 characters; the generated value is 32 hex.
+    command: -H unix:///var/run/docker.sock --admin-password-file /run/secrets/portainer_admin_password
+    secrets:
+      - portainer_admin_password
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer-data:/data

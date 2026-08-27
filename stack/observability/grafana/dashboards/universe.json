@@ -38,7 +38,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "select sampled_at as time, metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at)\n   and metric in ('rows.security', 'equities', 'rows.issuer', 'rows.fund_holding')\n order by sampled_at"
+          "rawSql": "select sampled_at as time, metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at)\n   and metric in ('rows_estimate.security', 'equities', 'rows_estimate.issuer', 'rows_estimate.fund_holding')\n order by sampled_at"
         }
       ],
       "fieldConfig": {
@@ -125,8 +125,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Rows by table",
-      "description": "",
+      "title": "Rows by table (estimated)",
+      "description": "`pg_class.reltuples`, not count(*). Exact counting every table cost 10.25s cold \u2014 a full scan of a 10.9M-row table, 16 times a day, to plot a trend that a few percent of error is invisible on. The numbers market-verify asserts floors on stay exact and are on the panels above.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -146,7 +146,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "select sampled_at as time, replace(metric, 'rows.', '') as metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'rows.%' and value > 1000\n order by sampled_at"
+          "rawSql": "select sampled_at as time, replace(metric, 'rows_estimate.', '') as metric, value\n  from market.universe_sample\n where $__timeFilter(sampled_at) and metric like 'rows_estimate.%' and value > 1000\n order by sampled_at"
         }
       ],
       "fieldConfig": {
