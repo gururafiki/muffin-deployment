@@ -907,6 +907,34 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       if (uErr) universeError = uErr.message
       else metrics = Number(u ?? 0)
 
+      // COVERAGE IS SAMPLED TWICE A DAY, NOT EVERY SWEEP. It is the dimensional breakdown —
+      // completeness and freshness per country, sector, industry, cap band, style, tier, region,
+      // currency and type — and it cannot meaningfully change in the ninety minutes between
+      // sweeps. At 469 buckets a sample, taking it sixteen times a day would write 7,500 rows
+      // daily for no extra information.
+      //
+      // The cadence is decided by the DATA, not by a schedule: "has 11 hours passed since the
+      // last sample". GitHub's scheduled runs here are delayed by 19 minutes to 2 hours and slots
+      // are skipped outright (measured — the warm-up ran 12:44 for the 11:10 slot), so a rule
+      // keyed on the clock would fire twice some days and not at all on others.
+      let coverage = 0
+      let coverageSkipped = true
+      const { data: lastCoverage } = await market
+        .from('coverage_sample')
+        .select('sampled_at')
+        .order('sampled_at', { ascending: false })
+        .limit(1)
+      const lastAt = lastCoverage?.[0]?.sampled_at
+      if (!lastAt || Date.now() - new Date(lastAt).getTime() > 11 * 60 * 60 * 1000) {
+        coverageSkipped = false
+        // 743 ms measured on the node for all 469 buckets, so this fits the 8s statement timeout
+        // with room — but it is still its own RPC rather than folded into another, so a slow day
+        // costs the coverage sample and not the backlog depths alongside it.
+        const { data: cov, error: covErr } = await market.rpc('sample_coverage')
+        if (covErr) universeError = universeError ?? `sample_coverage failed: ${covErr.message}`
+        else coverage = Number(cov ?? 0)
+      }
+
       let pruned = 0
       const { data: p, error: pErr } = await market.rpc('prune_observability', { p_days: 400 })
       if (!pErr) pruned = Number(p ?? 0)
@@ -927,6 +955,8 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         unreadable,
         skippedByDeadline,
         metrics,
+        coverage,
+        coverageSkipped,
         pruned,
         universeError,
       })
