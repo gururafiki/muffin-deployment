@@ -236,6 +236,65 @@ jobs:
       # check cried wolf on production for want of exactly this kind of proof. `--self-test` runs
       # the real statistic over synthetic discrete and cumulative series and fails if the threshold
       # does not separate them. No database, so it runs on every PR.
+      # The textfile collectors are real files precisely so they can be checked here. The
+      # per-service one shipped as inline `copy: content:` first and killed a deploy —
+      # Ansible renders inline content through JINJA, and the script is full of braces
+      # (`{{json .}}`, `{{service="..."}}`): `template error while templating string: expected
+      # name or number`. A `src:` file is copied verbatim AND is lintable.
+      - name: Offline check — the textfile collectors compile
+        run: |
+          set -euo pipefail
+          for f in stack/observability/collectors/*.py; do
+            python3 -m py_compile "$f"
+            echo "  ok  $(basename "$f")"
+          done
+
+      # Ansible renders inline `copy: content:` through JINJA. The per-service collector shipped
+      # that way first and killed a deploy — it is full of braces (`{{json .}}` for docker's format
+      # string, `{{service="..."}}` for the Prometheus label) and Ansible answered
+      # `template error while templating string: expected name or number`.
+      #
+      # The test is whether the block is VALID JINJA, not whether it contains braces: plenty of
+      # inline content is MEANT to be templated (`AWS_ACCESS_KEY_ID={{ _s3_key }}`), and a guard
+      # that flags those is a guard someone disables. Blocks are bounded by INDENTATION — the first
+      # version matched any indented line, ran past the task boundary, swallowed the next task and
+      # blamed the wrong script.
+      - name: Offline check — inline-staged scripts are valid Jinja
+        run: |
+          pip install jinja2 --quiet
+          python3 - <<'PY'
+          import re, sys, pathlib
+          from jinja2 import Environment
+          env = Environment()
+          lines = pathlib.Path('ansible/muffin_stack.yml').read_text().splitlines()
+          bad = []
+          for i, line in enumerate(lines):
+              m = re.match(r'^(\s*)content: \|\s*$', line)
+              if not m:
+                  continue
+              indent = len(m.group(1))
+              block, j = [], i + 1
+              while j < len(lines):
+                  cur = lines[j]
+                  if cur.strip() and (len(cur) - len(cur.lstrip())) <= indent:
+                      break
+                  block.append(cur)
+                  j += 1
+              text = "\n".join(block)
+              try:
+                  env.parse(text)
+              except Exception as e:
+                  first = next((b.strip() for b in block if b.strip()), '?')
+                  bad.append(f"line {i+1} ({first[:50]}): {e}")
+          if bad:
+              print("::error::inline `copy: content:` that Ansible cannot template — move it to a "
+                    "`src:` file, which is copied verbatim:")
+              for b in bad:
+                  print(f"  {b}")
+              sys.exit(1)
+          print("ok  every inline-staged script is valid Jinja")
+          PY
+
       - name: Offline check — the quarter-shape threshold separates the two cases
         run: python3 .github/scripts/check_quarter_is_a_quarter.py --self-test
 
