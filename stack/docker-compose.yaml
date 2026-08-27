@@ -1168,56 +1168,26 @@ services:
         # Grafana reads its provisioning directory at STARTUP ONLY, so without this a new dashboard
         # or alert rule is staged to the node and never loaded.
 
-  # --- Per-CONTAINER cpu/memory/restarts -----------------------------------
-  # OCI Monitoring already covers the VM. It cannot see inside a container, and per-container
-  # memory is precisely what matters here: openbb-api was OOM-killed at its 1 GB limit by a single
-  # exploratory request and took every market tool down with it, while host memory looked fine.
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.52.1
-    command:
-      # cAdvisor's appetite is its known drawback on a small node. `docker_only` drops the raw
-      # cgroup hierarchy (which is most of the series and none of the value here) and a 30s
-      # housekeeping interval matches the scrape rather than beating it fifteen times over.
-      - "--docker_only=true"
-      - "--housekeeping_interval=30s"
-      # `store_container_labels=false` drops EVERY container_label_*, which silently takes the
-      # swarm service name with it — and that is the label every panel and the memory alert group
-      # by. Measured: cAdvisor emitted `container_memory_working_set_bytes{id="/"}` and nothing
-      # else, so the whole Node & services dashboard was empty while cAdvisor reported healthy.
-      # The whitelist is the point of the pair: keep the one label, drop the rest.
-      - "--store_container_labels=false"
-      - "--whitelisted_container_labels=com.docker.swarm.service.name"
-      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,hugetlb,referenced_memory,cpu_topology,resctrl"
-    volumes:
-      # `rslave`, NOT a plain `ro` bind. Docker's data-root is /mnt/data/docker, which is a
-      # SEPARATE FILESYSTEM (/dev/sdb) — and a plain bind mount of `/` does not propagate the
-      # submounts beneath it, so /rootfs/mnt/data was an empty directory. cAdvisor asks Docker
-      # where its root is, looks under /rootfs/mnt/data/docker/image/overlayfs/layerdb/..., finds
-      # nothing, and fails to identify EVERY container:
-      #   failed to identify the read-write layer ID for container "ae727ab..." -
-      #   open /rootfs/mnt/data/docker/image/overlayfs/layerdb/mounts/.../mount-id: no such file
-      # It then reports only the root cgroup and looks perfectly healthy doing it.
-      - /:/rootfs:ro,rslave
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    networks:
-      - muffin-net
-    deploy:
-      # Reads THIS host's cgroups, so it belongs wherever the containers are. Single node today;
-      # a `global` mode would be the change if a worker is ever added.
-      placement:
-        constraints: [node.role == manager]
-      replicas: 1
-      restart_policy:
-        condition: any
-        delay: 10s
-      resources:
-        limits:
-          memory: 256M
-
-  # --- Host cpu/memory/DISK ------------------------------------------------
+  # --- Host cpu/memory/DISK, AND per-service memory via the textfile collector ---
+  #
+  # WHY THERE IS NO cADVISOR HERE. It was tried and removed. Docker on this node uses the
+  # CONTAINERD IMAGE STORE (`driver-type: io.containerd.snapshotter.v1`), so the classic
+  # graph-driver layout cAdvisor reads does not exist — `/mnt/data/docker/image/` holds only
+  # `identity-cache.db`, and it failed to identify EVERY container:
+  #
+  #   failed to identify the read-write layer ID for container "ae727ab..." -
+  #   open /rootfs/mnt/data/docker/image/overlayfs/layerdb/mounts/.../mount-id: no such file
+  #
+  # Measured across both factories and a recursive-bind fix: ZERO series carrying a `name=` label,
+  # only systemd slices, with a green Prometheus target the whole time. Pointing it at containerd
+  # (`--containerd-namespace=moby`) raised it from 1 series to 49 — all of them cgroup slices,
+  # still no container identity.
+  #
+  # `docker stats` asks Docker, which knows both the service name and the limit, and lands in
+  # node-exporter's textfile collector — machinery already here for the cache size. Fewer metrics
+  # than cAdvisor (no per-container network or disk IO) and 60s resolution rather than 30s, which
+  # is ample for the one question that matters: is a container approaching its own limit.
+  # It also returns 256M of limits to the node.
   # Disk is the reason this is not redundant with OCI. Measured 2026-08-27: `/` is at 70% because
   # Docker uses the containerd image store, so images live under /var/lib/containerd (20 G) rather
   # than the migrated data-root on /mnt/data (9% of 98 G). `daemon.json`'s `data-root` does not

@@ -23,23 +23,9 @@ scrape_configs:
     static_configs:
       - targets: ["127.0.0.1:9090"]
 
-  # Per-container cpu/memory/restarts. The memory series is the important one: it is compared
-  # against each container's OWN limit in the dashboard, because "1.4 GB" means nothing until you
-  # know whether the ceiling is 1.5 GB or 4 GB.
-  - job_name: cadvisor
-    static_configs:
-      - targets: ["cadvisor:8080"]
-    metric_relabel_configs:
-      # Swarm task names carry a slot and a task id (`muffin_openbb-api.1.e833qrc…`), so the raw
-      # label changes on EVERY redeploy and each deploy would start a brand-new series. Stripping
-      # it back to the service name is what makes a memory graph continuous across a deploy —
-      # without this, the panel that is supposed to show a slow leak resets to zero instead.
-      - source_labels: [container_label_com_docker_swarm_service_name]
-        target_label: service
-      - regex: "container_label_com_docker_swarm_.*"
-        action: labeldrop
-
-  # Host cpu/memory/disk. Disk is the reason this is not redundant with OCI Monitoring: `/` sits at
+  # Host cpu/memory/disk, PLUS per-service memory and CPU through the textfile collector — see
+  # the note on node-exporter in docker-compose.yaml for why cAdvisor is not here.
+  # Disk is the reason this is not redundant with OCI Monitoring: `/` sits at
   # 70% because images live under /var/lib/containerd, which the data-root move did not cover.
   - job_name: node
     static_configs:

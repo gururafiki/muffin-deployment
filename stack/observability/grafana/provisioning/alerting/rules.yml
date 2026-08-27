@@ -171,8 +171,7 @@ groups:
       datasourceUid: muffin-prometheus
       model:
         refId: A
-        expr: max by (service) (container_memory_working_set_bytes{service!=""}) / max by (service) (container_spec_memory_limit_bytes{service!=""}
-          > 0) * 100
+        expr: muffin_service_memory_bytes / muffin_service_memory_limit_bytes * 100
         instant: true
     - refId: B
       datasourceUid: __expr__
@@ -199,10 +198,11 @@ groups:
       muffin: infra
     annotations:
       summary: '{{ $labels.service }} is at {{ $values.B }}% of its memory limit'
-      description: Per-container, because the HOST looks fine when this happens. openbb-api was OOM-killed
-        at its 1 GB limit by one exploratory request and every market tool went with it, for ~15 seconds,
-        with `Exited (137)` the only evidence. supabase-kong measured 81% of its 512 MB on 2026-08-27,
-        so this is not hypothetical.
+      description: 'Per-service, because the HOST looks fine when this happens. openbb-api was OOM-killed
+        at its 1 GB limit by one exploratory request and every market tool went with it. Measured 2026-08-27:
+        supabase-kong at 83.2% of its 512 MB and firecrawl-api at 70.2% of 4 GB, so this is not hypothetical.
+        Sourced from `docker stats` via node-exporter, not cAdvisor, which cannot identify a container
+        under Docker''s containerd image store.'
   - uid: muffin-cache-hit-ratio-collapsed
     title: The provider cache has stopped serving hits
     condition: C
