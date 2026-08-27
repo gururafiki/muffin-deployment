@@ -1,0 +1,42 @@
+-- FRESHNESS NEEDS AN INDEX, NOT A DENORMALIZED COLUMN.
+--
+-- "Is this security still being priced?" cost 9-13 seconds, because every index on
+-- `security_price` leads with `security_id` and nothing indexes `date`. `EXPLAIN` on the
+-- freshness predicate showed a **Parallel Seq Scan** over all 10,947,145 rows:
+--
+--     max(date)                                        9,366 ms
+--     count(distinct security_id) where date > -7d    11,000 ms
+--     per-security max via LATERAL                    13,000 ms cold / 3,971 ms warm
+--
+-- ── WHY NOT A `last_price_at` COLUMN WITH A TRIGGER ───────────────────────────────────────────
+--
+-- That was the first design and it is the wrong one. The windows this index actually scans are
+-- tiny, measured 2026-08-27:
+--
+--     rows in the last  3 days      6,290
+--     rows in the last  7 days     21,730      <-- against 10,947,145 scanned today
+--     rows in the last 30 days    215,730
+--
+-- 500x fewer rows for the 7-day window, and a global `max(date)` becomes a rightmost-leaf lookup.
+-- The trigger buys nothing the index does not, and costs an invariant every future writer must
+-- remember not to break, a `one_shot` backfill, and a column free to drift from the table it
+-- summarises. The tell was in its own test plan: a row-level test would have passed while a
+-- statement-level trigger with a mis-declared transition table did nothing at all.
+--
+-- The index costs ~400 MB on a volume at 9% of 98 GB, and one more index to maintain on price
+-- inserts — a few thousand rows per run, eight runs a day.
+--
+-- ── WHY (date, security_id) AND NOT (date) ────────────────────────────────────────────────────
+--
+-- Every freshness question here is "how many DISTINCT securities were priced in the last N days",
+-- so `security_id` in the index makes it an INDEX-ONLY scan: the heap is never touched. With
+-- `(date)` alone Postgres would visit 21,730 heap tuples to read the id it already needed.
+--
+-- CONCURRENTLY is deliberately NOT used: migrations apply under `--single-transaction` (see
+-- ansible/muffin_stack.yml) and `create index concurrently` cannot run inside a transaction block.
+-- On 10.9M rows this takes tens of seconds ONCE, on the deploy that introduces it, and `if not
+-- exists` makes every later deploy free.
+create index if not exists security_price_date_sid_idx
+    on market.security_price (date, security_id);
+
+notify pgrst, 'reload schema';

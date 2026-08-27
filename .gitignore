@@ -14,3 +14,8 @@ ansible/apply_playbooks.sh
 !terraform/prod.auto.tfvars
 
 .DS_Store
+
+# Byte-compiled collectors. `py_compile` in the CI guard (quality.yml) leaves these behind;
+# one was committed by accident when that guard was first run locally.
+__pycache__/
+*.pyc
