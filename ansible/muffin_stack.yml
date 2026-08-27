@@ -399,8 +399,19 @@
           | sort -u | while read -r img; do echo "pull $img"; docker pull "$img" || true; done
       changed_when: true
 
+    # `--prune` REMOVES SERVICES THAT ARE NO LONGER IN THE FILE. Without it a deleted service keeps
+    # running for ever: cAdvisor was removed from this stack in a merged PR and was still up three
+    # hours later, holding 256M on a 24 GB node and scraped by nobody, because a stack deploy only
+    # ever ADDS and UPDATES.
+    #
+    # Safe here because the stack is FULLY DECLARED in one file that Ansible renders immediately
+    # above — a render failure fails the play before this runs, so `--prune` can only ever act on a
+    # service genuinely deleted from the file. The trade-off worth knowing: a service created by
+    # hand in the `muffin` namespace for debugging WILL be removed by the next deploy. That is the
+    # correct behaviour for a declarative stack, and it is why one-off containers on this node
+    # should be run with `docker run`, not `docker service create`.
     - name: docker stack deploy (images are public → anonymous pulls, no registry auth)
-      command: "docker stack deploy -c /home/ubuntu/docker-compose.yaml muffin"
+      command: "docker stack deploy --prune -c /home/ubuntu/docker-compose.yaml muffin"
 
 # --- 6. Supabase post-deploy migrations ------------------------------------
 # App tables reference auth.users, which GoTrue creates on ITS first boot — so these
