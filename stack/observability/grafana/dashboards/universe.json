@@ -10,7 +10,7 @@
     "muffin"
   ],
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},
@@ -44,8 +44,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -80,8 +83,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -116,8 +122,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -152,8 +161,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -188,8 +200,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           },
           "unit": "bytes"
         },
@@ -225,8 +240,11 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 1,
-            "fillOpacity": 8
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": true
           }
         },
         "overrides": []

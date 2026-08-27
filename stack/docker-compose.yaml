@@ -1166,10 +1166,24 @@ services:
       # housekeeping interval matches the scrape rather than beating it fifteen times over.
       - "--docker_only=true"
       - "--housekeeping_interval=30s"
+      # `store_container_labels=false` drops EVERY container_label_*, which silently takes the
+      # swarm service name with it — and that is the label every panel and the memory alert group
+      # by. Measured: cAdvisor emitted `container_memory_working_set_bytes{id="/"}` and nothing
+      # else, so the whole Node & services dashboard was empty while cAdvisor reported healthy.
+      # The whitelist is the point of the pair: keep the one label, drop the rest.
       - "--store_container_labels=false"
+      - "--whitelisted_container_labels=com.docker.swarm.service.name"
       - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,hugetlb,referenced_memory,cpu_topology,resctrl"
     volumes:
-      - /:/rootfs:ro
+      # `rslave`, NOT a plain `ro` bind. Docker's data-root is /mnt/data/docker, which is a
+      # SEPARATE FILESYSTEM (/dev/sdb) — and a plain bind mount of `/` does not propagate the
+      # submounts beneath it, so /rootfs/mnt/data was an empty directory. cAdvisor asks Docker
+      # where its root is, looks under /rootfs/mnt/data/docker/image/overlayfs/layerdb/..., finds
+      # nothing, and fails to identify EVERY container:
+      #   failed to identify the read-write layer ID for container "ae727ab..." -
+      #   open /rootfs/mnt/data/docker/image/overlayfs/layerdb/mounts/.../mount-id: no such file
+      # It then reports only the root cgroup and looks perfectly healthy doing it.
+      - /:/rootfs:ro,rslave
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
