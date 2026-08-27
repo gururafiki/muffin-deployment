@@ -89,6 +89,13 @@ services:
       resources:
         limits:
           memory: 256M
+      labels:
+        # THE CONFIG'S HASH, IN THE SPEC. traefik.yml is bind-mounted, and a bind-mounted file is
+        # not part of a service's spec — so `docker stack deploy` sees no change and traefik keeps
+        # serving the OLD static config, silently. Putting the hash here makes an edited
+        # traefik.yml a spec change, so exactly the services whose config moved get restarted.
+        # This label is inert otherwise: traefik reads OTHER services' labels, never its own.
+        - "muffin.config-hash={{ cfg_hash_traefik | default('none') }}"
 
   # --- LangGraph agent server (EXPOSED via Traefik: api.<domain>) ---------
   langgraph-api:
@@ -1016,6 +1023,11 @@ services:
       resources:
         limits:
           memory: 192M
+      labels:
+        # See the note on traefik. Covers nginx.conf AND openresty.conf — the shared dict the
+        # /metrics counters live in is declared in the latter, so a change to either has to
+        # restart this service or the counters silently do not exist.
+        - "muffin.config-hash={{ cfg_hash_http_cache | default('none') }}"
 
   # ===========================================================================
   # OBSERVABILITY
@@ -1079,6 +1091,8 @@ services:
       resources:
         limits:
           memory: 512M
+      labels:
+        - "muffin.config-hash={{ cfg_hash_observability | default('none') }}"
 
   # --- Dashboards + alerting (EXPOSED via Traefik, behind Cloudflare Access) ---
   grafana:
@@ -1136,6 +1150,9 @@ services:
         - "traefik.http.routers.grafana.entrypoints=websecure"
         - "traefik.http.routers.grafana.tls.certresolver=cloudflare"
         - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+        # Grafana reads its provisioning directory at STARTUP ONLY, so without this a new dashboard
+        # or alert rule is staged to the node and never loaded.
+        - "muffin.config-hash={{ cfg_hash_observability | default('none') }}"
 
   # --- Per-CONTAINER cpu/memory/restarts -----------------------------------
   # OCI Monitoring already covers the VM. It cannot see inside a container, and per-container
