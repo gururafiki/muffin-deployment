@@ -104,9 +104,15 @@ begin
     join pg_class dv    on dv.oid = r.ev_class
     join pg_class src   on src.oid = d.refobjid
     join pg_namespace n on n.oid = src.relnamespace
+    -- BOTH source views, not just one. `sector_constituents` is dropped and recreated further
+    -- down this same file, and a dependent of IT was just as invisible to a loop that only knew
+    -- about `security_current`: `market.data_defect` (migration 134) reads it to assert the
+    -- de-duplication still works, and broke the deploy on pass 2 with
+    -- `cannot drop view market.sector_constituents because other objects depend on it`.
+    -- Fifth instance of this shape. The set is named here rather than the dependents.
     where n.nspname = 'market'
-      and src.relname = 'security_current'
-      and dv.relname <> 'security_current'
+      and src.relname in ('security_current', 'sector_constituents')
+      and dv.relname not in ('security_current', 'sector_constituents')
   loop
     -- DROP BY RELKIND. A MATERIALIZED view also has a `pg_rewrite` entry, so it is discovered by
     -- the query above — and `drop view` on one raises `is not a view`, failing the whole deploy.

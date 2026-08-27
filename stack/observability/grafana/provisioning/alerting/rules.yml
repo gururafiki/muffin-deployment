@@ -347,3 +347,106 @@ groups:
         \ data-root on /mnt/data (9% of 98 G), and daemon.json's `data-root` does not control it. Cheap\
         \ relief: `docker image prune -a` and reclaim the stale /var/lib/docker. The real fix is containerd's\
         \ own `root` \u2014 see todos.md."
+  - uid: muffin-data-defect
+    title: A data-correctness invariant is broken
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "select count(*)::float8 as value\n  from market.universe_sample\n where sampled_at =\
+          \ (select max(sampled_at) from market.universe_sample\n                      where metric like\
+          \ 'defect.%')\n   and metric like 'defect.%'\n   -- `extreme_1y_returns` is a GAUGE, not an\
+          \ invariant: of 40 securities returning >= +300%,\n   -- 34 were REAL (SNDK +2,692%, MU +580%).\
+          \ Asserting zero on it would cry wolf for ever.\n   and metric <> 'defect.extreme_1y_returns'\n\
+          \   and value > 0"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: data-quality
+    annotations:
+      summary: '{{ $values.B }} data-correctness invariant(s) are non-zero'
+      description: Each of these was a REAL defect that returned HTTP 200 while corrupting data. The all-zero
+        CUSIP placeholder merged Accenture, Seagate, TE Connectivity and NXP into ONE security. Duplicate
+        constituents double-counted the sector donut while the percentages still looked right, because
+        renormalising cancels a uniform double count. A zero close made 154 securities read -100% on all
+        seven periods. Query `market.data_defect` for which one and its detail. Until now these were checked
+        once a night and kept only a pass/fail bit.
+  - uid: muffin-metric-unit-flip
+    title: A metric's median moved by more than 3x
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "-- Compares the newest sample of each metric's p50 against the previous one. A unit change\
+          \ is\n-- the only thing that moves a median 100x overnight; real drift moves it a few percent.\n\
+          with s as (\n  select metric, value,\n         row_number() over (partition by metric order\
+          \ by sampled_at desc) as rn\n    from market.universe_sample\n   where metric like 'dist.%.p50'\
+          \ and sampled_at > now() - interval '2 days'\n)\nselect count(*)::float8 as value from (\n \
+          \ select metric,\n         max(value) filter (where rn = 1) as newest,\n         max(value)\
+          \ filter (where rn = 2) as prev\n    from s group by metric\n) q\n where prev is not null and\
+          \ newest is not null\n   and abs(prev) > 0.000001\n   and (newest / prev > 3 or newest / prev\
+          \ < 0.333)"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: data-quality
+    annotations:
+      summary: '{{ $values.B }} metric median(s) moved more than 3x since the last sample'
+      description: "THE UNIT-FLIP TRIPWIRE. The fraction/percent confusion has hit this schema three separate\
+        \ times: OpenBB returning performance as a fraction (-0.0366 meaning -3.66%), the shared pct()\
+        \ that rendered NVIDIA at a 46% dividend yield \u2014 wrong by two orders of magnitude and entirely\
+        \ plausible-looking \u2014 and surprise_percent. Every one was invisible per row and obvious in\
+        \ the aggregate, which is why this watches the MEDIAN rather than any value. Compare `dist.<code>.p50`\
+        \ across the last two samples."
