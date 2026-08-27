@@ -956,18 +956,25 @@ console.log('\ncurrency — the venue overrules a provider that contradicts it')
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const warmup = await Deno.readTextFile(
-    new URL('../../../../.github/workflows/market-warmup.yml', import.meta.url),
+  // THE SCHEDULE MOVED INTO THE DATABASE (migration 133). It used to live in a
+  // `RESOURCES=$(printf ...)` block in .github/workflows/market-warmup.yml, which GitHub was
+  // running 6.8 times a day against a nominal 8, every run 19-127 minutes late. The source of
+  // truth is now `market.cron_resource`, seeded in the migration.
+  //
+  // THIS PARSE IS NOT COSMETIC. Deleting that workflow would have silently deleted the two guards
+  // below with it — including the one that caught `exchange-listings` being registered, deployed,
+  // reachable and never invoked for three days while sixteen venues went un-enumerated.
+  const schedulerMigration = await Deno.readTextFile(
+    new URL('../../migrations/133-the-scheduler-belongs-in-the-database.sql', import.meta.url),
   )
-
-  // The names the cron POSTs, from the `RESOURCES=$(printf ...)` block.
-  const block = warmup.match(/RESOURCES=\$\(printf[\s\S]*?\)\n/)?.[0] ?? ''
-  // The trailing `)` is not optional decoration — the LAST entry in the list ends with it instead
-  // of a line-continuation `\`, so a pattern that only allows `\` silently drops one resource. It
-  // dropped `derive-classifications`, which meant the check above had never actually verified it.
-  // Found by the scheduling check below reporting it as unscheduled when it plainly was not.
-  const cronResources = [...block.matchAll(/^\s{10,}([a-z][a-z-]+)\s*[\\)]?$/gm)].map((m) => m[1])
-  check(cronResources.length > 10, 'found the cron resource list', `${cronResources.length} names`)
+  const seed = schedulerMigration.match(
+    /insert into market\.cron_resource \(position, resource\) values([\s\S]*?)on conflict/,
+  )?.[0] ?? ''
+  const cronResources = [...seed.matchAll(/\(\s*\d+,\s*'([a-z][a-z-]+)'\)/g)].map((m) => m[1])
+  // `observability-sample` is scheduled by its OWN pg_cron job rather than the rotation (it costs
+  // no provider quota, so it runs hourly), so it is added here to keep the reverse check honest.
+  cronResources.push('observability-sample')
+  check(cronResources.length > 10, 'found the cron resource seed', `${cronResources.length} names`)
 
   // What the function will accept: `RESOURCES` keys in resources.ts plus the EXTRA allow-list.
   const resourcesFile = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
@@ -1278,7 +1285,7 @@ console.log('\nresource registry — the cron and the function agree')
   const unscheduled = [...accepted].filter((r) => !ON_DEMAND.has(r) && !cronResources.includes(r))
   check(unscheduled.length === 0,
     'every backlog resource is actually SCHEDULED, not merely reachable',
-    unscheduled.length ? `never runs on the cron: ${unscheduled.join(', ')}` : '')
+    unscheduled.length ? `absent from market.cron_resource: ${unscheduled.join(', ')}` : '')
 
   // A REFUSED SWEEP MUST NOT READ AS A FINISHED ONE, and a run that produced nothing must not
   // overwrite what earlier runs recorded. Both were true of `exchange-listings` until 2026-08-14:

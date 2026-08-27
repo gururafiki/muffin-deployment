@@ -34,8 +34,8 @@ groups:
           \ alert for its first\n -- half-day \u2014 which is exactly how the first alert anyone sees\
           \ becomes one they ignore.\n -- Observed on 2026-08-27: it fired on three resources that had\
           \ genuinely failed inside a\n -- deploy window and already recovered, because 73 minutes of\
-          \ history cannot contain a\n -- 12-hour success.\n where first_seen < now() - interval '12 hours'\n\
-          \   and (last_ok is null or last_ok < now() - interval '12 hours')"
+          \ history cannot contain a\n -- 12-hour success.\n where first_seen < now() - interval '8 hours'\n\
+          \   and (last_ok is null or last_ok < now() - interval '8 hours')"
     - refId: B
       datasourceUid: __expr__
       model:
@@ -61,12 +61,60 @@ groups:
       muffin: pipeline
     annotations:
       summary: '{{ $values.B }} refresh resource(s) have not succeeded in 12 hours'
-      description: "The warm-up runs every 3 hours, so 12 hours is four consecutive misses \u2014 a broken\
-        \ resource rather than a bad afternoon. A resource is only judged once it has been RECORDED for\
-        \ longer than the threshold, so a newly added one is silently exempt for its first 12 hours: we\
-        \ cannot tell 'broken' from 'new' before then, and guessing wrong in the noisy direction is worse.\
-        \ KNOWN LIMIT: this can only see a resource that has run at some point in the last 30 days; one\
-        \ that is registered but never scheduled is caught by logic-check's scheduling guard instead."
+      description: "EIGHT hours, tightened from twelve. Twelve was calibrated for GitHub Actions, whose\
+        \ scheduled runs were 19-127 minutes late with gaps up to 13.3 HOURS \u2014 the alert window had\
+        \ to exceed the scheduler's own unreliability or it would have fired on that instead. The pg_cron\
+        \ rotation completes a sweep every 3.2 hours, so 8 hours is two missed sweeps and means something\
+        \ again. A resource is only judged once it has been RECORDED for longer than the threshold, so\
+        \ a newly added one is exempt for its first 8 hours."
+  - uid: muffin-scheduler-silent
+    title: The scheduler has stopped firing
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "select coalesce(max(value), 9999)::float8 as value\n  from market.universe_sample\n where\
+          \ metric = 'scheduler.minutes_since_tick'\n   and sampled_at = (select max(sampled_at) from\
+          \ market.universe_sample)"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 30
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: pg_cron last fired {{ $values.B }} minutes ago (expected every 5)
+      description: "THIS IS THE ALERT THAT REPLACES GITHUB'S OWN VISIBILITY. Moving the warm-up into pg_cron\
+        \ removed the last external scheduler, so nothing else drives the pipeline and the failure mode\
+        \ is SILENT \u2014 the data simply stops being refreshed while every count stays plausible for\
+        \ days. The rotation fires every 5 minutes; past 30 it has stopped. `coalesce(..., 9999)` is deliberate:\
+        \ NO ROW means the sampler itself is not running, which is the same emergency, and must not read\
+        \ as healthy. Check `select * from cron.job_run_details order by start_time desc limit 20` on\
+        \ the node."
   - uid: muffin-backlog-stalled
     title: A backlog is not draining while its runs report success
     condition: C
