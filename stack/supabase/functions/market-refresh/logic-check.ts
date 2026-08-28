@@ -1141,6 +1141,10 @@ console.log('\nresource registry — the cron and the function agree')
     // backfill counts BARS in `written` and SECURITIES in `securities`, deliberately
     // separately: ~7,300 rows per security makes a bar count useless as progress.
     DAILY_HISTORY_RESOURCE: [],
+    // A SWEEP, NOT A BACKLOG: `remaining` is DAYS still to walk, computed from the cursor
+    // against its floor. `walkedTo` and `stopAt` are the only identifiers involved, and
+    // the units are days rather than securities — which is exactly why this list exists.
+    EARNINGS_HISTORY_RESOURCE: ['walkedTo', 'stopAt', 'getTime'],
     XBRL_RESOURCE: [],
     SHARE_STATS_RESOURCE: [],
     NEWS_RESOURCE: [],

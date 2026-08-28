@@ -308,6 +308,7 @@ const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const DAILY_HISTORY_RESOURCE = 'security-daily-history'
+const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
 const QUARTERS_RESOURCE = 'security-quarters'
@@ -364,6 +365,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [DAILY_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [EARNINGS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [QUARTERS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1914,6 +1916,155 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         throttledOut,
         lastError,
         remaining: await backlogSize(market, 'pending_daily_history'),
+      })
+    }
+
+    if (resource === EARNINGS_HISTORY_RESOURCE) {
+      // ACTUAL-VERSUS-ESTIMATE, FROM THE ENDPOINT WE ALREADY CALL.
+      //
+      // `security-eps-history` bought this from alpha_vantage at 25 calls a DAY, one symbol per
+      // call, and reached 79 securities in weeks. The forward earnings calendar had the same data
+      // all along and nobody had asked it for a PAST range: measured 2026-08-28, one 3-day window
+      // returns 643 companies WITH `eps_actual`, `eps_consensus` and `surprise_percent`, and 2018
+      // answers as readily as 2024. That resource is retired (migration 138).
+      //
+      // A SWEEP, NOT A BACKLOG. There is no entity to ask about — the resource walks a calendar
+      // backwards — so what it remembers is a POSITION, not a negative cache.
+      const deadline = Date.now() + 60_000
+      const CHUNK_DAYS = 3
+
+      const { data: cur, error: cErr } = await market
+        .from('earnings_history_cursor')
+        .select('walked_to,stop_at')
+        .limit(1)
+        .maybeSingle()
+      if (cErr) throw new Error(`earnings_history_cursor read failed: ${cErr.message}`)
+      let walkedTo = new Date(String(cur?.walked_to ?? new Date().toISOString().slice(0, 10)))
+      const stopAt = new Date(String(cur?.stop_at ?? '2015-01-01'))
+
+      if (walkedTo <= stopAt) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'the sweep has reached its floor' })
+      }
+
+      // The same resolver the forward calendar uses, and for the same reason: loading
+      // `symbol_security` whole silently returns a twelfth of it under PGRST_DB_MAX_ROWS, which
+      // once matched 22 of 753 rows while reading like a fact about coverage.
+      const idBySymbol = new Map<string, string>()
+      const resolve = async (symbols: string[]) => {
+        const unknown = [...new Set(symbols)].filter((sym) => !idBySymbol.has(sym))
+        for (let i = 0; i < unknown.length; i += 100) {
+          const chunk = unknown.slice(i, i + 100)
+          const { data, error } = await market
+            .from('symbol_security')
+            .select('symbol,security_id')
+            .in('symbol', chunk)
+          if (error) throw new Error(`symbol_security read failed: ${error.message}`)
+          for (const r of data ?? []) idBySymbol.set(String(r.symbol).toUpperCase(), r.security_id as string)
+          for (const sym of chunk) if (!idBySymbol.has(sym)) idBySymbol.set(sym, '')
+        }
+      }
+
+      const iso = (d: Date) => d.toISOString().slice(0, 10)
+      let fetched = 0, written = 0, matched = 0, windows = 0, failed = 0
+      let lastError: string | null = null
+
+      while (walkedTo > stopAt && Date.now() < deadline - TAIL_RESERVE_MS) {
+        const end = new Date(walkedTo)
+        const start = new Date(end.getTime() - (CHUNK_DAYS - 1) * 86_400_000)
+        windows++
+        let rows: Record<string, unknown>[] = []
+        try {
+          // THREE DAYS, NOT FIVE. A five-day window times out on this endpoint — the chunk size is
+          // part of the contract rather than a tuning knob.
+          rows = await fetcher(
+            `/api/v1/equity/calendar/earnings?provider=nasdaq` +
+              `&start_date=${iso(start)}&end_date=${iso(end)}`,
+            Math.min(30_000, deadline - Date.now()),
+          )
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          lastError = msg
+          if (throttled(msg)) break
+          // THE CURSOR IS NOT ADVANCED ON A FAILURE. A window we could not read must be re-read,
+          // or a thirty-second provider blip costs three days of history permanently — the same
+          // rule `security-insider`'s cursor follows.
+          break
+        }
+        fetched += rows.length
+
+        // Only rows that actually REPORTED carry a surprise; the rest are scheduled dates the
+        // forward calendar already owns.
+        const reported = rows.filter((r) => r.eps_actual !== null && r.eps_actual !== undefined)
+        await resolve(reported.map((r) => String(r.symbol ?? '').toUpperCase()))
+
+        const out: Record<string, unknown>[] = []
+        for (const r of reported) {
+          const sid = idBySymbol.get(String(r.symbol ?? '').toUpperCase())
+          if (!sid) continue
+          const actual = Number(r.eps_actual)
+          const est = r.eps_consensus === null || r.eps_consensus === undefined ? null : Number(r.eps_consensus)
+          // PERIOD END: the calendar reports a MONTH ('2026-06') while this table's key is a DATE.
+          // A 52/53-week filer closes its quarter on the Saturday nearest the month end and lands
+          // in the following month about half the time, so no exact date is recoverable here — the
+          // month's last day is used CONSISTENTLY, which is what a primary key needs. The precise
+          // fiscal end lives in `security_metric.as_of`, from the filing.
+          const pe = String(r.period_ending ?? '')
+          const periodEnding = /^\d{4}-\d{2}$/.test(pe)
+            ? iso(new Date(Date.UTC(Number(pe.slice(0, 4)), Number(pe.slice(5, 7)), 0)))
+            : (/^\d{4}-\d{2}-\d{2}$/.test(pe) ? pe : null)
+          if (!periodEnding) continue
+          // A FRACTION FROM THE WRAPPER, A PERCENT IN THE COLUMN. Measured: XOM -0.0435 against a
+          // computed -4.35%. Storing it raw in a column named `_pct` is the fraction/percent
+          // confusion this schema has already had three times.
+          const spRaw = r.surprise_percent
+          out.push({
+            security_id: sid,
+            period_ending: periodEnding,
+            eps_actual: actual,
+            eps_estimated: est,
+            surprise: est === null ? null : actual - est,
+            surprise_pct: spRaw === null || spRaw === undefined ? null : Number(spRaw) * 100,
+            reported_date: r.report_date ?? null,
+            source_code: 'nasdaq',
+            as_of: new Date().toISOString(),
+          })
+        }
+        matched += out.length
+
+        for (let i = 0; i < out.length; i += 500) {
+          const { error } = await market
+            .from('security_eps_history')
+            .upsert(
+              dedupeBy(out.slice(i, i + 500), (r) => `${r.security_id}|${r.period_ending}`),
+              { onConflict: 'security_id,period_ending' },
+            )
+          if (error) throw new Error(`security_eps_history upsert failed: ${error.message}`)
+        }
+        written += out.length
+
+        // Advanced ONLY after the window's rows are written, for the same reason the deep-daily
+        // marker is: a cursor that moves before the data lands loses the window silently.
+        walkedTo = new Date(start.getTime() - 86_400_000)
+        const { error: uErr } = await market
+          .from('earnings_history_cursor')
+          .update({ walked_to: iso(walkedTo), updated_at: new Date().toISOString() })
+          .eq('only_row', true)
+        if (uErr) throw new Error(`earnings_history_cursor update failed: ${uErr.message}`)
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        written,
+        matched,
+        fetched,
+        windows,
+        failed,
+        lastError,
+        walkedTo: iso(walkedTo),
+        remaining: Math.max(0, Math.round((walkedTo.getTime() - stopAt.getTime()) / 86_400_000)),
       })
     }
 

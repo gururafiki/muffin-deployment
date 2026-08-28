@@ -27,8 +27,8 @@ insert into market.countries (iso2, name, flag, drillable) values ('ZK','Teststa
 
 -- A: statements exist, WITHOUT a currency, and there is a US ticker to ask SEC with.
 --    This is the 8,559. It must be queued.
-insert into market.security (security_id, name, security_type_code, country_iso2) values
-  ('00000000-0000-0000-0000-000000008901', 'T89 No Currency', 'equity', 'ZK')
+insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
+  ('00000000-0000-0000-0000-000000008901', 'T89 No Currency', 'equity', 'ZK', 8901)
 on conflict (security_id) do nothing;
 insert into market.security_identifier (kind_code, value, security_id, source_code) values
   ('ticker', 'T89A', '00000000-0000-0000-0000-000000008901', 'yfinance')
@@ -44,8 +44,8 @@ on conflict do nothing;
 
 -- B: statements exist WITH a currency. Nothing left to want — must NOT be queued, or the backlog
 --    never drains and the resource re-fetches the same rows on every run, forever.
-insert into market.security (security_id, name, security_type_code, country_iso2) values
-  ('00000000-0000-0000-0000-000000008902', 'T89 Has Currency', 'equity', 'ZK')
+insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
+  ('00000000-0000-0000-0000-000000008902', 'T89 Has Currency', 'equity', 'ZK', 8902)
 on conflict (security_id) do nothing;
 insert into market.security_identifier (kind_code, value, security_id, source_code) values
   ('ticker', 'T89B', '00000000-0000-0000-0000-000000008902', 'yfinance')
@@ -57,8 +57,8 @@ on conflict do nothing;
 -- C: statements exist without a currency and there is NO US ticker. SEC is addressable by US
 --    ticker only, so re-queueing this buys nothing: the run would spend a call on yfinance and
 --    write back the same four currency-less periods.
-insert into market.security (security_id, name, security_type_code, country_iso2) values
-  ('00000000-0000-0000-0000-000000008903', 'T89 No US Line', 'equity', 'ZK')
+insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
+  ('00000000-0000-0000-0000-000000008903', 'T89 No US Line', 'equity', 'ZK', 8903)
 on conflict (security_id) do nothing;
 insert into market.security_provider_symbol (security_id, provider_code, symbol) values
   ('00000000-0000-0000-0000-000000008903', 'yfinance', 'T89C.ZK')
@@ -71,8 +71,8 @@ on conflict do nothing;
 --    A US OTC line of a company that files nothing. Without an exit of its own this is re-queued
 --    every run for ever: SEC answers nothing, yfinance re-writes the same currency-less periods,
 --    the view re-admits it. That shape has now cost this pipeline five separate resources.
-insert into market.security (security_id, name, security_type_code, country_iso2, statement_currency_missing_at) values
-  ('00000000-0000-0000-0000-000000008904', 'T89 Does Not File', 'equity', 'ZK', now())
+insert into market.security (security_id, name, security_type_code, country_iso2, cik, statement_currency_missing_at) values
+  ('00000000-0000-0000-0000-000000008904', 'T89 Does Not File', 'equity', 'ZK', 8904, now())
 on conflict (security_id) do nothing;
 insert into market.security_identifier (kind_code, value, security_id, source_code) values
   ('ticker', 'T89D', '00000000-0000-0000-0000-000000008904', 'yfinance')
@@ -83,8 +83,8 @@ on conflict do nothing;
 
 -- E: the same, but the mark is older than the 30-day expiry. It must come BACK — a company can
 --    begin filing, and a negative cache that never expires is a permanent exclusion.
-insert into market.security (security_id, name, security_type_code, country_iso2, statement_currency_missing_at) values
-  ('00000000-0000-0000-0000-000000008905', 'T89 Filed Later', 'equity', 'ZK', now() - interval '40 days')
+insert into market.security (security_id, name, security_type_code, country_iso2, cik, statement_currency_missing_at) values
+  ('00000000-0000-0000-0000-000000008905', 'T89 Filed Later', 'equity', 'ZK', 8905, now() - interval '40 days')
 on conflict (security_id) do nothing;
 insert into market.security_identifier (kind_code, value, security_id, source_code) values
   ('ticker', 'T89E', '00000000-0000-0000-0000-000000008905', 'yfinance')
@@ -92,6 +92,7 @@ on conflict (kind_code, value) do nothing;
 insert into market.security_statement (security_id, statement, period_ending, currency, data, source_code) values
   ('00000000-0000-0000-0000-000000008905', 'income', date '2025-09-27', null, '{}'::jsonb, 'yfinance')
 on conflict do nothing;
+
 
 do $$
 declare n integer; w text; us text; sym text;
@@ -159,6 +160,52 @@ begin
     raise exception
       'a 40-day-old statement_currency_missing_at still excludes the security (% rows) — a negative cache that does not expire is a permanent exclusion', n;
   end if;
+end $$;
+
+-- ── 8. AND A SECURITY SEC CANNOT BE ASKED ABOUT AT ALL IS NOT QUEUED ──────────────────────────
+--
+-- THE FIX FOR A FIVE-DAY STALL. `security-statements` returned byte-identical results on five
+-- consecutive runs — `written: 240, remaining: 8668` — because this population admitted securities
+-- SEC can never answer for. The gate was `us_ticker is not null`, and a US ticker is NOT a CIK:
+-- OpenFIGI's US lookup returns a thin OTC foreign-ordinary line for most foreign companies, so
+-- D05.SI and 005930.KS looked addressable and were not. Measured: **0 securities without a CIK
+-- have ever received a `sec`-sourced statement**, while 2,416 of them sat in this queue starving
+-- the 3,328 that SEC can serve.
+insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
+  ('00000000-0000-0000-0000-000000008950', 'T89 Foreign No CIK', 'equity', 'ZK', null)
+on conflict (security_id) do nothing;
+insert into market.security_identifier (kind_code, value, security_id, source_code) values
+  ('ticker', 'T89NOCIK', '00000000-0000-0000-0000-000000008950', 'yfinance')
+on conflict (kind_code, value) do nothing;
+insert into market.security_provider_symbol (security_id, provider_code, symbol) values
+  ('00000000-0000-0000-0000-000000008950', 'yfinance', 'T89N.ZK')
+on conflict (security_id, provider_code) do nothing;
+insert into market.security_statement (security_id, statement, period_ending, currency, data, source_code) values
+  ('00000000-0000-0000-0000-000000008950', 'income', date '2025-09-27', null, '{}'::jsonb, 'yfinance')
+on conflict do nothing;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from market.pending_statements
+   where security_id = '00000000-0000-0000-0000-000000008950';
+  if n <> 0 then
+    raise exception
+      'a security with statements, no currency and NO CIK is queued (% rows) — SEC is addressable '
+      'only by CIK, so this security can never leave the backlog. This is the stall that returned '
+      '`written: 240, remaining: 8668` on five consecutive runs.', n;
+  end if;
+
+  -- ...and the CIK holder in the same state IS still queued, or the gate has simply emptied the
+  -- backlog rather than scoping it.
+  select count(*) into n from market.pending_statements
+   where security_id = '00000000-0000-0000-0000-000000008901';
+  if n <> 1 then
+    raise exception
+      'a security with statements, no currency and a CIK is NOT queued (% rows) — the CIK gate has '
+      'disabled the no_currency population instead of scoping it to what SEC can answer', n;
+  end if;
+  raise notice '  ok  the no_currency queue is scoped to CIK holders, and still contains them';
 end $$;
 
 rollback;
