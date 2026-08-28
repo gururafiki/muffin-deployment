@@ -829,6 +829,30 @@ next one added beside it. The size floor on the cross table is now the `$minsize
 still 20 by default, selectable down to 1 (538 buckets against 106), so the exclusion is the
 reader's choice rather than an invisible one.
 
+#### The Data coverage dashboard: three levels, then breakdowns
+
+`Muffin — Data coverage` (uid `muffin-coverage`) is four sections:
+
+1. **Scoped view** — `$country` / `$sector` variables drive a funnel (the five stages that genuinely
+   gate each other), independent facet bars, a per-facet table and the country × sector cross. All/All
+   is the universe; US/energy is one cell.
+2. **By country** — one row per country, one column per each of the 19 facets.
+3. **By sector** — the same matrix per sector, plus a ranked bar of overall sector completeness.
+4. **Breakdowns** — every remaining dimension `coverage_sample` holds: security type (now + trend),
+   MSCI tier, market-cap band, style, MSCI region, World Bank income group, quote currency, industry,
+   price freshness, and equities with no sector.
+
+**Sections 2–4 are WHOLE-UNIVERSE and are NOT filtered by `$country`/`$sector`.** `coverage_sample`
+holds one bucket list per dimension, so there is no (cap band × country) cross to filter on — reading
+a breakdown as if it were scoped would be reading a number that is not what it says. The panel
+descriptions state this.
+
+Two traps these panels are typed against. **Completeness must be typed**: 15,159 of 27,629 securities
+are bonds, so the untyped "no sector" bucket reads **16,401** where the actionable equity number is
+**1,122**. And **ETFs read 0% complete** because `required_facet` asks them for a `security_price`
+row while ETF returns are computed from `etf/historical` into `performance` — a one-row fix in
+`required_facet`, not an ingestion failure.
+
 ## Remote state (OCI Object Storage)
 
 Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend
