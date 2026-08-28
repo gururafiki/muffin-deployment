@@ -270,6 +270,36 @@ jobs:
       # cannot catch it, because an interactive ssh lands in bash; only Ansible uses /bin/sh.
       # Two tasks in the playbook already declared bash — the third did not, which is precisely
       # the "a rule written at one call site is not a rule" shape this repo keeps paying for.
+      # A SQL DATASOURCE'S DATABASE NAME BELONGS IN jsonData, AND THE WRONG PLACE STILL CONNECTS.
+      # Grafana 11+ moved it there. The deprecated top-level `database:` connects fine — the health
+      # check says "Database Connection OK" and panels return rows — but the settings UI reads
+      # jsonData.database, so the form field renders EMPTY and the page asks you to configure the
+      # database. Worse, pressing Save on that page writes the empty field back and takes every
+      # Postgres panel down. A working system one click from broken is exactly the shape this repo
+      # keeps paying for, so it is a guard rather than a comment.
+      - name: Offline check — SQL datasources put the database in jsonData
+        run: |
+          python3 - <<'PYCHK'
+          import glob, sys, yaml
+          SQL = ('postgres', 'grafana-postgresql-datasource', 'mysql', 'mssql')
+          bad = []
+          for path in sorted(glob.glob('stack/observability/grafana/provisioning/datasources/*.yml')):
+              doc = yaml.safe_load(open(path)) or {}
+              for ds in doc.get('datasources', []) or []:
+                  if ds.get('type') not in SQL:
+                      continue
+                  name = ds.get('name', '?')
+                  if 'database' in ds:
+                      bad.append(f"{path}: '{name}' sets a TOP-LEVEL `database:` (deprecated; the UI cannot see it)")
+                  if not (ds.get('jsonData') or {}).get('database'):
+                      bad.append(f"{path}: '{name}' has no `jsonData.database`")
+          if bad:
+              print('::error::a SQL datasource declares its database in the wrong place')
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print('  ok  every SQL datasource declares jsonData.database')
+          PYCHK
       - name: Offline check — bash-only syntax declares bash
         run: |
           python3 - <<'PYCHK'
