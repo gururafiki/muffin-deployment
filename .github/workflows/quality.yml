@@ -325,6 +325,29 @@ jobs:
               sys.exit(1)
           print('  ok  every task using bash-only syntax declares bash')
           PYCHK
+      # THE COLLECTORS ARE REAL FILES, AND THEY MUST COMPILE. `muffin-service-metrics.py` was once
+      # an inline `copy: content:` block and its `{{json .}}` format string killed a deploy, because
+      # Ansible renders inline content through Jinja. They are `copy: src:` files now — which also
+      # means CI can simply run them through the compiler, and a syntax error stops being something
+      # you discover on the node.
+      - name: Offline check — observability collectors compile
+        run: |
+          python3 - <<'PYCHK'
+          import glob, py_compile, sys
+          bad = []
+          for path in sorted(glob.glob('stack/observability/collectors/*.py')):
+              try:
+                  py_compile.compile(path, doraise=True)
+              except py_compile.PyCompileError as e:
+                  bad.append(f"{path}: {e}")
+          if bad:
+              print('::error::a collector does not compile')
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          n = len(glob.glob('stack/observability/collectors/*.py'))
+          print(f'  ok  {n} python collector(s) compile')
+          PYCHK
       - name: Offline check — inline-staged scripts are valid Jinja
         run: |
           pip install jinja2 --quiet

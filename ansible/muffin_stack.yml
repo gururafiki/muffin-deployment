@@ -287,6 +287,49 @@
         minute: "*"
         job: "/usr/local/bin/muffin-cache-size.sh"
 
+    # THE EGRESS COLLECTOR IS LONG-RUNNING, so it is a systemd unit rather than a cron job like the
+    # two above: it tails a tcpdump stream and keeps counters in memory. A cron-driven sample would
+    # see nothing, because what it counts is CONNECTION ESTABLISHMENT — an instant, not a level.
+    - name: Install the SNI egress collector
+      copy:
+        src: "{{ muffin_template_dir }}/observability/collectors/muffin-egress.py"
+        dest: /usr/local/bin/muffin-egress.py
+        mode: "0755"
+      register: _egress_script
+
+    - name: Install the egress collector service
+      copy:
+        dest: /etc/systemd/system/muffin-egress.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Muffin SNI egress collector
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /usr/local/bin/muffin-egress.py
+          Restart=always
+          RestartSec=10
+          # Bounded on purpose. The BPF filter runs in the kernel so only ClientHello packets reach
+          # userspace, and the collector holds a small counter table — measured well under this. If
+          # it ever approaches the cap the filter has stopped doing its job, and being killed is
+          # the correct outcome on a node whose documented failure mode is an OOM.
+          MemoryMax=192M
+          CPUQuota=25%
+
+          [Install]
+          WantedBy=multi-user.target
+      register: _egress_unit
+
+    - name: Enable and (re)start the egress collector
+      systemd:
+        name: muffin-egress
+        enabled: true
+        state: "{{ 'restarted' if (_egress_script.changed or _egress_unit.changed) else 'started' }}"
+        daemon_reload: true
+
     - name: Render the Swarm stack file
       template:
         src: "{{ muffin_template_dir }}/docker-compose.yaml"
