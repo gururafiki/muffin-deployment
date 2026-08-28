@@ -27,6 +27,7 @@ secrets:
     external: true               # see the note on the portainer service
 
 volumes:
+  openbb-cache:
   # Cache entries are rebuildable by definition, but a rebuild costs a full re-fetch at the
   # providers' rate limits — which is the whole reason this exists.
   http-cache-data:
@@ -764,6 +765,14 @@ services:
       ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
       TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
       BIZTOC_API_KEY: "{{ biztoc_api_key | default('') }}"
+    volumes:
+      # openbb downloads ~73 MB of SEC company directories (sec_company_filings.sqlite and friends)
+      # to validate symbols and map ETFs, into the container's WRITABLE LAYER. Measured 2026-08-28:
+      # openbb-api had run 42 hours across many deploys, because `docker stack deploy` only replaces
+      # a service whose SPEC changed — so this is NOT lost per deploy, only on an image bump, a node
+      # reboot or an OOM kill (which has happened, from a single exploratory probe). Persisting it
+      # removes a cold-start cliff where the first SEC-dependent request blocks on the re-download.
+      - openbb-cache:/root/OpenBBUserData/cache
     networks:
       - muffin-net
     healthcheck:

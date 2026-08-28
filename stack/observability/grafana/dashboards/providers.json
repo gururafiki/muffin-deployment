@@ -302,6 +302,82 @@
      "legendFormat": "{{provider}}"
     }
    ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Egress connections by host \u2014 observed, every container",
+   "description": "EVERY EXTERNAL HOST THIS NODE CONNECTS TO, FOR EVERY CONTAINER, WITH NO PER-SERVICE CONFIG. The panel above it infers openbb's provider from a query parameter; this OBSERVES the connection itself, and covers what http-cache cannot see at all \u2014 openbb-api's own calls to yfinance, firecrawl's scraping, the agent's LLM calls, opensandbox.\n\nHOW: every HTTPS connection opens with a TLS ClientHello carrying `server_name` in PLAINTEXT. No decryption, no CA, no MITM \u2014 the client states which host it wants. The BPF filter runs IN THE KERNEL (25 instructions, measured) so only ClientHello packets reach userspace.\n\nIT COUNTS CONNECTIONS, NOT REQUESTS. HTTP keep-alive reuses one connection for many requests, so this is an undercount of unknown factor \u2014 demonstrated while building it, when a driven openbb call produced no new ClientHello because the connection already existed. The metric is named `connections` for that reason.\n\nTwo corrections it already carries: `-i any` captures the same packet on the veth, the gateway bridge AND the NIC, which would treble every count (deduped by source port); and an inbound visitor's ClientHello looks identical to ours, which had `muffin-grafana.rafiki.guru` filed as egress until the RFC1918 source filter went in.",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 37
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never"
+     },
+     "unit": "cps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "expr": "sum by (host) (rate(muffin_egress_connections_total[5m]))",
+     "legendFormat": "{{host}}"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Egress connections \u2014 which container called which host",
+   "description": "The join the inference cannot make: openbb-api's own upstream calls, attributed. Source is the docker_gwbridge address, mapped to the swarm service via the container's SandboxID \u2014 `docker inspect` exposes only the overlay IP, so mapping that alone leaves every external connection labelled with a bare address.",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 45
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "sortBy": [
+     {
+      "displayName": "Value",
+      "desc": true
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "expr": "topk(25, sum by (host, container) (increase(muffin_egress_connections_total[1h])))",
+     "instant": true,
+     "format": "table"
+    }
+   ]
   }
  ]
 }
