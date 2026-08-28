@@ -417,6 +417,93 @@
      }
     }
    ]
+  },
+  {
+   "type": "table",
+   "title": "Backlog drain rate \u2014 is it moving, and is it moving for the right reason?",
+   "description": "THE DERIVATIVE, WHICH IS THE SIGNAL `written` ONLY PRETENDS TO BE. Two live stalls were found by eye on 2026-08-28 \u2014 security-statements returned `written: 240, remaining: 8668` byte-identical on five consecutive runs. The depth was in backlog_sample the whole time and nothing computed a rate, so the chart drew a flat line and no alert could fire on 'flat'.\n\nFLAT with a non-zero depth is the stall signature (seven occurrences). draining_by_marking is the 2026-08-13 signature, where a backlog empties by negative-caching rather than by working: ~8,300 securities were marked permanently unanswerable while every count read as progress. Its depth curve is IDENTICAL to a healthy drain \u2014 only the negative cache distinguishes them, which is why the two rates are shown together.",
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 55
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "state"
+      },
+      "properties": [
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background"
+        }
+       },
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "draining_by_marking": {
+            "color": "red",
+            "index": 0
+           },
+           "FLAT": {
+            "color": "orange",
+            "index": 1
+           },
+           "growing": {
+            "color": "yellow",
+            "index": 2
+           },
+           "draining": {
+            "color": "green",
+            "index": 3
+           },
+           "empty": {
+            "color": "text",
+            "index": 4
+           },
+           "insufficient_history": {
+            "color": "text",
+            "index": 5
+           }
+          }
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "sortBy": [
+     {
+      "displayName": "depth",
+      "desc": true
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "rawSql": "select backlog, state, depth, per_day, cache_per_day, days_to_empty, samples\n  from market.backlog_drain\n order by case state when 'draining_by_marking' then 0 when 'FLAT' then 1 when 'growing' then 2 else 3 end, depth desc"
+    }
+   ]
   }
  ]
 }
