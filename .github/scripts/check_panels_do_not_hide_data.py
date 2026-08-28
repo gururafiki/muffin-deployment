@@ -39,6 +39,11 @@ ALLOWED = {
      "securities >= $minsize"):
         "the floor is the $minsize VARIABLE, visible in the UI and selectable down to 1 — the "
         "reader chooses it, so nothing is hidden by a decision they cannot see",
+    ("Muffin — Data coverage", "Least complete countries", "securities >= $minsize"):
+        "reader-controlled $minsize; it replaced a hardcoded `securities >= 20 ... limit 30`",
+    ("Muffin — Data coverage", "Country × facet — where is each country incomplete?",
+     "securities >= $minsize"):
+        "reader-controlled $minsize, and NO row limit — every country above the floor is listed",
     ("Muffin — Providers & cache", "Egress connections — which container called which host", "topk(25"):
         "topk over unbounded hostname cardinality; the long tail is genuinely not renderable",
 }
@@ -66,7 +71,7 @@ def main() -> int:
                 hits += [m.group(0) for m in FLOOR.finditer(q)]
                 hits = [h for h in hits if (title, panel.get("title", "?"), h) not in ALLOWED]
                 if hits:
-                    bad.append((f.name, key[1], hits, q[:150]))
+                    bad.append((f.name, panel.get("title", "?"), hits, q[:150]))
     if checked == 0:                      # anti-vacuity: a check that inspects nothing passes nothing
         print("FAIL: no panel queries found — the check is looking in the wrong place")
         return 1

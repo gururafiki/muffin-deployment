@@ -316,6 +316,1102 @@
      "rawSql": "select sampled_at as time, 'complete' as metric,\n       round(100.0*sum(complete)/nullif(sum(securities),0),1) as value\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension='country_sector' and security_type_code='equity'\n   and split_part(bucket,'|',1) like '$country' and split_part(bucket,'|',2) like '$sector'\n group by sampled_at order by sampled_at"
     }
    ]
+  },
+  {
+   "type": "row",
+   "collapsed": false,
+   "title": "Breakdowns \u2014 every sampled dimension (WHOLE UNIVERSE, not filtered by the variables above)",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 27
+   },
+   "panels": []
+  },
+  {
+   "type": "bargauge",
+   "title": "Completeness now, by security type",
+   "description": "Completeness per security type RIGHT NOW. A bond arrives from an N-PORT filing and that is all it will ever be, so `required_facet` decides what each type owes \u2014 which is why bonds read 100% and are not being compared against an equity's fifteen facets.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 28
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 40
+       },
+       {
+        "color": "yellow",
+        "value": 70
+       },
+       {
+        "color": "green",
+        "value": 90
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "showUnfilled": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "rawSql": "select security_type_code as metric, round(100.0*sum(complete)/nullif(sum(securities),0),1) as value from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='security_type' group by security_type_code order by 2 desc"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Completeness by security type",
+   "description": "The same figure over time. ETFs read 0% because `required_facet` asks them for a `price` row and ETF returns are computed from `etf/historical` into `performance` \u2014 bars were never stored. That is a one-row fix in `required_facet`, not an ingestion failure.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 28
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, security_type_code as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where $__timeFilter(sampled_at) and dimension='security_type' order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Price freshness \u2014 securities priced in the last N days",
+   "description": "How much of the universe carries a RECENT bar, against how much is addressable at all. The gap between 'have a symbol' and 'last 30d' is the population yfinance is not answering for.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 28
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, sum(priced_3d) as \"last 3d\", sum(priced_7d) as \"last 7d\", sum(priced_30d) as \"last 30d\", sum(with_symbol) as \"have a symbol\" from market.coverage_sample where $__timeFilter(sampled_at) and dimension='security_type' group by sampled_at order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Completeness by MSCI tier",
+   "description": "Developed / emerging / frontier. Tier is MSCI's lens; region below is the World Bank's, because MSCI's regions are INVESTMENT regions and file Poland under EMEA.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 36
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, bucket as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where $__timeFilter(sampled_at) and dimension='msci_tier' and security_type_code='equity' order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Completeness by market-cap band",
+   "description": "Market cap is denominated in each security's OWN currency, so the bands are computed from `security_market_cap_usd`, not the raw column.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 36
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, bucket as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where $__timeFilter(sampled_at) and dimension='cap_band' and security_type_code='equity' order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Completeness by style",
+   "description": "Value / growth / blend, from `security_style`. A percentile needs a peer group: ranked globally, 70% of equities are cheaper than the median US large cap, which once labelled 89% of the universe 'value'.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 36
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, bucket as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where $__timeFilter(sampled_at) and dimension='style' and security_type_code='equity' order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Completeness by MSCI region",
+   "description": "Regional completeness.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 44
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, bucket as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where $__timeFilter(sampled_at) and dimension='msci_region' and security_type_code='equity' order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Completeness by World Bank income group",
+   "description": "Income group is the World Bank lens.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 44
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, bucket as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where $__timeFilter(sampled_at) and dimension='income_group' and security_type_code='equity' order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Equities with no sector at all",
+   "description": "Equities that reach no sector. TYPED TO EQUITY ON PURPOSE: untyped, this bucket reads 16,401 \u2014 but 15,159 of those are BONDS, which arrive from an N-PORT filing and will never carry a sector. One flat definition reports most of the universe permanently broken for a facet that can never apply, and the number gets ignored within a week.\n\nShould trend DOWN as security-industries and security-profiles drain. Flat with a non-zero value means a backlog is stalled, or is draining by MARKING rather than by working.\n\nWHOLE UNIVERSE \u2014 not filtered by the country/sector variables above.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 44
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, sum(securities) filter (where bucket='unknown') as \"no sector\" from market.coverage_sample where $__timeFilter(sampled_at) and dimension='sector' and security_type_code='equity' group by sampled_at order by sampled_at",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Least complete countries",
+   "description": "Every country above the `$minsize` floor, worst first \u2014 and NO row limit. It previously carried `limit 30`, the same defect that hid the United States from the cross table: a worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy rows are the ones you go looking for when something seems wrong.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 52
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*%$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select bucket as \"country\", security_type_code as \"type\", securities, complete, round(100.0*complete/nullif(securities,0),1) as \"complete %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='country' and securities >= $minsize order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Completeness by quote currency",
+   "description": "All 59 currencies, no limit. A currency is the QUOTE currency; a company's REPORTING currency can differ (BHP.AX quotes AUD and reports USD), which is why a ratio across the two needs an fx rate per bar.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 52
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*%$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select bucket as \"currency\", securities, round(100.0*complete/nullif(securities,0),1) as \"complete %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='currency' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Completeness by industry",
+   "description": "All 156 industries, no limit \u2014 sortable and filterable. Industry is level 2 of the taxonomy and is the pipeline's slowest facet; the serving views pick level 1 explicitly, because `distinct on \u2026 order by priority` could otherwise return an INDUSTRY as a security's sector.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 61
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*%$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select bucket as \"industry\", securities, round(100.0*complete/nullif(securities,0),1) as \"complete %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='industry' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "collapsed": false,
+   "title": "By country \u2014 every facet, every country",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 70
+   },
+   "panels": []
+  },
+  {
+   "type": "table",
+   "title": "Country \u00d7 facet \u2014 where is each country incomplete?",
+   "description": "One row per country, one column per facet, filtered to equities. Countries below the `$minsize` floor are hidden \u2014 set it to 1 to see all 164.\n\nEvery cell is the percent of that group's equities carrying the facet, so a column reads as a pipeline stage and a row reads as a group's overall health. Sort by any column to ask 'who is worst at statements'. NO ROW LIMIT \u2014 a worst-first list truncated at an arbitrary row silently deletes whatever is healthy, which is how `limit 60` hid the United States.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 13,
+    "w": 24,
+    "x": 0,
+    "y": 71
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true,
+      "minWidth": 78
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "^(complete %)$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "custom.width",
+        "value": 130
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "^(symbol|sector|industry|profile|price|price hist|daily hist|perf|fundamentals|statements|quarters|metrics|estimates|share stats|dividends|filings|leadership|insider|news)$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "#4a1010",
+           "value": null
+          },
+          {
+           "color": "#7a3b12",
+           "value": 25
+          },
+          {
+           "color": "#6b5f16",
+           "value": 55
+          },
+          {
+           "color": "#1f5c2e",
+           "value": 80
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "footer": {
+     "show": false
+    },
+    "cellHeight": "sm",
+    "sortBy": [
+     {
+      "desc": false,
+      "displayName": "complete %"
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select bucket as \"country\", securities, round(100.0*complete/nullif(securities,0),1) as \"complete %\", round(100.0*with_symbol/nullif(securities,0),1) as \"symbol\", round(100.0*with_sector/nullif(securities,0),1) as \"sector\", round(100.0*with_industry/nullif(securities,0),1) as \"industry\", round(100.0*with_profile/nullif(securities,0),1) as \"profile\", round(100.0*with_price/nullif(securities,0),1) as \"price\", round(100.0*with_price_history/nullif(securities,0),1) as \"price hist\", round(100.0*with_daily_history/nullif(securities,0),1) as \"daily hist\", round(100.0*with_performance/nullif(securities,0),1) as \"perf\", round(100.0*with_fundamentals/nullif(securities,0),1) as \"fundamentals\", round(100.0*with_statements/nullif(securities,0),1) as \"statements\", round(100.0*with_quarters/nullif(securities,0),1) as \"quarters\", round(100.0*with_metrics/nullif(securities,0),1) as \"metrics\", round(100.0*with_estimates/nullif(securities,0),1) as \"estimates\", round(100.0*with_share_stats/nullif(securities,0),1) as \"share stats\", round(100.0*with_dividends/nullif(securities,0),1) as \"dividends\", round(100.0*with_filings/nullif(securities,0),1) as \"filings\", round(100.0*with_leadership/nullif(securities,0),1) as \"leadership\", round(100.0*with_insider/nullif(securities,0),1) as \"insider\", round(100.0*with_news/nullif(securities,0),1) as \"news\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='country' and security_type_code='equity' and securities >= $minsize order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "collapsed": false,
+   "title": "By sector \u2014 every facet, every sector",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 84
+   },
+   "panels": []
+  },
+  {
+   "type": "bargauge",
+   "title": "Sector completeness now",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "description": "Overall completeness per sector, worst first. Sixteen buckets, all of them shown.\n\nEvery cell is the percent of that group's equities carrying the facet, so a column reads as a pipeline stage and a row reads as a group's overall health. Sort by any column to ask 'who is worst at statements'. NO ROW LIMIT \u2014 a worst-first list truncated at an arbitrary row silently deletes whatever is healthy, which is how `limit 60` hid the United States.",
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 85
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "minVizWidth": 8,
+    "minVizHeight": 14,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "showUnfilled": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 40
+       },
+       {
+        "color": "yellow",
+        "value": 70
+       },
+       {
+        "color": "green",
+        "value": 90
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "rawSql": "select bucket as metric, round(100.0*complete/nullif(securities,0),1) as value from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='sector' and security_type_code='equity' order by 2 asc"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Sector \u00d7 facet \u2014 where is each sector incomplete?",
+   "description": "One row per sector, one column per facet, filtered to equities. All 16 sectors, no floor and no limit \u2014 the set is small enough that every one is shown.\n\nEvery cell is the percent of that group's equities carrying the facet, so a column reads as a pipeline stage and a row reads as a group's overall health. Sort by any column to ask 'who is worst at statements'. NO ROW LIMIT \u2014 a worst-first list truncated at an arbitrary row silently deletes whatever is healthy, which is how `limit 60` hid the United States.",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "gridPos": {
+    "h": 11,
+    "w": 24,
+    "x": 0,
+    "y": 94
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true,
+      "minWidth": 78
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "^(complete %)$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "custom.width",
+        "value": 130
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "^(symbol|sector|industry|profile|price|price hist|daily hist|perf|fundamentals|statements|quarters|metrics|estimates|share stats|dividends|filings|leadership|insider|news)$"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "#4a1010",
+           "value": null
+          },
+          {
+           "color": "#7a3b12",
+           "value": 25
+          },
+          {
+           "color": "#6b5f16",
+           "value": 55
+          },
+          {
+           "color": "#1f5c2e",
+           "value": 80
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "footer": {
+     "show": false
+    },
+    "cellHeight": "sm",
+    "sortBy": [
+     {
+      "desc": false,
+      "displayName": "complete %"
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select bucket as \"sector\", securities, round(100.0*complete/nullif(securities,0),1) as \"complete %\", round(100.0*with_symbol/nullif(securities,0),1) as \"symbol\", round(100.0*with_sector/nullif(securities,0),1) as \"sector\", round(100.0*with_industry/nullif(securities,0),1) as \"industry\", round(100.0*with_profile/nullif(securities,0),1) as \"profile\", round(100.0*with_price/nullif(securities,0),1) as \"price\", round(100.0*with_price_history/nullif(securities,0),1) as \"price hist\", round(100.0*with_daily_history/nullif(securities,0),1) as \"daily hist\", round(100.0*with_performance/nullif(securities,0),1) as \"perf\", round(100.0*with_fundamentals/nullif(securities,0),1) as \"fundamentals\", round(100.0*with_statements/nullif(securities,0),1) as \"statements\", round(100.0*with_quarters/nullif(securities,0),1) as \"quarters\", round(100.0*with_metrics/nullif(securities,0),1) as \"metrics\", round(100.0*with_estimates/nullif(securities,0),1) as \"estimates\", round(100.0*with_share_stats/nullif(securities,0),1) as \"share stats\", round(100.0*with_dividends/nullif(securities,0),1) as \"dividends\", round(100.0*with_filings/nullif(securities,0),1) as \"filings\", round(100.0*with_leadership/nullif(securities,0),1) as \"leadership\", round(100.0*with_insider/nullif(securities,0),1) as \"insider\", round(100.0*with_news/nullif(securities,0),1) as \"news\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='sector' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ]
   }
  ],
  "templating": {
