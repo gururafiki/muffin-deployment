@@ -31,19 +31,60 @@ drop view if exists market.sector_constituents;
 -- 40 has landed. `if exists` keeps it a no-op on a fresh database.
 drop view if exists market.instrument_current;
 drop view if exists market.security_current;
--- DROP WHATEVER DEPENDS ON `security_symbol`, DISCOVERED RATHER THAN LISTED.
+-- ── REPLACE FIRST; CASCADE ONLY IF POSTGRES REFUSES ──────────────────────────
 --
--- A hand-maintained list was wrong three times in one afternoon: `pending_performance` (39),
--- `instrument_current` (40) and `price_series` (42) each build on this view, and each broke every
--- re-run until it was added here. The list can only ever be as current as the last person who
--- remembered, and the failure is a deploy that dies on its SECOND pass — after the first has
--- already succeeded.
+-- THIS DROP USED TO RUN ON EVERY DEPLOY, AND IT TOOK THE APP'S CHART VIEWS WITH IT.
 --
--- `pg_depend` knows the answer, so ask it. Everything dropped here is recreated later in the same
--- pass, which the three-pass migration test is what actually proves.
+-- `pg_depend` finds everything built on `security_symbol` — which is correct, and is why a
+-- hand-maintained list was abandoned. But the dependents are recreated by the migrations that OWN
+-- them, and those run far later in the pass: `pending_dividends` in 087, `pending_symbol_repair`
+-- in 101, `price_series` and `symbol_security` in 102, `security_metric_series` in 126. Each file
+-- is its own transaction, so between this drop and those creates the views genuinely do not exist
+-- — roughly seventy files of wall-clock, on every deploy, several times a day.
+--
+-- Measured 2026-08-27: three resources failed inside 61 seconds with
+-- `relation "market.pending_*" does not exist`. Those were the ones whose five-minute tick landed
+-- in the window; `price_series` and `security_metric_series` are in the same cascade, and they are
+-- what the stock page's chart and statements read. This was a user-visible outage per deploy that
+-- nothing reported, because a reader that 404s is not a migration failure.
+--
+-- THE DROP IS ONLY NEEDED WHEN THE COLUMN LIST CHANGES. `create or replace view` handles every
+-- other case, and refuses only when columns are renamed, reordered or removed — which is precisely
+-- what the cascade exists for. So try the cheap path first and fall back to the expensive one:
+-- in steady state nothing is dropped at all and the window disappears, while a genuine shape
+-- change behaves exactly as before.
+--
+-- ONE DEFINITION, used by both paths. Writing the DDL twice would be the same-fact-in-two-places
+-- this schema has already been bitten by (the venue map drifted to 54 rows against 38).
 do $$
-declare v record;
+declare
+  v record;
+  ddl constant text := $ddl$
+select
+  s.security_id,
+  coalesce(t.value, ps.symbol) as symbol
+from market.security s
+left join lateral (
+  select i.value
+  from market.security_identifier i
+  where i.security_id = s.security_id and i.kind_code = 'ticker'
+  order by i.value
+  limit 1
+) t on true
+left join market.security_provider_symbol ps
+  on ps.security_id = s.security_id and ps.provider_code = 'yfinance'
+where coalesce(t.value, ps.symbol) is not null
+$ddl$;
 begin
+  begin
+    execute 'create or replace view market.security_symbol as ' || ddl;
+    return;                     -- unchanged: nothing dropped, no window
+  exception when others then
+    null;                       -- the column list moved; the cascade below is now required
+  end;
+
+  raise notice '  --  035: security_symbol shape changed, rebuilding dependents';
+
   -- RELKIND-AWARE, because a MATERIALIZED view has a `pg_rewrite` entry too and is discovered
   -- here exactly like a plain one — while `drop view if exists` raises `"x" is not a view` for it
   -- and `IF EXISTS` does not help. Migration 102's `symbol_security` is such a dependent, and it
@@ -63,26 +104,10 @@ begin
       execute format('drop view if exists market.%I cascade', v.name);
     end if;
   end loop;
+
+  execute 'drop view if exists market.security_symbol';
+  execute 'create view market.security_symbol as ' || ddl;
 end $$;
-
-drop view if exists market.security_symbol;
-
--- ── the addressable symbol, in one place ─────────────────────────────────────
-create view market.security_symbol as
-select
-  s.security_id,
-  coalesce(t.value, ps.symbol) as symbol
-from market.security s
-left join lateral (
-  select i.value
-  from market.security_identifier i
-  where i.security_id = s.security_id and i.kind_code = 'ticker'
-  order by i.value
-  limit 1
-) t on true
-left join market.security_provider_symbol ps
-  on ps.security_id = s.security_id and ps.provider_code = 'yfinance'
-where coalesce(t.value, ps.symbol) is not null;
 
 comment on view market.security_symbol is
   'One addressable symbol per security: the ticker identifier if there is one, else the yfinance provider symbol. Same precedence as the ingest backlogs.';

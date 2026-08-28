@@ -35,6 +35,36 @@ export interface CorporateAction {
 export class TiingoNoSuchTicker extends Error {}
 
 /**
+ * Tiingo has refused us for the period, and it says so with **HTTP 200 and a plain-text body**.
+ *
+ * Measured 2026-08-28 across six consecutive `security-corporate-actions` runs, every one
+ * reporting `ok: true` with `written: 0`. Five carried
+ * `Unexpected token 'Y', "You have r"... is not valid JSON` — the parse error from calling
+ * `res.json()` on `You have run over your hourly request limit` — and one carried a proper
+ * `tiingo 429`. So the SAME limit arrives two ways, and only one of them was recognisable.
+ *
+ * This is the Alpha Vantage trap with a second provider: that one answers exhaustion with 200 plus
+ * an `Information` field, which openbb turns into a bare 204. A rate limit that does not arrive as
+ * an error status is invisible to every rule that watches for one — including `throttledOut`, and
+ * therefore the throttle-pressure panel and its alert.
+ */
+export class TiingoRateLimited extends Error {}
+
+/**
+ * Does this body say "you have had enough"? Matched on the wording Tiingo ACTUALLY uses, quoted
+ * from production rather than guessed: `Error: You have run over your hourly request limit`.
+ * Note it contains neither "rate limit" nor "429" — the two things a classifier would reach for.
+ */
+function rateLimited(body: string): boolean {
+  const b = body.toLowerCase();
+  return b.includes('run over your') ||
+    b.includes('request limit') ||
+    b.includes('rate limit') ||
+    b.includes('too many requests') ||
+    b.includes('quota');
+}
+
+/**
  * Every split and dividend Tiingo reports for one symbol since `startDate`.
  *
  * ONE SYMBOL PER CALL because the endpoint is per-ticker; there is no batch form. That is the same
@@ -55,9 +85,29 @@ export async function corporateActions(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (res.status === 404) throw new TiingoNoSuchTicker(`tiingo has no ticker ${symbol}`);
-  if (!res.ok) throw new Error(`tiingo ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
-  const body = (await res.json()) as Record<string, unknown>[];
+  // READ THE BODY ONCE, AS TEXT, AND CLASSIFY BEFORE PARSING. A response can only be consumed
+  // once, and `res.ok` is TRUE for a rate limit here — so the previous order (status check, then
+  // `res.json()`) skipped the error branch entirely and failed inside the parser instead, with a
+  // message that named the first two characters of the body and nothing else.
+  const raw = await res.text();
+
+  if (!res.ok) {
+    if (rateLimited(raw)) throw new TiingoRateLimited(`tiingo ${res.status}: ${raw.slice(0, 200)}`);
+    throw new Error(`tiingo ${res.status}: ${raw.slice(0, 200)}`);
+  }
+  // A 200 THAT IS NOT JSON. This is the case that cost six silent runs.
+  if (rateLimited(raw)) throw new TiingoRateLimited(`tiingo refused (HTTP 200): ${raw.slice(0, 200)}`);
+
+  let body: Record<string, unknown>[];
+  try {
+    body = JSON.parse(raw) as Record<string, unknown>[];
+  } catch {
+    // QUOTE WHAT ARRIVED. `Unexpected token 'Y'` is not diagnosable; the body is. The next
+    // provider that invents a new way to say "no" should be readable from the log rather than
+    // from a database session.
+    throw new Error(`tiingo returned non-JSON for ${symbol}: ${raw.slice(0, 200)}`);
+  }
   if (!Array.isArray(body)) throw new Error(`tiingo returned a non-array for ${symbol}`);
 
   const out: CorporateAction[] = [];
