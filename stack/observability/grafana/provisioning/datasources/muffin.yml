@@ -22,16 +22,31 @@ datasources:
 
   - name: Muffin Postgres
     uid: muffin-postgres
-    type: postgres
+    # The MODERN plugin id. `postgres` still resolves (Grafana normalises it), but the API and every
+    # doc example now use this one, and the config UI is written against it.
+    type: grafana-postgresql-datasource
     access: proxy
     url: supabase-db:5432
-    database: postgres
     user: metrics_ro
     secureJsonData:
       # From the environment, never written into this file: the file is bind-mounted from the node
       # and a password in it would be readable by anything that can read the mount.
       password: $MUFFIN_METRICS_RO_PASSWORD
     jsonData:
+      # THE DATABASE NAME BELONGS HERE, NOT AT THE TOP LEVEL, AND GETTING IT WRONG LOOKS LIKE A
+      # BROKEN DASHBOARD WHILE EVERYTHING ACTUALLY WORKS. Grafana 11+ moved this setting into
+      # jsonData; the deprecated top-level `database:` still CONNECTS — the health check answers
+      # "Database Connection OK" and every panel returns rows — but the settings UI reads
+      # jsonData.database for its form field, so the field renders EMPTY and the page asks you to
+      # configure the database. Measured on Grafana 12.3.1: the datasource API reported
+      # `database: postgres` at the top level and no `database` key in jsonData at all.
+      #
+      # It is not merely cosmetic. Anyone who opens that page and presses Save writes the empty
+      # field back and takes every Postgres panel down — a working system one click from broken.
+      # Verified before changing it, by creating a throwaway datasource carrying the name ONLY in
+      # jsonData: its health check reached PASSWORD AUTHENTICATION, which it could not have done
+      # without resolving the database first.
+      database: postgres
       sslmode: disable          # same overlay network, never leaves the host
       postgresVersion: 1700
       # READ-ONLY, and enforced twice. `metrics_ro` has SELECT and nothing else (migration 127),
