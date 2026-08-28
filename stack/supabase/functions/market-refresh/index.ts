@@ -52,6 +52,8 @@ import {
   planPriceFetches,
   NEWS_RETENTION_DAYS,
   PRICE_HISTORY_YEARS,
+  DAILY_HISTORY_START,
+  DAILY_HISTORY_BATCH,
   PRICE_WINDOW_DAYS,
   PRICES_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
@@ -305,6 +307,7 @@ const SHARE_STATS_RESOURCE = 'security-share-stats'
 const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
+const DAILY_HISTORY_RESOURCE = 'security-daily-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
 const QUARTERS_RESOURCE = 'security-quarters'
@@ -360,6 +363,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [DAILY_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [QUARTERS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1773,6 +1777,143 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         throttledOut,
         lastError,
         remaining: await backlogSize(market, 'pending_price_history'),
+      })
+    }
+
+    if (resource === DAILY_HISTORY_RESOURCE) {
+      // DEEP DAILY HISTORY, WHOLE UNIVERSE. `security-prices` keeps a ~400-day daily window and
+      // `security-price-history` fills twenty years WEEKLY; this fills the same span at daily
+      // resolution, which is the difference between a chart you can draw and a backtest you can
+      // run. The weekly series is deliberately untouched — a 20-year window is ~5,040 daily points
+      // per symbol against ~1,040 weekly, and `price_series` has crossed the anon 3-second timeout
+      // twice already.
+      //
+      // A SHORTER DEADLINE THAN ITS SIBLINGS, because the limit here is MEMORY rather than the
+      // clock: one batch is several times the size of anything else this function fetches, so the
+      // run should end with headroom rather than with the supervisor killing the worker.
+      const deadline = Date.now() + 55_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_daily_history')
+        .select('security_id,symbol,fetch_symbol')
+        .limit(scopeLimit ?? 60)
+      if (pErr) throw new Error(`pending_daily_history read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: String(r.symbol),
+        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every equity has deep daily history' })
+      }
+
+      let written = 0
+      let batches = 0
+      let batchesFailed = 0
+      let noHistory = 0
+      let securities = 0
+      let throttledOut = false
+      let lastError: string | null = null
+
+      for (let i = 0; i < wanted.length && Date.now() < deadline - 15_000; i += DAILY_HISTORY_BATCH) {
+        const group = wanted.slice(i, i + DAILY_HISTORY_BATCH)
+        batches++
+        try {
+          const isolated = await fetchWithIsolation(
+            fetcher,
+            (syms: string[]) =>
+              `/api/v1/equity/price/historical?symbol=${symbolList(syms)}` +
+              `&provider=yfinance&interval=1d&start_date=${DAILY_HISTORY_START}`,
+            group.map((g) => g.fetchSymbol),
+            Math.min(40_000, deadline - Date.now()),
+            deadline,
+          )
+          const rows = isolated.rows
+          if (isolated.error) lastError = isolated.error
+          const deadSymbols = new Set(isolated.dead.map((d) => d.toUpperCase()))
+          // The same adjudication every batched resource here uses: a symbol is marked only when
+          // THIS batch answered cleanly and omitted it, or when isolation asked it ALONE and it
+          // failed. yfinance throttles PROGRESSIVELY — it drops symbols from a 200 rather than
+          // erroring — so a run-wide tally is never evidence about a symbol.
+          const batchClean = !isolated.error && rows.length > 0
+
+          const bySymbol = new Map<string, { date: string; close: number }[]>()
+          for (const r of rows) {
+            // The provider adds a `symbol` column only when SEVERAL are requested, so a
+            // single-symbol batch has to be told which symbol it asked about.
+            const parsed = barFrom(r, group[0].fetchSymbol)
+            if (!parsed) continue
+            const key = parsed.symbol.toUpperCase()
+            const list = bySymbol.get(key) ?? []
+            list.push(parsed.bar)
+            bySymbol.set(key, list)
+          }
+
+          for (const g of group) {
+            const bars = bySymbol.get(g.fetchSymbol.toUpperCase()) ?? []
+            if (bars.length === 0) {
+              if (!batchClean && !deadSymbols.has(g.fetchSymbol.toUpperCase())) continue
+              noHistory++
+              const { error } = await market
+                .from('security')
+                .update({ daily_history_missing_at: new Date().toISOString() })
+                .eq('security_id', g.securityId)
+              if (error) throw new Error(`daily_history_missing_at update failed: ${error.message}`)
+              continue
+            }
+
+            // WRITTEN AND MARKED PER SECURITY, not per batch. One security's bars are ~7,300 rows;
+            // accumulating a whole batch before upserting would hold six of those at once for no
+            // benefit, and this is the resource whose ceiling is memory.
+            const priceRows = bars.map((b) => ({
+              security_id: g.securityId,
+              date: b.date,
+              close: b.close,
+              grain: 'daily',
+            }))
+            for (let j = 0; j < priceRows.length; j += 500) {
+              const { error } = await market
+                .from('security_price')
+                .upsert(
+                  dedupeBy(priceRows.slice(j, j + 500), (r) => `${r.security_id}|${r.grain}|${r.date}`),
+                  { onConflict: 'security_id,grain,date' },
+                )
+              if (error) throw new Error(`security_price daily-history upsert failed: ${error.message}`)
+            }
+            written += priceRows.length
+            securities++
+
+            // THE "DONE" MARKER, WRITTEN LAST AND ONLY ON SUCCESS. It is what removes the security
+            // from `pending_daily_history`, so writing it before the bars land would drop the
+            // security out of the backlog with nothing stored — the security-facing version of a
+            // page that advances without doing the work.
+            const earliest = bars.reduce((min, b) => (b.date < min ? b.date : min), bars[0].date)
+            const { error: markErr } = await market
+              .from('security')
+              .update({ daily_history_from: earliest })
+              .eq('security_id', g.securityId)
+            if (markErr) throw new Error(`daily_history_from update failed: ${markErr.message}`)
+          }
+        } catch (e) {
+          batchesFailed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          lastError = msg
+          if (throttled(msg)) { throttledOut = true; break }
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        written,
+        securities,
+        batches,
+        batchesFailed,
+        noHistory,
+        throttledOut,
+        lastError,
+        remaining: await backlogSize(market, 'pending_daily_history'),
       })
     }
 

@@ -964,13 +964,55 @@ console.log('\nresource registry — the cron and the function agree')
   // THIS PARSE IS NOT COSMETIC. Deleting that workflow would have silently deleted the two guards
   // below with it — including the one that caught `exchange-listings` being registered, deployed,
   // reachable and never invoked for three days while sixteen venues went un-enumerated.
-  const schedulerMigration = await Deno.readTextFile(
-    new URL('../../migrations/133-the-scheduler-belongs-in-the-database.sql', import.meta.url),
-  )
-  const seed = schedulerMigration.match(
-    /insert into market\.cron_resource \(position, resource\) values([\s\S]*?)on conflict/,
-  )?.[0] ?? ''
-  const cronResources = [...seed.matchAll(/\(\s*\d+,\s*'([a-z][a-z-]+)'\)/g)].map((m) => m[1])
+  //
+  // EVERY MIGRATION, NOT JUST 133. A resource may be registered by the migration that ADDS it —
+  // `security-daily-history` is seeded in 136 — and reading only the scheduler's own file made
+  // this guard report a correctly-scheduled resource as unscheduled. That is the "anchored on one
+  // file" shape that has already cost this repo a guard reading the wrong `while` loop: the fix
+  // for "the pattern matched somewhere else" is not a better pattern, it is the right SCOPE.
+  const migrationsDir = new URL('../../migrations/', import.meta.url)
+  const cronResources: string[] = []
+  for await (const entry of Deno.readDir(migrationsDir)) {
+    if (!entry.isFile || !entry.name.endsWith('.sql')) continue
+    const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+    for (const seed of sql.matchAll(
+      /insert into market\.cron_resource \(position, resource\) values([\s\S]*?)on conflict/g,
+    )) {
+      for (const m of seed[0].matchAll(/\(\s*\d+,\s*'([a-z][a-z-]+)'\)/g)) cronResources.push(m[1])
+    }
+  }
+  // A RESOURCE REMOVED FROM THE ROTATION MUST HAVE ITS OWN JOB, OR IT SIMPLY STOPS RUNNING.
+  // Migration 137 takes the four pure-SQL resources out of the provider-paced rotation
+  // (`enabled = false`) because they spend no provider budget — but `enabled = false` and
+  // "deleted" look identical from the rotation's side, and a resource that is never invoked
+  // cannot fail. `exchange-listings` sat reachable-and-unscheduled for weeks precisely because
+  // nothing checked the reverse direction.
+  {
+    const disabled = new Set<string>()
+    for await (const entry of Deno.readDir(migrationsDir)) {
+      if (!entry.isFile || !entry.name.endsWith('.sql')) continue
+      const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+      for (const m of sql.matchAll(
+        /update market\.cron_resource set enabled = false[\s\S]*?in \(([^)]*)\)/g,
+      )) {
+        for (const q of m[1].matchAll(/'([a-z][a-z-]+)'/g)) disabled.add(q[1])
+      }
+    }
+    const orphaned: string[] = []
+    for (const name of disabled) {
+      let scheduled = false
+      for await (const entry of Deno.readDir(migrationsDir)) {
+        if (!entry.isFile || !entry.name.endsWith('.sql')) continue
+        const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+        if (sql.includes(`cron_post('${name}')`)) { scheduled = true; break }
+      }
+      if (!scheduled) orphaned.push(name)
+    }
+    check(orphaned.length === 0,
+      'a resource taken out of the rotation has its own pg_cron job',
+      orphaned.length ? `disabled but never scheduled: ${orphaned.join(', ')}` : `${disabled.size} checked`)
+  }
+
   // `observability-sample` is scheduled by its OWN pg_cron job rather than the rotation (it costs
   // no provider quota, so it runs hourly), so it is added here to keep the reverse check honest.
   cronResources.push('observability-sample')
@@ -1095,6 +1137,10 @@ console.log('\nresource registry — the cron and the function agree')
     EPS_HISTORY_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the others above. The deep daily
+    // backfill counts BARS in `written` and SECURITIES in `securities`, deliberately
+    // separately: ~7,300 rows per security makes a bar count useless as progress.
+    DAILY_HISTORY_RESOURCE: [],
     XBRL_RESOURCE: [],
     SHARE_STATS_RESOURCE: [],
     NEWS_RESOURCE: [],
