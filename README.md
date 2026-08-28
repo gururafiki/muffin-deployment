@@ -809,6 +809,26 @@ role stays inert.
 - An **infra** number: a scrape target in `stack/observability/prometheus.yml`, or a line in
   `/usr/local/bin/muffin-cache-size.sh` for anything only the host can see.
 
+#### A panel must not filter away the state it exists to reveal
+
+Three panels carried a cutoff that deleted their own subject, all found by a person looking at a
+dashboard and asking why something they knew was there was not:
+
+| Panel | Cutoff | What it hid |
+|---|---|---|
+| Country × sector | `limit 60` over a worst-first sort | **the United States** — 106 buckets cleared the floor, the US ranked 90–98 of them *because* it is well covered, so the only surviving US row was `US / unknown` at 0% |
+| Rows written per resource | `written > 0` | 53 runs across 7 resources, including `security-corporate-actions` at written=0 for seven consecutive runs — a throughput chart that cannot draw a zero cannot show a resource that stopped |
+| Backlog depth by resource | `depth > 0` | 7 backlogs that had reached zero, so a queue draining to completion looked identical to one that never existed |
+
+A cutoff is sound when it bounds an *unbounded* stream (a log tail, `topk` over hostname
+cardinality). It is a bug on a *bounded* set the panel claims to summarise, because the dropped
+rows are data the reader believes they are seeing. `check_panels_do_not_hide_data.py`
+(`quality.yml`) fails on any undeclared `limit`, `topk` or numeric floor; declared ones are keyed on
+**the expression, not the panel**, so an exemption granted for one sound cutoff cannot bless the
+next one added beside it. The size floor on the cross table is now the `$minsize` **variable** —
+still 20 by default, selectable down to 1 (538 buckets against 106), so the exclusion is the
+reader's choice rather than an invisible one.
+
 ## Remote state (OCI Object Storage)
 
 Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend

@@ -300,6 +300,9 @@ jobs:
               sys.exit(1)
           print('  ok  every SQL datasource declares jsonData.database')
           PYCHK
+      - name: Offline check — a panel must not filter away the state it reveals
+        run: python3 .github/scripts/check_panels_do_not_hide_data.py
+
       - name: Offline check — bash-only syntax declares bash
         run: |
           python3 - <<'PYCHK'

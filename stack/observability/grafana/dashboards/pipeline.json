@@ -57,7 +57,7 @@
   {
    "type": "timeseries",
    "title": "Backlog depth by resource",
-   "description": "Per backlog. A FLAT line here while the matching resource reports ok is the signature to recognise \u2014 see the 'backlog is not draining' alert.",
+   "description": "Per backlog. A FLAT line here while the matching resource reports ok is the signature to recognise \u2014 see the 'backlog is not draining' alert.\n\nIT USED TO FILTER THE INFORMATIVE CASE AWAY. Measured 2026-08-28: that filter hid 7 backlogs that had reached zero \u2014 so a queue DRAINING COMPLETELY looked identical to a series that had never existed. A panel that drops the zero row deletes exactly the state it exists to reveal \u2014 the same defect as the cross table's `limit 60`, which hid the United States because the US is well covered and the list was sorted worst-first.",
    "gridPos": {
     "h": 9,
     "w": 16,
@@ -77,7 +77,7 @@
      },
      "format": "time_series",
      "rawQuery": true,
-     "rawSql": "select sampled_at as time, backlog as metric, depth as value\n  from market.backlog_sample\n where $__timeFilter(sampled_at) and error is null and depth > 0\n order by sampled_at"
+     "rawSql": "select sampled_at as time, backlog as metric, depth as value\n  from market.backlog_sample\n where $__timeFilter(sampled_at) and error is null\n order by sampled_at"
     }
    ],
    "fieldConfig": {
@@ -175,7 +175,7 @@
   {
    "type": "timeseries",
    "title": "Rows written per resource",
-   "description": "Throughput \u2014 but read it beside the backlog panel. A `written` that looks healthy while the backlog is flat means the page is not advancing: derive_security_metrics returned 'written: 7386' twice, byte-identical, doing the same work forever.",
+   "description": "Throughput \u2014 but read it beside the backlog panel. A `written` that looks healthy while the backlog is flat means the page is not advancing: derive_security_metrics returned 'written: 7386' twice, byte-identical, doing the same work forever.\n\nIT USED TO FILTER THE INFORMATIVE CASE AWAY. Measured 2026-08-28: that filter hid 53 runs across 7 resources \u2014 including security-corporate-actions, which sat at written=0 for seven consecutive runs while silently rate-limited. A throughput chart that cannot draw a zero cannot show a resource that stopped working. A panel that drops the zero row deletes exactly the state it exists to reveal \u2014 the same defect as the cross table's `limit 60`, which hid the United States because the US is well covered and the list was sorted worst-first.",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -195,7 +195,7 @@
      },
      "format": "time_series",
      "rawQuery": true,
-     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at) and written > 0\n group by 1, 2 order by 1"
+     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n group by 1, 2 order by 1"
     }
    ],
    "fieldConfig": {
