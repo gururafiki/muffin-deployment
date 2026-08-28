@@ -1133,8 +1133,16 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         covered, none, noTicker,
         failed, lastError,
         // True when the provider refused us, so a short run is legible as a backoff rather than
-        // as a drained backlog. Tiingo says "run over your hourly request allocation"; the shared
-        // `throttled()` catches it on the `429` in the status line.
+        // as a drained backlog.
+        //
+        // THIS USED TO SAY the shared `throttled()` catches it "on the 429 in the status line",
+        // and that assumption was false. Measured 2026-08-28: of six consecutive refusals, ONE
+        // arrived as a 429 and five arrived as **HTTP 200 with a plain-text body**, which
+        // `res.json()` turned into `Unexpected token 'Y'` — matching nothing. So every one of
+        // those runs reported `ok: true, written: 0` with `throttledOut` FALSE, and the
+        // throttle-pressure panel showed a clean provider while it was refusing us all day.
+        // `tiingo.ts` now classifies the body before parsing, and `throttled()` knows the wording
+        // Tiingo actually uses rather than the one we assumed.
         throttledOut: failed > 0 && !!lastError && throttled(lastError),
         asked: wanted.length,
         remaining: Math.max(0, wanted.length - covered - none - noTicker),

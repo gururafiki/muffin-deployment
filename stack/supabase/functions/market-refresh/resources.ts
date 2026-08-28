@@ -313,7 +313,16 @@ export function throttled(message: string): boolean {
   return m.includes('ratelimit') ||
     m.includes('rate limit') ||
     m.includes('too many requests') ||
-    m.includes('429')
+    m.includes('429') ||
+    // WORDINGS PROVIDERS ACTUALLY USE, not the ones we expected them to. Tiingo says
+    // "Error: You have run over your hourly request limit" — which matches NONE of the four above,
+    // so six consecutive `security-corporate-actions` runs were rate-limited without
+    // `throttledOut` ever being set, leaving the throttle-pressure panel and its alert blind to
+    // that provider. The list above was a guess at vocabulary rather than a classifier; every
+    // entry below is quoted from a body seen in production.
+    m.includes('run over your') ||
+    m.includes('request limit') ||
+    m.includes('quota')
 }
 
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>

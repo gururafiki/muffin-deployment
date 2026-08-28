@@ -953,6 +953,46 @@ console.log('\ncurrency — the venue overrules a provider that contradicts it')
   // Read ONCE, not per batch: 59 rows that cannot change mid-run.
 }
 
+console.log('\nthrottle classifier — the wordings providers ACTUALLY use')
+{
+  // A CLASSIFIER IS ONLY AS GOOD AS THE VOCABULARY IT KNOWS, and this one was a guess.
+  // Measured 2026-08-28: `security-corporate-actions` was refused by Tiingo on six consecutive
+  // runs and `throttledOut` was false every time, because Tiingo says "You have run over your
+  // hourly request limit" — which contains neither "rate limit" nor "429". The panel showed a
+  // clean provider while it refused us all day.
+  //
+  // Every string below is QUOTED FROM PRODUCTION, not invented. The negatives matter as much: a
+  // classifier that returns true for an ordinary 400 would make every symbol failure look like a
+  // rate limit and stop the run.
+  const mustMatch = [
+    'Error: You have run over your hourly request limit',
+    'tiingo refused (HTTP 200): You have run over your hourly request limit',
+    'YFRateLimitError: Too Many Requests',
+    'our standard API rate limit is 25 requests per day',
+  ]
+  const mustNotMatch = [
+    'openbb 400 on /api/v1/equity/fundamental/dividends?provider=yfinance&symbol=HUT.VN',
+    'Signal timed out.',
+    'tiingo has no ticker BBVXF',
+  ]
+  const src = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
+  const body = src.slice(src.indexOf('export function throttled'))
+  const terms = [...body.slice(0, body.indexOf('\n}')).matchAll(/includes\('([^']+)'\)/g)].map((m) => m[1])
+  check(terms.length >= 5, 'the classifier knows more than the four terms it shipped with',
+    terms.join(', '))
+
+  const matches = (msg: string) => terms.some((t) => msg.toLowerCase().includes(t))
+  const missed = mustMatch.filter((m) => !matches(m))
+  check(missed.length === 0,
+    'every rate-limit wording seen in production is classified',
+    missed.length ? `NOT matched: ${missed.join(' | ')}` : `${mustMatch.length} wordings`)
+
+  const wrong = mustNotMatch.filter((m) => matches(m))
+  check(wrong.length === 0,
+    'an ordinary provider error is NOT mistaken for a rate limit',
+    wrong.length ? `wrongly matched: ${wrong.join(' | ')}` : `${mustNotMatch.length} negatives`)
+}
+
 console.log('\nresource registry — the cron and the function agree')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
