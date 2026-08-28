@@ -232,8 +232,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Cache size on disk",
-   "description": "Proxy for the volume; the ceiling is http_cache_max_size (8 GB). Measured 228 MB on 2026-08-27, so this is nowhere near binding yet.",
+   "title": "http-cache on disk \u2014 bytes and entries",
+   "description": "The http-cache volume ITSELF, from `muffin_http_cache_bytes`. It previously plotted `node_filesystem_size - node_filesystem_avail` for /mnt/data \u2014 the WHOLE FILESYSTEM \u2014 under a title claiming it was the cache. Measured 2026-08-28 that is 9.4 GB of which the cache is 0.6: **90% of it is muffin_supabase-db-data at 8.4 GB**. That is why it drifted DOWN from time to time \u2014 Postgres recycling WAL and vacuuming, nothing to do with a cache. For the host's disk see the Node dashboard.\n\nENTRIES IS PLOTTED BESIDE BYTES because bytes alone cannot distinguish a cache holding four enormous SEC companyfacts payloads from one holding forty thousand small OpenFIGI answers. A real fall in either is nginx's cache manager evicting \u2014 `proxy_cache_path` enforces `max_size` (8 GB) and `inactive=`, which evicts by LAST ACCESS, not by TTL.",
    "gridPos": {
     "h": 6,
     "w": 24,
@@ -247,23 +247,55 @@
    "targets": [
     {
      "refId": "A",
+     "expr": "muffin_http_cache_bytes",
+     "legendFormat": "bytes on disk",
      "datasource": {
       "type": "prometheus",
       "uid": "muffin-prometheus"
-     },
-     "expr": "node_filesystem_size_bytes{mountpoint=\"/mnt/data\"} - node_filesystem_avail_bytes{mountpoint=\"/mnt/data\"}",
-     "legendFormat": "/mnt/data used"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "muffin_http_cache_entries",
+     "legendFormat": "cached entries",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
+     "unit": "bytes",
+     "min": 0,
      "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 8
-     },
-     "unit": "bytes"
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "cached entries"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       }
+      ]
+     }
+    ]
    }
   },
   {
@@ -376,6 +408,54 @@
      "expr": "topk(25, sum by (host, container) (increase(muffin_egress_connections_total[1h])))",
      "instant": true,
      "format": "table"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Egress collector \u2014 ClientHellos it could not parse",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "description": "The SNI collector's own health signal, and until now nothing plotted it \u2014 so a collector silently failing to read the hostname out of every packet would have looked identical to a quiet network.\n\nA non-zero rate is not automatically a fault: a TLS ClientHello can legitimately carry no `server_name` (an IP-literal connection has nothing to put there). A rate that RISES while `muffin_egress_connections_total` stays flat is the signature worth acting on \u2014 it means traffic is leaving that we can no longer attribute.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "cps",
+     "min": 0,
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "single"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "legendFormat": "unparsed/s",
+     "expr": "rate(muffin_egress_unparsed_total[5m])"
     }
    ]
   }

@@ -853,6 +853,35 @@ are bonds, so the untyped "no sector" bucket reads **16,401** where the actionab
 row while ETF returns are computed from `etf/historical` into `performance` — a one-row fix in
 `required_facet`, not an ingestion failure.
 
+#### "Cache size on disk" was mostly Postgres
+
+Three defects stacked, and none of them could report itself:
+
+- The panel plotted `node_filesystem_size_bytes - node_filesystem_avail_bytes` for `/mnt/data` —
+  **the whole filesystem** — under a title claiming it was the cache. Measured 2026-08-28 that is
+  9.4 GB of which the cache is 0.6: **8.4 GB is `muffin_supabase-db-data`**. So the line drifting
+  *down* was Postgres recycling WAL and vacuuming, not the cache evicting.
+- `muffin-cache-size.sh` read a hardcoded `/var/lib/docker/volumes/...` while docker's data-root
+  here is `/mnt/data/docker`. It was measuring the **stale pre-migration copy**: frozen at 202 MB /
+  1,031 entries since 2026-08-26 while the live cache reached **596 MB / 3,206 entries**.
+- **No panel plotted the correct metric at all**, which is why nobody noticed the second point. An
+  unplotted metric cannot be seen to be wrong — the same shape as `exchange-listings` never being
+  scheduled and `untracked_listing` never being read.
+
+`muffin-disk-usage.sh` replaces it, resolving the root from `docker info --format
+'{{.DockerRootDir}}'` and running in two lanes because the costs differ by two orders of magnitude:
+every named volume is **0.17 s** (per minute), `du` over the 21 GB `/var/lib/containerd` is
+**1.5–3.7 s** (every 15 minutes). Panels: `http-cache on disk` plots bytes **and entries** (bytes
+alone cannot tell four SEC companyfacts payloads from forty thousand OpenFIGI answers), and the Node
+dashboard gains `Disk by docker volume` and `Image store and superseded directories`.
+
+Worth knowing while reading those: **`/` is at 79%** (21 GB containerd + 7.6 GB stale
+`/var/lib/docker`) against **`/mnt/data` at 11%**, because with the containerd image store images
+ignore `data-root` entirely.
+
+`check_collector_metrics_are_plotted.py` (`quality.yml`) now fails on a metric nothing plots, a
+panel nothing feeds, and a collector hardcoding a docker volumes path.
+
 ## Remote state (OCI Object Storage)
 
 Terraform state lives in the `muffin-tfstate` OCI Object Storage bucket via the S3-compatible backend
