@@ -706,6 +706,21 @@ panel reads that. By contrast `count(*)` over every market TABLE is 771 ms for a
 - **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
   only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations
   share `query2.finance.yahoo.com`).
+- **`muffin-egress.py`** — a systemd unit capturing TLS **ClientHello** packets and reading the
+  `server_name` (SNI) in plaintext, giving `muffin_egress_connections_total{host,container}` for
+  **every container, with no per-service configuration**. It is the only thing that sees
+  openbb-api's own calls to yfinance, firecrawl's scraping and the agent's LLM traffic — none of
+  which traverse `http-cache`. The BPF filter runs in the KERNEL (25 instructions), so only
+  ClientHellos reach userspace: measured **10 MB RSS, 0% CPU**.
+
+  **It counts CONNECTIONS, not requests** — keep-alive reuses one connection for many, so it is an
+  undercount of unknown factor and the metric is named accordingly. Attribution joins the
+  `docker_gwbridge` address (what egress actually originates from) back to the swarm service via
+  the container's SandboxID, because `docker inspect` exposes only the overlay IP.
+
+  A forward proxy cannot do this: openbb-api carries `aiohttp`, which ignores `*_PROXY` unless
+  `trust_env=True`, and modern yfinance fetches through `curl_cffi` — it would have missed the most
+  important provider and reported a confident zero.
 - **Traefik, node-exporter, postgres-exporter** — scraped by Prometheus. **There is no cAdvisor:**
   this node runs Docker on the containerd image store, so the graph-driver layout cAdvisor reads
   (`/mnt/data/docker/image/overlayfs/layerdb`) does not exist and it reports zero containers.
