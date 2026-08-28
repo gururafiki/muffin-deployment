@@ -268,24 +268,54 @@
         state: directory
         mode: "0755"
 
-    # `du` on the cache volume, once a minute, written atomically. The rename is not fussiness:
-    # node-exporter reads this file on ITS schedule, and reading a half-written one makes it drop
-    # the whole scrape with a parse error rather than skip a metric.
-    # `copy:` WITH A `src:`, like the python collector beside it. It was inline `content:` and
-    # survived only because it happened to contain no braces — Ansible renders inline content
-    # through Jinja, and one `{{ }}` added to it would fail the deploy exactly as the python one
-    # did. As a file it is also shell-checkable in CI.
-    - name: Install the http-cache size collector
+    # PER-DIRECTORY disk usage, in two lanes. The old collector was wrong twice over: it read a
+    # hardcoded /var/lib/docker path (STALE -- docker's data-root here is /mnt/data/docker), so its
+    # gauge sat frozen at 202 MB since 2026-08-26 while the live cache reached 596 MB; and no panel
+    # plotted it anyway, the chart labelled "Cache size on disk" being whole-filesystem used, 90% of
+    # which is muffin_supabase-db-data.
+    #
+    # Written atomically. The rename is not fussiness: node-exporter reads on ITS schedule, and a
+    # half-written file makes it drop the whole scrape with a parse error rather than skip a metric.
+    # `copy:` WITH A `src:`, like the python collectors beside it -- Ansible renders inline
+    # `content:` through Jinja, and this script now contains `{{.DockerRootDir}}`, which as inline
+    # content would fail the deploy exactly as the per-service collector once did.
+    - name: Install the disk usage collector
       copy:
-        src: "{{ muffin_template_dir }}/observability/collectors/muffin-cache-size.sh"
-        dest: /usr/local/bin/muffin-cache-size.sh
+        src: "{{ muffin_template_dir }}/observability/collectors/muffin-disk-usage.sh"
+        dest: /usr/local/bin/muffin-disk-usage.sh
         mode: "0755"
 
-    - name: Collect the http-cache size every minute
+    # 0.17s measured -- cheap enough to run at the scrape cadence.
+    - name: Collect per-volume disk usage every minute
+      cron:
+        name: muffin-disk-usage
+        minute: "*"
+        job: "/usr/local/bin/muffin-disk-usage.sh fast"
+
+    # `du` over /var/lib/containerd is 21 GB and takes 1.5-3.7s. It is the store that grows `/` on
+    # every image pull (79% used, against 11% on /mnt/data), so it is worth watching -- and not
+    # worth paying for sixty times an hour.
+    - name: Collect image-store disk usage every 15 minutes
+      cron:
+        name: muffin-disk-usage-slow
+        minute: "*/15"
+        job: "/usr/local/bin/muffin-disk-usage.sh slow"
+
+    # The superseded collector, its cron and the file it wrote. Left in place it would keep
+    # overwriting muffin_http_cache_bytes from the stale path every minute, and the new value would
+    # flap between the two depending on which ran last.
+    - name: Remove the superseded http-cache size collector
       cron:
         name: muffin-cache-size
-        minute: "*"
-        job: "/usr/local/bin/muffin-cache-size.sh"
+        state: absent
+
+    - name: Remove the superseded collector script and its stale metrics file
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/muffin-cache-size.sh
+        - /var/lib/node-exporter/muffin_http_cache.prom
 
     # THE EGRESS COLLECTOR IS LONG-RUNNING, so it is a systemd unit rather than a cron job like the
     # two above: it tails a tcpdump stream and keeps counters in memory. A cron-driven sample would
