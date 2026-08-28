@@ -54,6 +54,19 @@ insert into market.security_price (security_id, date, close, grain) values
   ('00000000-0000-0000-0000-000000009401', date '2024-01-04', 15, 'daily')
 on conflict (security_id, grain, date) do nothing;
 
+-- THE MARKER GOES WITH THE BARS, because that is what `security-price-history` does when it writes
+-- them (migration 140). `pending_price_history` now keys on `security.price_history_from` rather
+-- than scanning `security_price`: the scan measured 5.8s against ~8M weekly rows and grew with the
+-- series, two seconds from the PostgREST role's statement timeout, and the coverage view paid the
+-- same cost at 7.9s. A column read is 8ms.
+--
+-- It IS a denormalisation, and the risk it carries is divergence — which assertion 6b below is
+-- what guards. An index was measured first and does not solve it: the plan is already an
+-- index-only scan on the right index, and the cost is 14,489 buffer READS because that index is
+-- 853MB and does not stay in cache on this node.
+update market.security set price_history_from = date '2006-01-02'
+ where security_id = '00000000-0000-0000-0000-000000009401';
+
 -- A MATERIALIZED VIEW MAKES THIS A SNAPSHOT TEST. `price_series` joins `market.symbol_security`,
 -- which is materialised (migration 102) — so rows inserted in this transaction are invisible to it
 -- until it is rebuilt. NON-concurrently, deliberately: `refresh ... concurrently` cannot run inside
@@ -113,6 +126,23 @@ begin
    where security_id = '00000000-0000-0000-0000-000000009401';
   if n <> 0 then
     raise exception 'a security with weekly history is still queued for the backfill (% rows) — twenty years would be re-fetched for it on every run against a rate-limited provider', n;
+  end if;
+
+  -- 6b. THE MARKER AND THE BARS MUST AGREE. The backlog keys on `price_history_from`, so a
+  --     security whose marker is missing while its bars exist would be re-fetched for twenty years
+  --     — and one whose marker is set while its bars are gone would never be repaired. Neither
+  --     shows up in any count, which is why it is asserted rather than trusted.
+  select count(*) into n
+    from market.security s
+   where s.security_type_code = 'equity'
+     and (s.price_history_from is not null) is distinct from
+         (exists (select 1 from market.security_price p
+                   where p.security_id = s.security_id and p.grain = 'weekly'));
+  if n <> 0 then
+    raise exception
+      'price_history_from disagrees with security_price for % securities — the marker is a '
+      'denormalisation of the bars, so a divergence means the backlog either re-fetches twenty '
+      'years for a security that has them, or never repairs one that does not', n;
   end if;
 
   -- 7. AND THE ONE THAT NEEDS HISTORY IS QUEUED. Paired with 6 on purpose: a backlog that returns

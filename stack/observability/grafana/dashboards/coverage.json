@@ -10,18 +10,18 @@
   "muffin"
  ],
  "time": {
-  "from": "now-30d",
+  "from": "now-7d",
   "to": "now"
  },
  "timepicker": {},
  "panels": [
   {
    "type": "bargauge",
-   "title": "Completeness RIGHT NOW, by security type",
-   "description": "The trend panels below need HISTORY, and coverage is sampled only TWICE A DAY behind an 11-hour gate \u2014 so after any outage they are two dots at the right-hand edge of a 30-day axis, which reads as 'No Data' even though the query returns rows. Measured 2026-08-28: exactly 2 points. This panel answers the same question from the LATEST sample alone, so the dashboard is useful on day one and while the history refills. Completeness is TYPED \u2014 market.required_facet decides what each type owes, because a bond arrives from an N-PORT filing and that is all it will ever be; one flat definition would report 55% of the universe permanently broken.",
+   "title": "Funnel \u2014 the stages that genuinely gate each other",
+   "description": "A REAL FUNNEL, over the five stages that are genuinely nested \u2014 each one REQUIRES the stage above it. Sector and industry are read off the profile response, and the profile needs a symbol, so the chain is causal rather than merely sorted.\n\nThe other facets are NOT in here on purpose. Measured 2026-08-28, `metrics` (8,948) EXCEEDS `statements` (8,842), because metrics also come straight from SEC XBRL rather than only from stored statements \u2014 so putting them in a funnel would assert a pipeline that does not exist. They are in the bar panel below, which claims no ordering.\n\nGrafana OSS has no funnel panel; a horizontal bar gauge sorted descending is the honest equivalent and needs no plugin.",
    "gridPos": {
-    "h": 6,
-    "w": 24,
+    "h": 8,
+    "w": 12,
     "x": 0,
     "y": 0
    },
@@ -30,34 +30,152 @@
     "uid": "muffin-postgres"
    },
    "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "min": 0,
-     "max": 100,
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "red",
-        "value": null
-       },
-       {
-        "color": "orange",
-        "value": 40
-       },
-       {
-        "color": "green",
-        "value": 75
-       }
-      ]
-     }
-    },
+    "defaults": {},
     "overrides": []
    },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawSql": "select 'universe' as metric, sum(securities)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\nunion all select 'symbol',   sum(with_symbol)::float     from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\nunion all select 'profile',  sum(with_profile)::float    from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\nunion all select 'sector',   sum(with_sector)::float     from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\nunion all select 'industry', sum(with_industry)::float   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ],
    "options": {
     "displayMode": "gradient",
     "orientation": "horizontal",
-    "showUnfilled": true
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": true
+    }
+   }
+  },
+  {
+   "type": "bargauge",
+   "title": "Independent facets \u2014 coverage, no dependency implied",
+   "description": "Every facet that is NOT part of the nested chain, sorted by coverage. Deliberately a bar chart rather than a funnel: these do not gate one another, and ordering them would invent a pipeline. Scoped by the Country and Sector variables above.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 0
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "rawSql": "select 'price' as metric, sum(with_price)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'performance' as metric, sum(with_performance)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'fundamentals' as metric, sum(with_fundamentals)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'share stats' as metric, sum(with_share_stats)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'price history' as metric, sum(with_price_history)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'estimates' as metric, sum(with_estimates)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'metrics' as metric, sum(with_metrics)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'statements' as metric, sum(with_statements)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'news' as metric, sum(with_news)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'filings' as metric, sum(with_filings)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'dividends' as metric, sum(with_dividends)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'quarters' as metric, sum(with_quarters)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'leadership' as metric, sum(with_leadership)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'insider' as metric, sum(with_insider)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'deep daily' as metric, sum(with_daily_history)::float as value   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     }
+    }
+   ],
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": true
+    }
+   }
+  },
+  {
+   "type": "table",
+   "title": "Every facet for this scope \u2014 have, missing, percent",
+   "description": "The 'what exactly is missing for CN energy' view. One row per facet for whatever the Country and Sector variables select: All/All is the whole universe, US/All a country, All/energy a sector, US/energy the cross. `missing` is the actionable number \u2014 it is the count of securities a resource still has to reach.",
+   "gridPos": {
+    "h": 11,
+    "w": 12,
+    "x": 0,
+    "y": 8
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "percent"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "red",
+           "value": null
+          },
+          {
+           "color": "orange",
+           "value": 50
+          },
+          {
+           "color": "yellow",
+           "value": 75
+          },
+          {
+           "color": "green",
+           "value": 90
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "sortBy": [
+     {
+      "displayName": "percent",
+      "desc": false
+     }
+    ]
    },
    "targets": [
     {
@@ -67,78 +185,116 @@
       "type": "postgres",
       "uid": "muffin-postgres"
      },
-     "rawSql": "select security_type_code as metric,\n       round(100.0 * sum(complete) / nullif(sum(securities), 0), 1) as value\n  from market.coverage_sample\n where sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and dimension = 'security_type'\n group by security_type_code\n order by 2 desc"
+     "rawSql": "select 'symbol' as \"facet\", sum(with_symbol) as \"have\", sum(securities) - sum(with_symbol) as \"missing\",\n             round(100.0*sum(with_symbol)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'profile' as \"facet\", sum(with_profile) as \"have\", sum(securities) - sum(with_profile) as \"missing\",\n             round(100.0*sum(with_profile)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'price' as \"facet\", sum(with_price) as \"have\", sum(securities) - sum(with_price) as \"missing\",\n             round(100.0*sum(with_price)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'performance' as \"facet\", sum(with_performance) as \"have\", sum(securities) - sum(with_performance) as \"missing\",\n             round(100.0*sum(with_performance)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'sector' as \"facet\", sum(with_sector) as \"have\", sum(securities) - sum(with_sector) as \"missing\",\n             round(100.0*sum(with_sector)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'industry' as \"facet\", sum(with_industry) as \"have\", sum(securities) - sum(with_industry) as \"missing\",\n             round(100.0*sum(with_industry)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'fundamentals' as \"facet\", sum(with_fundamentals) as \"have\", sum(securities) - sum(with_fundamentals) as \"missing\",\n             round(100.0*sum(with_fundamentals)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'share stats' as \"facet\", sum(with_share_stats) as \"have\", sum(securities) - sum(with_share_stats) as \"missing\",\n             round(100.0*sum(with_share_stats)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'price history' as \"facet\", sum(with_price_history) as \"have\", sum(securities) - sum(with_price_history) as \"missing\",\n             round(100.0*sum(with_price_history)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'estimates' as \"facet\", sum(with_estimates) as \"have\", sum(securities) - sum(with_estimates) as \"missing\",\n             round(100.0*sum(with_estimates)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'metrics' as \"facet\", sum(with_metrics) as \"have\", sum(securities) - sum(with_metrics) as \"missing\",\n             round(100.0*sum(with_metrics)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'statements' as \"facet\", sum(with_statements) as \"have\", sum(securities) - sum(with_statements) as \"missing\",\n             round(100.0*sum(with_statements)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'quarters' as \"facet\", sum(with_quarters) as \"have\", sum(securities) - sum(with_quarters) as \"missing\",\n             round(100.0*sum(with_quarters)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'news' as \"facet\", sum(with_news) as \"have\", sum(securities) - sum(with_news) as \"missing\",\n             round(100.0*sum(with_news)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'filings' as \"facet\", sum(with_filings) as \"have\", sum(securities) - sum(with_filings) as \"missing\",\n             round(100.0*sum(with_filings)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'dividends' as \"facet\", sum(with_dividends) as \"have\", sum(securities) - sum(with_dividends) as \"missing\",\n             round(100.0*sum(with_dividends)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'leadership' as \"facet\", sum(with_leadership) as \"have\", sum(securities) - sum(with_leadership) as \"missing\",\n             round(100.0*sum(with_leadership)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'insider' as \"facet\", sum(with_insider) as \"have\", sum(securities) - sum(with_insider) as \"missing\",\n             round(100.0*sum(with_insider)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector' union all select 'deep daily' as \"facet\", sum(with_daily_history) as \"have\", sum(securities) - sum(with_daily_history) as \"missing\",\n             round(100.0*sum(with_daily_history)/nullif(sum(securities),0),1) as \"percent\"   from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Country \u00d7 sector \u2014 completeness, worst first",
+   "description": "The cross, 637 non-empty combinations. Ranked worst-first and floored at 20 securities so a two-security bucket at 0% does not top the list \u2014 a completeness figure over a handful of rows is noise, not a finding.\n\nUse it to spot a gap, then select that country and sector in the variables above to see WHICH facets are missing.",
+   "gridPos": {
+    "h": 11,
+    "w": 12,
+    "x": 12,
+    "y": 8
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "complete %"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background"
+        }
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "red",
+           "value": null
+          },
+          {
+           "color": "orange",
+           "value": 40
+          },
+          {
+           "color": "yellow",
+           "value": 70
+          },
+          {
+           "color": "green",
+           "value": 90
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "sortBy": [
+     {
+      "displayName": "complete %",
+      "desc": false
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "format": "table",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "rawSql": "select split_part(bucket,'|',1) as \"country\",\n       split_part(bucket,'|',2) as \"sector\",\n       securities,\n       round(100.0*complete/nullif(securities,0),1) as \"complete %\",\n       round(100.0*with_statements/nullif(securities,0),1) as \"statements %\",\n       round(100.0*with_industry/nullif(securities,0),1)   as \"industry %\"\n  from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and securities >= 20\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\n order by 100.0*complete/nullif(securities,0) asc\n limit 60"
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Completeness by security type",
-   "description": "Percent of each type meeting the facets ITS type requires (market.required_facet). Bonds require nothing \u2014 they arrive from an N-PORT filing and that is all they will ever be \u2014 so they sit at 100% by definition. 15,159 of 27,629 securities are bonds; a flat definition would report the majority of the universe permanently broken.",
+   "title": "Is this scope improving?",
+   "description": "Completeness over time for the current selection. Coverage samples TWICE DAILY behind an 11-hour gate, so this needs days rather than hours to say anything \u2014 a flat line here after a deploy is youth, not a stall. `showPoints: always` because two samples a day is not a line.",
    "gridPos": {
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 6
+    "y": 19
    },
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
    },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "postgres",
-      "uid": "muffin-postgres"
-     },
-     "format": "time_series",
-     "rawQuery": true,
-     "rawSql": "select sampled_at as time, security_type_code as metric,\n       round(100.0 * complete / nullif(securities, 0), 1) as value\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension = 'security_type'\n order by sampled_at"
-    }
-   ],
    "fieldConfig": {
     "defaults": {
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "always",
-      "pointSize": 6,
-      "spanNulls": true
-     },
-     "unit": "percent"
-    },
-    "overrides": []
-   }
-  },
-  {
-   "type": "table",
-   "title": "Least complete countries (latest sample)",
-   "description": "Where the gaps actually are. Restricted to buckets of 20+ securities: a country with three securities can be 0% complete and mean nothing.",
-   "gridPos": {
-    "h": 11,
-    "w": 12,
-    "x": 0,
-    "y": 14
-   },
-   "datasource": {
-    "type": "postgres",
-    "uid": "muffin-postgres"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "postgres",
-      "uid": "muffin-postgres"
-     },
-     "format": "table",
-     "rawQuery": true,
-     "rawSql": "select bucket as \"country\", security_type_code as \"type\", securities, complete,\n       round(100.0 * complete / nullif(securities,0), 1) as \"complete %\"\n  from market.coverage_sample\n where sampled_at = (select max(sampled_at) from market.coverage_sample) and dimension = 'country' and securities >= 20\n order by 100.0 * complete / nullif(securities,0) asc nulls first\n limit 30"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
+     "unit": "percent",
      "custom": {
       "lineWidth": 2,
       "fillOpacity": 8,
@@ -148,204 +304,58 @@
      }
     },
     "overrides": []
-   }
-  },
-  {
-   "type": "table",
-   "title": "Coverage matrix \u2014 which FACET is missing, by sector",
-   "description": "The point of storing facet counts as COLUMNS: one panel shows which facet is the bottleneck rather than a single completeness score that hides it.",
-   "gridPos": {
-    "h": 11,
-    "w": 12,
-    "x": 12,
-    "y": 14
-   },
-   "datasource": {
-    "type": "postgres",
-    "uid": "muffin-postgres"
    },
    "targets": [
     {
      "refId": "A",
-     "datasource": {
-      "type": "postgres",
-      "uid": "muffin-postgres"
-     },
-     "format": "table",
-     "rawQuery": true,
-     "rawSql": "select bucket as \"sector\", securities,\n       with_symbol as \"symbol\", with_sector as \"sector\u2713\", with_industry as \"industry\",\n       with_price as \"price\", with_performance as \"perf\", with_profile as \"profile\",\n       with_fundamentals as \"fundamentals\", with_statements as \"statements\", with_metrics as \"metrics\"\n  from market.coverage_sample\n where sampled_at = (select max(sampled_at) from market.coverage_sample) and dimension = 'sector' and security_type_code = 'equity'\n order by securities desc"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "always",
-      "pointSize": 6,
-      "spanNulls": true
-     }
-    },
-    "overrides": []
-   }
-  },
-  {
-   "type": "timeseries",
-   "title": "Price freshness \u2014 securities priced in the last N days",
-   "description": "The gap between 'have a symbol' and 'last 30d' is the population the price pipeline is not reaching. Cheap because migration 130 indexed (date, security_id) \u2014 the same question was a Parallel Seq Scan over 10.9M rows and 11 seconds before it.",
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 25
-   },
-   "datasource": {
-    "type": "postgres",
-    "uid": "muffin-postgres"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "postgres",
-      "uid": "muffin-postgres"
-     },
      "format": "time_series",
-     "rawQuery": true,
-     "rawSql": "select sampled_at as time,\n       sum(priced_3d)  as \"last 3d\",\n       sum(priced_7d)  as \"last 7d\",\n       sum(priced_30d) as \"last 30d\",\n       sum(with_symbol) as \"have a symbol\"\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension = 'security_type'\n group by sampled_at order by sampled_at"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "always",
-      "pointSize": 6,
-      "spanNulls": true
-     }
-    },
-    "overrides": []
-   }
-  },
-  {
-   "type": "timeseries",
-   "title": "Completeness by MSCI tier",
-   "description": "Whether emerging and frontier markets are systematically under-ingested relative to developed ones. Equities only \u2014 the tier of a bond is not a meaningful lens.",
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 25
-   },
-   "datasource": {
-    "type": "postgres",
-    "uid": "muffin-postgres"
-   },
-   "targets": [
-    {
-     "refId": "A",
      "datasource": {
       "type": "postgres",
       "uid": "muffin-postgres"
      },
-     "format": "time_series",
-     "rawQuery": true,
-     "rawSql": "select sampled_at as time, bucket as metric,\n       round(100.0 * complete / nullif(securities,0), 1) as value\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension = 'msci_tier' and security_type_code = 'equity'\n order by sampled_at"
+     "rawSql": "select sampled_at as time, 'complete' as metric,\n       round(100.0*sum(complete)/nullif(sum(securities),0),1) as value\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension='country_sector' and security_type_code='equity'\n   and split_part(bucket,'|',1) like '$country' and split_part(bucket,'|',2) like '$sector'\n group by sampled_at order by sampled_at"
     }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "always",
-      "pointSize": 6,
-      "spanNulls": true
-     },
-     "unit": "percent"
-    },
-    "overrides": []
-   }
-  },
-  {
-   "type": "timeseries",
-   "title": "Completeness by market-cap band",
-   "description": "Coverage is usually good for mega caps and poor for small ones, because the backlogs are ordered by fund weight. This is the panel that says how bad the tail is.",
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 33
-   },
-   "datasource": {
-    "type": "postgres",
-    "uid": "muffin-postgres"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "postgres",
-      "uid": "muffin-postgres"
-     },
-     "format": "time_series",
-     "rawQuery": true,
-     "rawSql": "select sampled_at as time, bucket as metric,\n       round(100.0 * complete / nullif(securities,0), 1) as value\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension = 'cap_band' and security_type_code = 'equity'\n order by sampled_at"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "always",
-      "pointSize": 6,
-      "spanNulls": true
-     },
-     "unit": "percent"
-    },
-    "overrides": []
-   }
-  },
-  {
-   "type": "timeseries",
-   "title": "Securities with no sector / no symbol at all",
-   "description": "A null dimension is a real population \u2014 'securities with no sector' is precisely the gap this dashboard exists to show \u2014 so it is bucketed as `unknown` rather than dropped by the group by.",
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 33
-   },
-   "datasource": {
-    "type": "postgres",
-    "uid": "muffin-postgres"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "postgres",
-      "uid": "muffin-postgres"
-     },
-     "format": "time_series",
-     "rawQuery": true,
-     "rawSql": "select sampled_at as time,\n       sum(securities) filter (where bucket = 'unknown') as \"unknown bucket\"\n  from market.coverage_sample\n where $__timeFilter(sampled_at) and dimension = 'sector'\n group by sampled_at order by sampled_at"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "always",
-      "pointSize": 6,
-      "spanNulls": true
-     }
-    },
-    "overrides": []
-   }
+   ]
   }
- ]
+ ],
+ "templating": {
+  "list": [
+   {
+    "name": "country",
+    "label": "Country",
+    "type": "query",
+    "datasource": {
+     "type": "postgres",
+     "uid": "muffin-postgres"
+    },
+    "includeAll": true,
+    "allValue": "%",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "query": "select distinct split_part(bucket,'|',1) as __text, split_part(bucket,'|',1) as __value\n  from market.coverage_sample\n where dimension='country_sector'\n   and sampled_at=(select max(sampled_at) from market.coverage_sample)"
+   },
+   {
+    "name": "sector",
+    "label": "Sector",
+    "type": "query",
+    "datasource": {
+     "type": "postgres",
+     "uid": "muffin-postgres"
+    },
+    "includeAll": true,
+    "allValue": "%",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "query": "select distinct split_part(bucket,'|',2) as __text, split_part(bucket,'|',2) as __value\n  from market.coverage_sample\n where dimension='country_sector'\n   and sampled_at=(select max(sampled_at) from market.coverage_sample)"
+   }
+  ]
+ }
 }

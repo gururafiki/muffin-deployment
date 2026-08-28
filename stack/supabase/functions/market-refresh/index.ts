@@ -1682,6 +1682,10 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       }
 
       const start = `${new Date().getUTCFullYear() - PRICE_HISTORY_YEARS}-01-01`
+      // Written AFTER the bars land, never before: the marker is what removes a security from
+      // `pending_price_history`, so setting it first would drop the security out of the backlog
+      // with nothing stored.
+      const earliestBySecurity = new Map<string, string>()
       let written = 0
       let batches = 0
       let batchesFailed = 0
@@ -1757,6 +1761,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
             for (const b of bars) {
               priceRows.push({ security_id: g.securityId, date: b.date, close: b.close, grain: 'weekly' })
             }
+            // THE MARKER, so nothing has to SCAN for this again. Asking `security_price` whether a
+            // security has weekly history costs 7.9s cold across ~8M rows, and both
+            // `pending_price_history` and the coverage view were paying it — the backlog read
+            // measured 5.8s, two seconds from the PostgREST role's timeout. Recorded here, it is
+            // an 8ms column read. Same pattern as `daily_history_from`.
+            earliestBySecurity.set(g.securityId,
+              bars.reduce((min, b) => (b.date < min ? b.date : min), bars[0].date))
           }
 
           for (let j = 0; j < priceRows.length; j += 500) {
@@ -1769,6 +1780,15 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
             if (error) throw new Error(`security_price weekly upsert failed: ${error.message}`)
           }
           written += priceRows.length
+
+          for (const [securityId, earliest] of earliestBySecurity) {
+            const { error } = await market
+              .from('security')
+              .update({ price_history_from: earliest })
+              .eq('security_id', securityId)
+            if (error) throw new Error(`price_history_from update failed: ${error.message}`)
+          }
+          earliestBySecurity.clear()
         } catch (e) {
           batchesFailed++
           const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
