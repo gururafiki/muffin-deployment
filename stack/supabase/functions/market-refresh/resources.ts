@@ -1037,6 +1037,38 @@ export const PRICE_WINDOW_DAYS = 400
 export const PRICE_HISTORY_YEARS = 20
 
 /**
+ * Where the DEEP DAILY series starts, as an explicit date rather than a year offset.
+ *
+ * EXPLICIT, BECAUSE AN OPEN-ENDED RANGE IS A CACHE TRAP. Every provider call goes through
+ * `http-cache`, whose key is the URI verbatim — so a `start_date` computed from `now()` mints a new
+ * cache entry each year, while omitting it entirely makes one key whose answer keeps growing
+ * ("everything up to whenever the first caller asked"). A fixed date is one stable key.
+ *
+ * 1970 is before any listing in this universe, so the provider simply returns everything it has.
+ * Measured 2026-08-28: BHP.AX gives 9,893 bars from 1988, NESN.SW 9,373 from 1990, SAP.DE 7,264
+ * from 1998 — an average around 7,300 bars, ~29 years. Asking for more than exists costs nothing;
+ * asking for too little cannot be repaired without refetching the whole universe.
+ */
+export const DAILY_HISTORY_START = '1970-01-01'
+
+/**
+ * Symbols per request for the deep daily fetch, and it is SMALLER than the weekly resource's 12
+ * ON PURPOSE.
+ *
+ * MEASURED 2026-08-28: twelve symbols at full history is **11.6 MB of JSON in 8.1 s**, against
+ * 188 KB for one symbol of weekly. Parsed into JS objects that is several times larger again, and
+ * the worker has 256 MB — `security-xbrl` has already been killed by the supervisor at comparable
+ * pressure, and a killed worker never calls `finish_refresh`, so it holds the in-flight lock for
+ * ~2 minutes and the next call reports `skipped: fresh or in flight`, which reads as a TTL skip
+ * rather than as wreckage.
+ *
+ * Six is the compromise the two constraints leave: the binding limit on THROUGHPUT is requests per
+ * unit time, so one request per six securities beats one per security, while peak memory stays
+ * bounded to about half of what was measured to be risky.
+ */
+export const DAILY_HISTORY_BATCH = 6
+
+/**
  * How long an article is kept. The provider only reaches back about a month, so a weekly refresh
  * adds roughly a quarter of a fresh set each time — unbounded, that compounds for ever for data
  * whose value decays in days. 90 days is deep enough for a stock page and shallow enough that the
