@@ -92,10 +92,20 @@ select 'frozen_series', count(*),
 -- DO NOT WIDEN THIS to `industry_missing_at` or `statements_missing_at`: those come from different
 -- endpoints, where "has prices, has no industry" is an ordinary gap and not a contradiction.
 union all
+-- ONLY A MOVING PRICE CONTRADICTS THE MARK, and getting this wrong makes the check the exact
+-- recurring rule migration 055 forbids. Its header is explicit: a money-market line like GVMXX
+-- "has a bar every day and a single distinct close forever, so it legitimately yields no return,
+-- earns its mark honestly, and a recurring 'has bars, clear the mark' rule would re-ask for it
+-- four times a day for ever." Measured on the first production read: of 29 flagged securities
+-- **15 had exactly ONE distinct close in 30 days** — Cementir, OUE REIT, RHI Magnesita, China
+-- Galaxy — and every one of those marks is correct. Holding BARS is not evidence; holding bars
+-- that MOVE is, because a return can then be computed and the mark says it cannot.
 select 'contradicted_negative_cache', count(*),
-       'securities marked as having no price series while holding recent bars'
+       'securities marked as having no returns while holding recent bars that MOVE'
   from market.security s
  where s.performance_missing_at is not null
+   and (select count(distinct p.close) from market.security_price p
+         where p.security_id = s.security_id and p.date > current_date - 30) > 1
    and exists (select 1 from market.security_price p
                 where p.security_id = s.security_id and p.date > current_date - 7)
 
@@ -107,14 +117,31 @@ select 'contradicted_negative_cache', count(*),
 union all
 select 'country_with_no_symbols', count(*),
        'countries with 20+ equities and not one provider symbol'
+  -- ADDRESSABLE MEANS `coalesce(provider_symbol, ticker)`, WHICH IS THE FETCH KEY EVERY RESOURCE
+  -- USES — not `security_provider_symbol` alone. Measured on the first production read: this
+  -- flagged Bermuda, whose 56 equities have no provider symbol and **all 56 have a ticker**
+  -- (NCLH, ESNT, FLTLF, ALBHF). They are perfectly fetchable; OpenFIGI's local-symbol pass simply
+  -- never needed to write a row for a US- or HK-listed line. Migration 039 records the same
+  -- distinction from the other side — the ticker is the wrong symbol for PRICES and the right one
+  -- for SEC, so neither column alone is "the symbol".
+  --
+  -- The SHAPE stays "not ONE security in the country is addressable", which is the Taiwan wipe
+  -- this exists to catch. Rewriting it as "20+ securities are individually unaddressable" was
+  -- tried and is WRONG: 334 equities lack both keys as ordinary backlog residue, so it flagged
+  -- US, CN and FR — a normal tail reported as a catastrophe.
   from (select s.country_iso2
           from market.security s
          where s.security_type_code = 'equity' and s.country_iso2 is not null
          group by s.country_iso2
         having count(*) >= 20
-           and not exists (select 1 from market.security_provider_symbol sp
-                            join market.security s2 using (security_id)
-                           where s2.country_iso2 = s.country_iso2)) q
+           and not exists (
+                 select 1 from market.security s2
+                  where s2.country_iso2 = s.country_iso2
+                    and (exists (select 1 from market.security_provider_symbol sp
+                                  where sp.security_id = s2.security_id)
+                      or exists (select 1 from market.security_identifier i
+                                  where i.security_id = s2.security_id
+                                    and i.kind_code = 'ticker')))) q
 
 -- A BACKLOG THAT CANNOT BE SATISFIED. `pending_industry` asked "has a sector, has no industry" and
 -- expressed the second half as a left join plus `where … is null`, which filters ROWS rather than
