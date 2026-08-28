@@ -487,3 +487,51 @@ groups:
 
         A `written` that looks like throughput and never moves is this system''s most reliable disguise for a page that is not advancing. Check `market.backlog_drain`, then whether the head of the backlog
         already has the data it is being fetched for — that is what an unsatisfiable view looks like.'
+  - uid: muffin-verify-silent
+    title: market-verify has not run
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: select case when max(sampled_at) < now() - interval '36 hours' or max(sampled_at) is null then 1 else 0 end as value from market.universe_sample where metric like 'verify.%'
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 1h
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: '{{ $values.B }} backlog(s) have not moved in 24 hours'
+      description: 'The nightly correctness gate runs in GitHub Actions and NOTHING notices when it silently does not. Measured 2026-08-28: the last run was 08-27 13:47 — 26 hours earlier — against a daily
+        03:30 schedule. That is the same unreliability the warm-up was moved off (19 runs against 32 expected, gaps to 13.3 hours), and market-verify deliberately STAYS there because it must read as anon
+        over HTTP: run inside the database it would bypass the anon key, RLS, grants, the 3-second anon timeout and PostgREST''s schema cache, which is the whole point of it.
+
+
+        So it cannot be moved, and it can only be watched. This fires when no `verify.*` metric has been recorded for 36 hours — a whole missed night plus margin.
+
+
+        RUNBOOK: `gh workflow run market-verify.yml --ref main`. If it passes on demand, GitHub dropped the schedule; if it fails, read the failing assertion.'
