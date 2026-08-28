@@ -192,7 +192,7 @@
   {
    "type": "table",
    "title": "Country \u00d7 sector \u2014 completeness (sortable; worst first by default)",
-   "description": "Every (country, sector) bucket holding at least 20 securities \u2014 106 of the 637 combinations. Click a column to re-sort; the default is worst-first because that is where the work is.\n\nIT USED TO BE `limit 60`, AND THAT HID THE UNITED STATES. US is the best-covered country, so its eleven real sectors ranked 90-98 of 106 and fell off the end \u2014 leaving only `US / unknown` (92 securities with no sector, genuinely 0%) visible, which read as 'the US is missing'. A worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy things are the ones you check when something looks wrong.\n\nThe >=20 floor stays: a completeness figure over a handful of securities is noise, and a two-stock bucket at 0% would otherwise top the list for ever.",
+   "description": "Every (country, sector) bucket holding at least 20 securities \u2014 106 of the 637 combinations. Click a column to re-sort; the default is worst-first because that is where the work is.\n\nIT USED TO BE `limit 60`, AND THAT HID THE UNITED STATES. US is the best-covered country, so its eleven real sectors ranked 90-98 of 106 and fell off the end \u2014 leaving only `US / unknown` (92 securities with no sector, genuinely 0%) visible, which read as 'the US is missing'. A worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy things are the ones you check when something looks wrong.\n\nThe >=20 floor stays: a completeness figure over a handful of securities is noise, and a two-stock bucket at 0% would otherwise top the list for ever.\n\nTHE SIZE FLOOR IS A VARIABLE, NOT A CONSTANT. At the default of 20 it hides 531 of 637 buckets \u2014 a defensible choice (a 2-security bucket at 0% is noise, not a signal) but not one that should be invisible. Set `Min securities in bucket` to 1 to see all of them. The panel previously ALSO carried `limit 60`, which deleted the United States: 106 buckets cleared the floor, the US ranked 90-98 of them BECAUSE it is well covered, and the only US row that survived was `US / unknown` at 0%.",
    "gridPos": {
     "h": 11,
     "w": 12,
@@ -274,7 +274,7 @@
       "type": "postgres",
       "uid": "muffin-postgres"
      },
-     "rawSql": "select split_part(bucket,'|',1) as \"country\",\n       split_part(bucket,'|',2) as \"sector\",\n       securities,\n       round(100.0*complete/nullif(securities,0),1) as \"complete %\",\n       round(100.0*with_statements/nullif(securities,0),1) as \"statements %\",\n       round(100.0*with_industry/nullif(securities,0),1)   as \"industry %\"\n  from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and securities >= 20\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\n order by 100.0*complete/nullif(securities,0) asc"
+     "rawSql": "select split_part(bucket,'|',1) as \"country\",\n       split_part(bucket,'|',2) as \"sector\",\n       securities,\n       round(100.0*complete/nullif(securities,0),1) as \"complete %\",\n       round(100.0*with_statements/nullif(securities,0),1) as \"statements %\",\n       round(100.0*with_industry/nullif(securities,0),1)   as \"industry %\"\n  from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and securities >= $minsize\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\n order by 100.0*complete/nullif(securities,0) asc"
     }
    ]
   },
@@ -355,6 +355,49 @@
     "refresh": 2,
     "sort": 1,
     "query": "select distinct split_part(bucket,'|',2) as __text, split_part(bucket,'|',2) as __value\n  from market.coverage_sample\n where dimension='country_sector'\n   and sampled_at=(select max(sampled_at) from market.coverage_sample)"
+   },
+   {
+    "name": "minsize",
+    "label": "Min securities in bucket",
+    "type": "custom",
+    "query": "1,5,10,20,50,100",
+    "current": {
+     "text": "20",
+     "value": "20"
+    },
+    "options": [
+     {
+      "text": "1",
+      "value": "1",
+      "selected": false
+     },
+     {
+      "text": "5",
+      "value": "5",
+      "selected": false
+     },
+     {
+      "text": "10",
+      "value": "10",
+      "selected": false
+     },
+     {
+      "text": "20",
+      "value": "20",
+      "selected": true
+     },
+     {
+      "text": "50",
+      "value": "50",
+      "selected": false
+     },
+     {
+      "text": "100",
+      "value": "100",
+      "selected": false
+     }
+    ],
+    "description": "Buckets smaller than this are hidden. A 2-security bucket at 0% would otherwise top a worst-first list. Set to 1 to see EVERY bucket \u2014 nothing is hidden by a decision you cannot see."
    }
   ]
  }
