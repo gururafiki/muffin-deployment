@@ -16,10 +16,13 @@
 -- still sum to the number it was accepted against? That question has one right answer and cannot
 -- be confused by a provider's vocabulary. Drift against companyfacts remains worth reporting, but
 -- it is a SOURCE-AGREEMENT observation rather than a defect in the split.
-alter table market.security_segment add column if not exists reconciled_to numeric;
-
-comment on column market.security_segment.reconciled_to is
-  'The figure this member''s split was accepted against — the filing''s own consolidated value for a flat split, the parent member''s value for a nested one. NULL for partition 0, which was never placed. Stored so a guard can ask "does this split still add up" without comparing against a second, independently derived total.';
+-- THE COLUMN ITSELF IS DECLARED IN MIGRATION 141, not here, and that is not tidiness. Migration
+-- 150's `security_segment_latest` lists its columns explicitly and runs BEFORE this file, so a
+-- column introduced at 154 cannot appear in that view without 150 failing on the first pass —
+-- and a view that omits a column answers **400**, not null, to every reader asking for it. The
+-- guard this column exists for could not run at all until the declaration moved.
+--
+-- What remains here is the part that must happen exactly once: re-reading what is already stored.
 
 -- ── AND EVERY FILING ALREADY READ MUST BE READ AGAIN ─────────────────────────────────────────
 --
