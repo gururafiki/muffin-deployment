@@ -207,7 +207,8 @@ jobs:
           deno check stack/supabase/functions/market-refresh/index.ts \
                      stack/supabase/functions/market-refresh/logic-check.ts \
                      stack/supabase/functions/market-refresh/xbrl-check.ts \
-                     stack/supabase/functions/market-refresh/segments-check.ts
+                     stack/supabase/functions/market-refresh/segments-check.ts \
+                     stack/supabase/functions/market-refresh/wikidata-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
@@ -237,6 +238,11 @@ jobs:
           # rules disagree (7 lines / 167,702 against 9 lines / 335,404); all eight mutations of the
           # rules were confirmed to turn them red before this line was added.
           deno run --allow-read stack/supabase/functions/market-refresh/segments-check.ts
+          # Wikidata is the loosest-shaped source here — crowd-sourced, open-vocabulary, and the
+          # only multi-valued one. The failures it guards against are shapes: an empty industry
+          # list read as one blank entry, a duplicate label hitting SQLSTATE 21000 on the node
+          # upsert, and an unsanitised ISIN escaping a SPARQL string literal.
+          deno run --allow-read stack/supabase/functions/market-refresh/wikidata-check.ts
 
       # The quarter-shape check in market-verify rests on one number: that year-to-date stacking
       # gives a last/first quarter ratio near 3 while discrete quarters give near 1. That claim was

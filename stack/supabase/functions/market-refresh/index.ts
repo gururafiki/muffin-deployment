@@ -36,6 +36,7 @@ import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHi
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
 import { fetchInstance, findInstanceUrl, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
+import { fetchIndustries, slug } from './wikidata.ts'
 import { candidateSymbols } from './symbol-repair.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
@@ -310,6 +311,16 @@ const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
 const SEGMENTS_RESOURCE = 'security-segments'
 const FILING_HISTORY_RESOURCE = 'security-filing-history'
+const WIKIDATA_RESOURCE = 'security-wikidata-industries'
+/**
+ * ISINs per SPARQL request. The endpoint is public, free and SHARED — a politeness limit rather
+ * than a quota, with a 60-second query timeout — so batching is the whole game: measured, 12 ISINs
+ * cost ONE request and 0.78 s, where 12 requests would be a dozen seconds of someone else's
+ * capacity. Fifty is well inside the timeout and keeps the URL-free POST body small.
+ */
+const WIKIDATA_BATCH = 50
+/** Batches per run. Three requests a run against a shared public endpoint is unremarkable. */
+const WIKIDATA_BATCHES = 3
 /**
  * Filers per run. Each is ONE request for a 1-5 MB submissions document plus its older pages, so
  * like every SEC resource here the bound is memory rather than the 90-second budget. Eight is
@@ -419,6 +430,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // back `skipped: fresh or in flight` while reporting ok.
     [SEGMENTS_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
+    [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [DAILY_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [EARNINGS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -1736,6 +1748,137 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       return json({
         resource, written, filers, noFacts, failed, lastError,
         remaining: await backlogSize(market, 'pending_xbrl'),
+      })
+    }
+
+    // THE ONLY MULTI-VALUED CLASSIFICATION AVAILABLE HERE.
+    //
+    // Every other source gives one answer per security. Wikidata's `industry (P452)` is a list, and
+    // it joins on the ISIN this pipeline already holds — Amazon comes back as retail, web service,
+    // e-commerce and web hosting service rather than as one of them.
+    if (resource === WIKIDATA_RESOURCE) {
+      const deadline = Date.now() + 60_000
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_wikidata')
+        .select('security_id,isin')
+        .limit(scopeLimit ?? WIKIDATA_BATCH * WIKIDATA_BATCHES)
+      if (pErr) throw new Error(`pending_wikidata read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: String(r.security_id),
+        isin: String(r.isin),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every equity has been asked' })
+      }
+
+      const byIsin = new Map<string, string[]>()
+      for (const w of wanted) {
+        const a = byIsin.get(w.isin)
+        if (a) a.push(w.securityId)
+        else byIsin.set(w.isin, [w.securityId])
+      }
+
+      let written = 0
+      let matched = 0
+      let unmatched = 0
+      let batches = 0
+      let batchesFailed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      const isins = [...byIsin.keys()]
+      for (let i = 0; i < isins.length; i += WIKIDATA_BATCH) {
+        if (Date.now() > deadline - 12_000) break
+        const chunk = isins.slice(i, i + WIKIDATA_BATCH)
+        batches++
+        try {
+          const results = await fetchIndustries(chunk, Math.min(30_000, deadline - Date.now()))
+          const found = new Map(results.map((r) => [r.isin, r]))
+
+          // The taxonomy nodes, created on discovery. Wikidata's vocabulary is open, so there is
+          // no list to seed — unlike SIC, where SEC publishes a closed 444 and inventing entries
+          // would be authoring reference data from memory.
+          const labels = [...new Set(results.flatMap((r) => r.industries))]
+          if (labels.length > 0) {
+            const { error: nErr } = await market.from('taxonomy_node').upsert(
+              dedupeBy(
+                labels.map((l) => ({ taxonomy_id: 'wikidata', code: slug(l), name: l, level: 1 })),
+                (r) => `${r.taxonomy_id}|${r.code}`,
+              ),
+              { onConflict: 'taxonomy_id,code', ignoreDuplicates: true },
+            )
+            if (nErr) throw new Error(`taxonomy_node upsert failed: ${nErr.message}`)
+          }
+
+          // Read the node ids back — the upsert above ignores duplicates, so it returns nothing
+          // useful for rows that already existed.
+          const codes = [...new Set(labels.map(slug))]
+          const nodeId = new Map<string, string>()
+          for (let c = 0; c < codes.length; c += 100) {
+            const { data: nodes, error: qErr } = await market
+              .from('taxonomy_node')
+              .select('node_id,code')
+              .eq('taxonomy_id', 'wikidata')
+              .in('code', codes.slice(c, c + 100))
+            if (qErr) throw new Error(`taxonomy_node read failed: ${qErr.message}`)
+            for (const n of nodes ?? []) nodeId.set(String(n.code), String(n.node_id))
+          }
+
+          const rows: Record<string, unknown>[] = []
+          const nowIso = new Date().toISOString()
+          for (const isin of chunk) {
+            const hit = found.get(isin)
+            const ids = byIsin.get(isin) ?? []
+            if (!hit || hit.industries.length === 0) {
+              unmatched += ids.length
+              const { error } = await market
+                .from('security')
+                .update({ wikidata_missing_at: nowIso })
+                .in('security_id', ids)
+              if (error) throw new Error(`wikidata_missing_at update failed: ${error.message}`)
+              continue
+            }
+            matched += ids.length
+            for (const securityId of ids) {
+              for (const label of hit.industries) {
+                const id = nodeId.get(slug(label))
+                if (id) {
+                  rows.push({
+                    security_id: securityId, node_id: id,
+                    source_code: 'wikidata', as_of: nowIso,
+                  })
+                }
+              }
+            }
+          }
+
+          for (let r = 0; r < rows.length; r += 500) {
+            const { error } = await market.from('security_taxonomy').upsert(
+              dedupeBy(rows.slice(r, r + 500),
+                (x) => `${x.security_id}|${x.node_id}|${x.source_code}`),
+              { onConflict: 'security_id,node_id,source_code', ignoreDuplicates: true },
+            )
+            if (error) throw new Error(`security_taxonomy wikidata upsert failed: ${error.message}`)
+          }
+          written += rows.length
+        } catch (e) {
+          // A FAILED BATCH MARKS NOTHING. The endpoint is shared and public, so a timeout or a
+          // throttle is about the endpoint rather than about these ISINs — negative-caching them
+          // for 30 days on an outage is precisely how 1,369 securities were once written off.
+          batchesFailed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, matched, unmatched, batches, batchesFailed, firstError, lastError,
+        remaining: await backlogSize(market, 'pending_wikidata'),
       })
     }
 
