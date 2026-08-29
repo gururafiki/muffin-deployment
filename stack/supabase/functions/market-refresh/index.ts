@@ -2155,6 +2155,10 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
               // the PARENT, not the company, so the two levels are served by two views.
               parent_axis: f.parentAxis,
               parent_member: f.parentMember,
+              // What this split was accepted against, so a guard can check it WITHOUT a second
+              // source. Comparing to `security_metric` compares two independently derived totals
+              // and reported five false failures on the first day.
+              reconciled_to: f.reconciledTo,
               accession_number: item.accession,
               source_code: 'sec-segments',
               as_of: new Date().toISOString(),
