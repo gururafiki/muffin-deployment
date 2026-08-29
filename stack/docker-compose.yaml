@@ -567,6 +567,9 @@ services:
       # Splits and dividends. Absent, `security-corporate-actions` reports it and does nothing
       # rather than failing — the only corporate-action source, so its absence must be legible.
       TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
+      # National filing regulators, called DIRECTLY by market-refresh rather than through openbb.
+      DART_API_KEY: "{{ dart_api_key | default('') }}"
+      EDINET_API_KEY: "{{ edinet_api_key | default('') }}"
       # Fundamentals for the securities someone opens. 25 calls a day, US listings only — which is
       # useless as a backlog and ample on demand.
       ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
