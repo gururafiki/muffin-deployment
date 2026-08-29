@@ -205,3 +205,88 @@ export async function fetchCompanyFacts(cik: number, timeoutMs = 30_000): Promis
   const padded = String(cik).padStart(10, '0')
   return await secJson(`${secData()}/api/xbrl/companyfacts/CIK${padded}.json`, timeoutMs)
 }
+
+// ── The submissions API: a filer's COMPLETE filing history, and its SIC, in one request ────────
+
+export interface FilingRow {
+  accession: string
+  form: string
+  filingDate: string
+  reportDate: string | null
+  isXbrl: boolean
+}
+
+export interface Submissions {
+  sic: string | null
+  sicDescription: string | null
+  filings: FilingRow[]
+  /** Names of the older pages, which hold everything before the 1,000 most recent filings. */
+  olderPages: string[]
+}
+
+/**
+ * Parse a submissions payload — either shape.
+ *
+ * TWO SHAPES, AND THEY DIFFER IN A WAY THAT IS EASY TO MISS. The main document nests its arrays
+ * under `filings.recent`; an older page is the SAME column-oriented arrays at the TOP level, with
+ * no wrapper (measured on `CIK0000320193-submissions-001.json`, 1,242 filings covering 1994-2015).
+ * Reading only the first shape silently returns nothing for every historical page — which looks
+ * exactly like a filer with no history.
+ *
+ * The arrays are PARALLEL, not a list of objects, so a filing is assembled by index. Any array
+ * shorter than `accessionNumber` would silently shift every field after it, so the row is skipped
+ * unless the index exists in the arrays that matter.
+ */
+export function submissionsFrom(payload: unknown, forms: string[]): Submissions {
+  const d = (payload ?? {}) as Record<string, unknown>
+  const wanted = new Set(forms)
+  const filingsNode = (d.filings ?? {}) as Record<string, unknown>
+  const table = ('accessionNumber' in d ? d : (filingsNode.recent ?? {})) as Record<string, unknown>
+
+  const col = (name: string): unknown[] =>
+    Array.isArray(table[name]) ? table[name] as unknown[] : []
+  const accs = col('accessionNumber')
+  const formCol = col('form')
+  const filed = col('filingDate')
+  const report = col('reportDate')
+  const xbrl = col('isXBRL')
+
+  const filings: FilingRow[] = []
+  for (let i = 0; i < accs.length; i++) {
+    const form = String(formCol[i] ?? '')
+    if (!wanted.has(form)) continue
+    const accession = String(accs[i] ?? '')
+    const filingDate = String(filed[i] ?? '')
+    if (!accession || !filingDate) continue
+    const rd = report[i] === null || report[i] === undefined ? '' : String(report[i])
+    filings.push({
+      accession,
+      form,
+      filingDate,
+      reportDate: rd === '' ? null : rd,
+      // SEC sends 1/0 rather than true/false. `Boolean(0)` is false and `Boolean("0")` is TRUE, so
+      // the comparison is numeric on purpose — a string "0" read as truthy would mark every
+      // pre-2009 filing as carrying XBRL and send the segment resource after all of them.
+      isXbrl: Number(xbrl[i] ?? 0) === 1,
+    })
+  }
+
+  const files = Array.isArray(filingsNode.files) ? filingsNode.files as Record<string, unknown>[] : []
+  return {
+    sic: d.sic === undefined || d.sic === null || d.sic === '' ? null : String(d.sic),
+    sicDescription: d.sicDescription ? String(d.sicDescription) : null,
+    filings,
+    olderPages: files.map((f) => String(f.name ?? '')).filter(Boolean),
+  }
+}
+
+/** The filer's submissions document. `null` when SEC has no such CIK. */
+export async function fetchSubmissions(cik: number, timeoutMs = 25_000): Promise<unknown> {
+  const padded = String(cik).padStart(10, '0')
+  return await secJson(`${secData()}/submissions/CIK${padded}.json`, timeoutMs)
+}
+
+/** One older page, named by `Submissions.olderPages`. */
+export async function fetchSubmissionsPage(name: string, timeoutMs = 25_000): Promise<unknown> {
+  return await secJson(`${secData()}/submissions/${name}`, timeoutMs)
+}

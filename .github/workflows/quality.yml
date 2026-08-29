@@ -206,7 +206,8 @@ jobs:
         run: |
           deno check stack/supabase/functions/market-refresh/index.ts \
                      stack/supabase/functions/market-refresh/logic-check.ts \
-                     stack/supabase/functions/market-refresh/xbrl-check.ts
+                     stack/supabase/functions/market-refresh/xbrl-check.ts \
+                     stack/supabase/functions/market-refresh/segments-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
@@ -229,6 +230,13 @@ jobs:
           # companies (it once cost 1,369), too cautious stalls a backlog for ever on a batch it
           # refuses to judge. Driven offline against a stub fetcher.
           deno run --allow-read stack/supabase/functions/market-refresh/isolation-check.ts
+          # THE SEGMENT PARSER IS WHERE A DOUBLE COUNT WOULD BE INVISIBLE. An XBRL axis can carry
+          # several overlapping splits that EACH sum to the consolidated total — Amazon discloses
+          # three — so summing an axis doubles the company's revenue and summing the table triples
+          # it, with every individual number still correct. The fixtures are built so the candidate
+          # rules disagree (7 lines / 167,702 against 9 lines / 335,404); all eight mutations of the
+          # rules were confirmed to turn them red before this line was added.
+          deno run --allow-read stack/supabase/functions/market-refresh/segments-check.ts
 
       # The quarter-shape check in market-verify rests on one number: that year-to-date stacking
       # gives a last/first quarter ratio near 3 while discrete quarters give near 1. That claim was

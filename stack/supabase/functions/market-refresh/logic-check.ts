@@ -1172,6 +1172,10 @@ console.log('\nresource registry — the cron and the function agree')
     // Reports the backlog via `backlogSize`, like the others above.
     FILINGS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
+    SEGMENTS_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the others above.
+    FILING_HISTORY_RESOURCE: [],
+    // Reports the backlog via `backlogSize`, like the others above.
     MANAGEMENT_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     EPS_HISTORY_RESOURCE: [],
