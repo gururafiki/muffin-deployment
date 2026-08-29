@@ -69,8 +69,14 @@ def main() -> int:
     # The most recently written segment rows, which is where a regression appears first. Narrowed
     # explicitly: an unbounded select silently returns `PGRST_DB_MAX_ROWS` and a guard sized by a
     # page whose end it cannot see has already cost this pipeline three defects.
+    # `security_segment_latest`, NOT the raw table. An annual report carries three years of
+    # comparatives, so a period appears in several filings — and filers RENAME member codes
+    # between them (ASML's `EuvMember` became `NXEMember`, and `Metrologyandinspection` differs
+    # from `MetrologyAndInspection` only in case). Reading the raw table unions two complete
+    # splits of the same period; this check found exactly that on its first production run,
+    # reporting ASML's FY2022 split at 34,114,800,000 against a filed 21,173,400,000.
     rows = get(
-        "security_segment?select=security_id,axis,member_code,metric_code,period_type,"
+        "security_segment_latest?select=security_id,axis,member_code,metric_code,period_type,"
         "period_ending,value,partition_id&order=as_of.desc&limit=4000"
     )
     if not rows:
