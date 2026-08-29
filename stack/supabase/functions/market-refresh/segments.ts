@@ -38,6 +38,18 @@ export interface SegmentAxisSpec {
    */
   kind: 'product' | 'business' | 'geography' | 'qualifier'
   priority: number
+  /**
+   * A member this axis MUST carry for the fact to be kept. Null means any member is acceptable.
+   *
+   * WHY A QUALIFIER SOMETIMES HAS TO PIN ONE. `srt:ConsolidationItemsAxis = OperatingSegments`
+   * narrows a fact without changing what it measures, so any member is fine. Korean filings tag
+   * **every** fact with `ifrs-full:ConsolidatedAndSeparateFinancialStatementsAxis`, and that one is
+   * not harmless: measured on a DART filing, 1,538 facts are `ConsolidatedMember` and 1,213 are
+   * `SeparateMember` — parent-company-only accounts, a different set of numbers for the same
+   * company and period. Treating it as an open qualifier would let a separate-statement product
+   * split be reconciled against a consolidated total, or worse, stored beside one.
+   */
+  requiredMember: string | null
 }
 
 /** Which concepts express which metric, from `market.xbrl_concept` (reused, not duplicated). */
@@ -295,23 +307,47 @@ export function assignPartitions(
 }
 
 /** Indices of the largest subset summing to `target`, or null. Bounded by `MAX_MEMBERS` above. */
+/**
+ * A member code a filing generated rather than named.
+ *
+ * Korean filers emit `entity00144164:udf_NOTE_20231114182510391Member` ALONGSIDE
+ * `entity00144164:LpgSalesMemberOfProductsAndServices` for the same line and the same value — two
+ * complete, equally valid splits of one total. The partition logic already handles that correctly
+ * (one becomes partition 1, the other partition 2), so this is not about correctness: it decides
+ * which of two TIED splits a reader sees, and "LPG sales" is worth more than a timestamp.
+ *
+ * A PREFERENCE AMONG EQUALS, NOT A REWRITE. `security-symbol-repair` records why pattern-matching
+ * a code and changing it is dangerous — the rule matches names it should not. Nothing is renamed or
+ * dropped here; both splits are stored, and this only breaks a tie in cardinality.
+ */
+const isGenerated = (memberCode: string) => /:udf_/i.test(memberCode)
+
 function maxSubsetSummingTo(
   members: { memberCode: string; value: number }[],
   target: number,
 ): number[] | null {
   const n = members.length
   let best: number[] | null = null
+  let bestGenerated = 0
   for (let mask = 1; mask < 1 << n; mask++) {
     let sum = 0
     let count = 0
+    let generated = 0
     for (let i = 0; i < n; i++) {
-      if (mask & (1 << i)) { sum += members[i].value; count++ }
+      if (mask & (1 << i)) {
+        sum += members[i].value
+        count++
+        if (isGenerated(members[i].memberCode)) generated++
+      }
     }
     if (Math.abs(sum - target) > toleranceFor(target)) continue
-    if (best === null || count > best.length) {
+    // More members wins; among equals, the split a human can read wins.
+    if (best === null || count > best.length ||
+        (count === best.length && generated < bestGenerated)) {
       const idx: number[] = []
       for (let i = 0; i < n; i++) if (mask & (1 << i)) idx.push(i)
       best = idx
+      bestGenerated = generated
     }
   }
   return best
@@ -337,6 +373,7 @@ export function segmentFactsFrom(
 
   const kindOf = new Map(axes.map((a) => [a.axis, a.kind]))
   const priorityOfAxis = new Map(axes.map((a) => [a.axis, a.priority]))
+  const requiredMemberOf = new Map(axes.map((a) => [a.axis, a.requiredMember ?? null]))
   const priorityOf = new Map<string, number>()
   for (const c of concepts) {
     const prev = priorityOf.get(c.concept)
@@ -361,6 +398,18 @@ export function segmentFactsFrom(
    * market-verify compares a split against a total nothing else uses.
    */
   const totals = new Map<string, { value: number; priority: number }>()
+  /**
+   * The same totals keyed by the CONCEPT that stated them, so a split can reconcile against its
+   * OWN concept before falling back to the highest-priority one.
+   *
+   * MEASURED ON A KOREAN FILING, where it decides the outcome. SK Gas states both
+   * `Revenue` = 7,095,902,060,317 and `RevenueFromContractsWithCustomers` = 7,050,068,258,000 for
+   * FY2024, and its product split is tagged with the SECOND. Reconciling against the
+   * higher-priority `Revenue` leaves it 0.65% short — just outside tolerance — so the whole split
+   * was unplaced and Korea produced nothing while parsing perfectly. Alphabet needs the fallback
+   * for the opposite reason: its members use a concept that has no undimensioned fact at all.
+   */
+  const totalsByConcept = new Map<string, number>()
   const key = (metric: string, pt: string, start: string, end: string) =>
     `${metric}|${pt}|${start}|${end}`
 
@@ -369,6 +418,8 @@ export function segmentFactsFrom(
     memberCode: string
     parentAxis: string | null
     parentMember: string | null
+    /** The XBRL concept this fact was tagged with — see `totalsByConcept`. */
+    concept: string
     metricCode: string
     periodType: 'annual' | 'quarter' | 'instant'
     periodStart: string
@@ -397,16 +448,39 @@ export function segmentFactsFrom(
     const dims = [...ctx.dims.entries()]
     const segs = dims.filter(([a]) => isSegment(a))
     const unknown = dims.filter(([a]) => !kindOf.has(a))
+    // A PINNED QUALIFIER REJECTS THE FACT WHEN ITS MEMBER IS WRONG — see `requiredMember`. This is
+    // what keeps a Korean filer's parent-only accounts out of its consolidated segment split.
+    const wrongMember = dims.some(([a, m]) => {
+      const req = requiredMemberOf.get(a)
+      return req !== undefined && req !== null && req !== m
+    })
+    if (wrongMember) continue
 
-    if (dims.length === 0) {
+    // AN UNKNOWN AXIS DISQUALIFIES THE FACT, whatever else is true of it — checked first so a
+    // fact carrying one can never be mistaken for the consolidated total below.
+    if (unknown.length > 0) continue
+
+    if (segs.length === 0) {
       // The filing's own consolidated figure — the target every partition must reconcile to.
+      //
+      // "NO SEGMENT DIMENSIONS", NOT "NO DIMENSIONS AT ALL", and that distinction is what makes
+      // this work outside the US. A Korean filing tags EVERY fact with
+      // `ConsolidatedAndSeparateFinancialStatementsAxis`, so nothing in it is ever literally
+      // undimensioned — the earlier test found no total, every split was left unplaced, and a
+      // whole jurisdiction silently produced partition 0 for everything while parsing cleanly.
       const k = key(f.metricCode, pt, start, end)
       const priority = priorityOf.get(f.concept) ?? 0
       const held = totals.get(k)
       if (held === undefined || priority > held.priority) totals.set(k, { value: f.value, priority })
+      totalsByConcept.set(`${f.concept}|${k}`, f.value)
       continue
     }
-    if (unknown.length > 0 || segs.length < 1 || segs.length > 2) continue
+    // BOTH BOUNDS, and the lower one is not dead code. Every `segs.length === 0` fact is taken by
+    // the total branch above today, so this can only fire if that branch changes — which is
+    // exactly when it matters: without it the candidate push reads `ordered[0][0]` of an empty
+    // array and the whole run dies with a TypeError instead of skipping one fact. Found by a
+    // mutation that crashed the harness rather than failing an assertion.
+    if (segs.length < 1 || segs.length > 2) continue
 
     // TWO SEGMENT AXES IS A CROSS-TAB CELL, NOT A FLAT MEMBER. The FINER axis is the one being
     // enumerated and the coarser is the parent it sits inside — Alphabet lists product lines
@@ -422,6 +496,7 @@ export function segmentFactsFrom(
       memberCode: ordered[0][1],
       parentAxis: ordered[1]?.[0] ?? null,
       parentMember: ordered[1]?.[1] ?? null,
+      concept: f.concept,
       metricCode: f.metricCode,
       periodType: pt,
       periodStart: start,
@@ -508,8 +583,16 @@ export function segmentFactsFrom(
       // figure for a flat split. Alphabet's four product lines inside Google Services sum to
       // 342,721,000,000 — Google Services itself — not to the 402,836,000,000 the company
       // reported. Reconciling them against the company would place none of them.
+      const flatKey = key(g0.metricCode, g0.periodType, g0.periodStart, g0.periodEnding)
+      // SAME CONCEPT FIRST. The members of a split carry a concept of their own; the company's
+      // total under THAT concept is what they were disaggregated from. Priority is the fallback
+      // for a filing whose members use a concept it never states undimensioned.
+      const ownConcept = [...new Set(cands.map((c) => c.concept))]
+      const sameConcept = ownConcept.length === 1
+        ? totalsByConcept.get(`${ownConcept[0]}|${flatKey}`)
+        : undefined
       const target = g0.parentMember === null
-        ? totals.get(key(g0.metricCode, g0.periodType, g0.periodStart, g0.periodEnding))?.value
+        ? sameConcept ?? totals.get(flatKey)?.value
         : flatValue.get(
           `${g0.parentAxis}|${g0.parentMember}|${g0.metricCode}|${g0.periodType}|` +
           `${g0.periodStart}|${g0.periodEnding}`,

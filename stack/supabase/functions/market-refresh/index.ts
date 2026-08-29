@@ -2070,12 +2070,16 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
 
       const { data: axisRows, error: aErr } = await market
         .from('segment_axis')
-        .select('taxonomy,axis,kind,priority')
+        .select('taxonomy,axis,kind,priority,required_member')
       if (aErr) throw new Error(`segment_axis read failed: ${aErr.message}`)
       const axes: SegmentAxisSpec[] = (axisRows ?? []).map((r) => ({
         axis: String(r.axis),
         kind: String(r.kind) as SegmentAxisSpec['kind'],
         priority: Number(r.priority),
+        // Pins the member a qualifier must carry — Korea's consolidated-versus-separate axis.
+        requiredMember: r.required_member === null || r.required_member === undefined
+          ? null
+          : String(r.required_member),
       }))
       if (axes.length === 0) throw new Error('segment_axis is empty — every filing would yield nothing')
 
