@@ -44,3 +44,19 @@ export const alphaVantage = () => origin('ALPHAVANTAGE_BASE_URL', 'https://www.a
 
 /** `api.tiingo.com` — splits and dividends. */
 export const tiingo = () => origin('TIINGO_BASE_URL', 'https://api.tiingo.com')
+
+/**
+ * `query.wikidata.org` — SPARQL, ISIN -> the industries a crowd says a company is in.
+ *
+ * IT IS A POST, so the cache key must include the body — which it does, because `$body_key` is an
+ * MD5 computed in Lua at SERVER level in `nginx.conf` and every location inherits it. `nginx`'s
+ * own `$request_body` would be silently EMPTY for a large query (a 50-ISIN SPARQL body is a few
+ * KB, well under the buffer, but the failure mode is silent and the MD5 costs nothing).
+ *
+ * This entry exists because it was MISSING and nothing could report that. `wikidata.ts` hardcoded
+ * `https://query.wikidata.org/sparql`, so every run went straight out — and
+ * `http-cache-covers-every-provider` passed, because it compares origins.ts against nginx.conf in
+ * both directions and a provider that never entered origins.ts is in neither. The guard now also
+ * fails on a hardcoded provider URL in the functions, which is the direction that was blind.
+ */
+export const wikidata = () => origin('WIKIDATA_BASE_URL', 'https://query.wikidata.org')

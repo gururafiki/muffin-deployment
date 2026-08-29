@@ -21,7 +21,13 @@
  * the other things a company also is.
  */
 
-const WDQS = 'https://query.wikidata.org/sparql'
+import { wikidata } from './origins.ts'
+
+// Through the cache like every other provider. A classification a crowd maintains changes on the
+// scale of months, and the backlog re-asks in 50-ISIN batches, so a hit here is nearly free
+// coverage. Resolved lazily (see origins.ts) so importing this module needs no --allow-env, which
+// is what lets `logic-check.ts` reach this parser with no permissions at all.
+const wdqs = () => `${wikidata()}/sparql`
 /** Wikidata asks for a descriptive agent with contact details; a browser string gets throttled. */
 const UA = 'muffin-market-data/1.0 (admin@rafiki.guru)'
 
@@ -100,7 +106,7 @@ export async function fetchIndustries(
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {
-    const res = await fetch(WDQS, {
+    const res = await fetch(wdqs(), {
       method: 'POST',
       headers: {
         'User-Agent': UA,
