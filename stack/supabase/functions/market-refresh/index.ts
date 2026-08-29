@@ -350,7 +350,12 @@ const SEGMENTS_PAGE = 20
  * work today, but every metric added to `xbrl_concept` is also read by `security-xbrl` for the
  * whole universe, and `security_metric` already holds 3.29M rows. See migration 146.
  */
-const SEGMENT_METRICS = ['revenue', 'operating_income', 'capital_expenditure']
+const SEGMENT_METRICS = [
+  'revenue', 'operating_income', 'capital_expenditure',
+  // Added by migration 148. `total_assets` is an INSTANT and needed the parser to accept
+  // stocks as well as flows; the other two are ordinary durations.
+  'total_assets', 'depreciation', 'cost_of_revenue',
+]
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const DAILY_HISTORY_RESOURCE = 'security-daily-history'
 const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
