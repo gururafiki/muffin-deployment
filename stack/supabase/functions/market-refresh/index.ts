@@ -457,7 +457,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // Reference data: N-PORT is quarterly, so a short TTL would just re-ask SEC for last
     // quarter's answer.
     [HOLDINGS_RESOURCE]: REFERENCE_TTL_MINUTES,
-    [DERIVE_RESOURCE]: REFERENCE_TTL_MINUTES,
+    // NOT the 30-day reference TTL any more. This resource has a DAILY pg_cron job (migration
+    // 137), so a 30-day TTL made it self-skip 29 days in 30 — measured, an ordinary invocation
+    // returned `skipped: fresh or in flight` and only `force: true` ran it. Tolerable while it
+    // only derived sector membership from quarterly fund holdings; not once migrations 143 and 151
+    // attached the weighted segment classification and the SIC link, both of which follow
+    // continuously re-parsed filings. Twelve hours is what makes the daily job actually run.
+    [DERIVE_RESOURCE]: 12 * 60,
     // THE FILTER SPINE IS A SNAPSHOT (migration 80) and its TTL is the staleness the app inherits.
     // Every column in it is reference data written by the backlogs, which the cron drives ~8x a
     // day, so an hour bounds how long a newly ingested security can be missing from a filtered

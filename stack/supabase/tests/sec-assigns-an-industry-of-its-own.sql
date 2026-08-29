@@ -78,7 +78,18 @@ begin
     raise exception 'SIC must not outrank the provider sector a page reads, winner was %', nm;
   end if;
 
-  raise notice '  ok  SEC''s industry is a second opinion that coexists and does not outrank';
+  -- 5. AND IT MUST BE VISIBLE. `security_industries` filtered `taxonomy_id = 'muffin'` when it was
+  --    written, so SIC and Wikidata — the two sources whose entire purpose is to be a second
+  --    opinion — were stored correctly and served by nothing. Measured in production: 36 SIC
+  --    classifications, zero of them readable.
+  select count(*) into n from market.security_industries
+   where security_id = '00000000-0000-0000-0000-000000015101' and source_code = 'sic';
+  if n <> 1 then
+    raise exception
+      'security_industries must expose the SIC classification, got % rows — a view that hides a source hides the feature', n;
+  end if;
+
+  raise notice '  ok  SEC''s industry is a second opinion that coexists, is visible, and does not outrank';
 end $$;
 
 do $$
