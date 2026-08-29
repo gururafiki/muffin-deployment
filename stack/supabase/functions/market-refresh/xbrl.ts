@@ -216,9 +216,57 @@ export interface FilingRow {
   isXbrl: boolean
 }
 
+/** A dated former name. SEC gives ISO timestamps; only the date part is kept. */
+export interface FormerName {
+  name: string
+  from: string | null
+  to: string | null
+}
+
+/**
+ * The registrant's own identity, as SEC holds it.
+ *
+ * ALL OF THIS ARRIVES IN THE SAME RESPONSE as the filing history — it is the seventh instance of
+ * "the answer is already in a response you fetch", and none of it costs a request.
+ *
+ * `usTicker` / `usExchange` are the ones that matter most. This pipeline resolves a US ticker
+ * through OpenFIGI, whose US lookup returns the thin OTC foreign-ordinary line for most foreign
+ * companies — `ASMLF`, `TSMWF`, `BUDFF` — and that has cost real budget: 621 of 1,015 rows in the
+ * EPS backlog, against a provider allowing 25 calls a DAY. SEC states the registrant's actual
+ * listing, and it is authoritative rather than inferred.
+ */
+export interface FilerProfile {
+  entityType: string | null
+  ownerOrg: string | null
+  ein: string | null
+  lei: string | null
+  category: string | null
+  /** `0926` — the month and day the fiscal year ends. Explains 52/53-week calendars. */
+  fiscalYearEnd: string | null
+  stateOfIncorporation: string | null
+  website: string | null
+  investorWebsite: string | null
+  phone: string | null
+  usTicker: string | null
+  usExchange: string | null
+  hqStreet: string | null
+  hqCity: string | null
+  /**
+   * SEC's field is `stateOrCountry` and it is exactly that — "CA" for Apple is California, and for
+   * a foreign private issuer it is a country or nothing at all (TSMC's is null). Named for what it
+   * holds rather than `hq_country`, which would read as a country for every US filer and be a
+   * state. `security.country_iso2` and `provider_country_iso2` remain what anything joins on.
+   */
+  hqStateOrCountry: string | null
+  hqZip: string | null
+  formerNames: FormerName[]
+}
+
 export interface Submissions {
   sic: string | null
   sicDescription: string | null
+  name: string | null
+  profile: FilerProfile
   filings: FilingRow[]
   /** Names of the older pages, which hold everything before the 1,000 most recent filings. */
   olderPages: string[]
@@ -272,9 +320,63 @@ export function submissionsFrom(payload: unknown, forms: string[]): Submissions 
   }
 
   const files = Array.isArray(filingsNode.files) ? filingsNode.files as Record<string, unknown>[] : []
+
+  // EMPTY STRING IS ABSENCE, NOT A VALUE. SEC returns `""` for a field it does not hold — Apple's
+  // `lei`, `description` and `website` are all empty — and storing those would make "we have no
+  // website" indistinguishable from "the website is the empty string", which is the same mistake
+  // as rendering nasdaq's literal `not-supplied` to a user.
+  const str = (v: unknown): string | null => {
+    if (v === null || v === undefined) return null
+    const t = String(v).trim()
+    return t === '' ? null : t
+  }
+  const first = (v: unknown): string | null =>
+    Array.isArray(v) && v.length > 0 ? str(v[0]) : null
+
+  // `addresses.business` is the operating address; `mailing` is often a registered agent, which is
+  // a lawyer's office rather than where the company is.
+  const addr = ((d.addresses ?? {}) as Record<string, unknown>).business as
+    Record<string, unknown> | undefined ?? {}
+
+  const formerRaw = Array.isArray(d.formerNames) ? d.formerNames as Record<string, unknown>[] : []
+  const formerNames: FormerName[] = formerRaw
+    .map((f) => ({
+      name: str(f.name) ?? '',
+      // SEC sends a full ISO timestamp; only the date is meaningful for a name change.
+      from: str(f.from)?.slice(0, 10) ?? null,
+      to: str(f.to)?.slice(0, 10) ?? null,
+    }))
+    .filter((f) => f.name !== '')
+
   return {
-    sic: d.sic === undefined || d.sic === null || d.sic === '' ? null : String(d.sic),
-    sicDescription: d.sicDescription ? String(d.sicDescription) : null,
+    sic: str(d.sic),
+    sicDescription: str(d.sicDescription),
+    name: str(d.name),
+    profile: {
+      entityType: str(d.entityType),
+      ownerOrg: str(d.ownerOrg),
+      // `000000000` IS SEC'S PLACEHOLDER, NOT AN EIN — measured on TSMC, a foreign private issuer
+      // with no US employer number. Exactly the shape of `<cusip>000000000</cusip>`, which once
+      // collapsed Accenture, Seagate, TE Connectivity and NXP into a single security because the
+      // placeholder was treated as an identifier. Rejected here rather than stored.
+      ein: /^0+$/.test(str(d.ein) ?? '') ? null : str(d.ein),
+      lei: str(d.lei),
+      category: str(d.category),
+      fiscalYearEnd: str(d.fiscalYearEnd),
+      stateOfIncorporation: str(d.stateOfIncorporation),
+      website: str(d.website),
+      investorWebsite: str(d.investorWebsite),
+      phone: str(d.phone),
+      // FIRST of each array, and they are POSITIONALLY PAIRED — SEC lists a filer's tickers and
+      // the exchange each trades on in matching order.
+      usTicker: first(d.tickers),
+      usExchange: first(d.exchanges),
+      hqStreet: str(addr.street1),
+      hqCity: str(addr.city),
+      hqStateOrCountry: str(addr.stateOrCountry),
+      hqZip: str(addr.zipCode),
+      formerNames,
+    },
     filings,
     olderPages: files.map((f) => String(f.name ?? '')).filter(Boolean),
   }

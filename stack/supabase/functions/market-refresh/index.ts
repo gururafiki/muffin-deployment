@@ -1751,6 +1751,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       let written = 0
       let filers = 0
       let classified = 0
+      let tickers = 0
       let noFilings = 0
       let failed = 0
       let firstError: string | null = null
@@ -1819,6 +1820,52 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
             const { error: uErr } = await market
               .from('security').update(patch).eq('security_id', item.securityId)
             if (uErr) throw new Error(`filing_history cursor update failed: ${uErr.message}`)
+
+            // AND SO DOES THE REGISTRANT'S WHOLE IDENTITY, including the one fact this pipeline
+            // otherwise GUESSES: its US ticker. OpenFIGI's US lookup returns the thin OTC
+            // foreign-ordinary line for most foreign companies (TSMWF, ASMLF, BUDFF); SEC states
+            // TSM, and states it in a response already on the wire.
+            const pf = parsed.profile
+            const { error: fpErr } = await market.from('filer_profile').upsert({
+              security_id: item.securityId,
+              entity_type: pf.entityType,
+              owner_org: pf.ownerOrg,
+              ein: pf.ein,
+              lei: pf.lei,
+              category: pf.category,
+              fiscal_year_end: pf.fiscalYearEnd,
+              state_of_incorporation: pf.stateOfIncorporation,
+              website: pf.website,
+              investor_website: pf.investorWebsite,
+              phone: pf.phone,
+              us_ticker: pf.usTicker,
+              us_exchange: pf.usExchange,
+              hq_street: pf.hqStreet,
+              hq_city: pf.hqCity,
+              hq_state_or_country: pf.hqStateOrCountry,
+              hq_zip: pf.hqZip,
+              source_code: 'sec-submissions',
+              as_of: new Date().toISOString(),
+            }, { onConflict: 'security_id' })
+            if (fpErr) throw new Error(`filer_profile upsert failed: ${fpErr.message}`)
+            if (pf.usTicker !== null) tickers++
+
+            if (pf.formerNames.length > 0) {
+              const { error: fnErr } = await market.from('security_former_name').upsert(
+                dedupeBy(
+                  pf.formerNames.map((f) => ({
+                    security_id: item.securityId,
+                    name: f.name,
+                    from_date: f.from,
+                    to_date: f.to,
+                    source_code: 'sec-submissions',
+                  })),
+                  (r) => `${r.security_id}|${r.name}`,
+                ),
+                { onConflict: 'security_id,name' },
+              )
+              if (fnErr) throw new Error(`security_former_name upsert failed: ${fnErr.message}`)
+            }
             filers++
             continue
           }
@@ -1841,7 +1888,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
-        resource, written, filers, classified, noFilings, failed, firstError, lastError,
+        resource, written, filers, classified, tickers, noFilings, failed, firstError, lastError,
         remaining: await backlogSize(market, 'pending_filing_history'),
       })
     }

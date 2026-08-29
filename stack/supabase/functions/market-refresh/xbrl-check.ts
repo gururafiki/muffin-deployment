@@ -307,5 +307,64 @@ console.log('xbrl fact resolution')
     JSON.stringify(out.filings.map((f) => f.form)))
 }
 
+// 18. THE REGISTRANT'S OWN IDENTITY RIDES ON THE SAME RESPONSE, and two of its fields are traps.
+{
+  const payload = {
+    cik: '0000320193', name: 'Apple Inc.', entityType: 'operating',
+    sic: '3571', sicDescription: 'Electronic Computers',
+    tickers: ['AAPL', 'APC'], exchanges: ['Nasdaq', 'Frankfurt'],
+    ein: '942404110', lei: '', category: 'Large accelerated filer',
+    fiscalYearEnd: '0926', stateOfIncorporation: 'CA',
+    website: '', phone: '(408) 996-1010',
+    addresses: {
+      business: { street1: 'ONE APPLE PARK WAY', city: 'CUPERTINO', stateOrCountry: 'CA',
+                  zipCode: '95014', stateOrCountryDescription: 'CA' },
+      mailing: { street1: 'A LAWYERS OFFICE', city: 'NOWHERE' },
+    },
+    formerNames: [
+      { name: 'APPLE COMPUTER INC', from: '1994-01-26T05:00:00.000Z', to: '2007-01-04T05:00:00.000Z' },
+    ],
+    filings: { recent: { accessionNumber: [], form: [], filingDate: [], reportDate: [], isXBRL: [] } },
+  }
+  const p = submissionsFrom(payload, ['10-K']).profile
+  check(p.usTicker === 'AAPL' && p.usExchange === 'Nasdaq',
+    'the US ticker and its exchange are read PAIRWISE from the first entry',
+    `${p.usTicker}/${p.usExchange}`)
+  // AN EMPTY STRING IS AN ABSENCE. SEC returns "" for a field it does not hold, and storing that
+  // makes "no website" indistinguishable from "the website is the empty string" — the same defect
+  // as rendering nasdaq's literal `not-supplied` to a reader.
+  check(p.lei === null && p.website === null,
+    'an empty string is stored as NULL, not as a value', `lei=${p.lei} website=${p.website}`)
+  check(p.hqStreet === 'ONE APPLE PARK WAY' && p.hqCity === 'CUPERTINO',
+    'the BUSINESS address is used, not the mailing one (often a registered agent)')
+  check(p.formerNames.length === 1 && p.formerNames[0].from === '1994-01-26',
+    'a former name keeps its dates, truncated to the DATE — a name change has no time of day',
+    JSON.stringify(p.formerNames))
+  check(p.fiscalYearEnd === '0926' && p.category === 'Large accelerated filer',
+    'the fiscal year end and filer category are captured')
+}
+
+// 19. `000000000` IS SEC'S PLACEHOLDER FOR "NO EIN", NOT AN EIN. Measured on TSMC, a foreign
+//     private issuer. It is exactly the shape of `<cusip>000000000</cusip>`, which this pipeline
+//     once treated as an identifier and thereby collapsed Accenture, Seagate, TE Connectivity and
+//     NXP into a SINGLE security with no error anywhere.
+{
+  const base = { filings: { recent: { accessionNumber: [], form: [], filingDate: [], reportDate: [], isXBRL: [] } } }
+  check(submissionsFrom({ ...base, ein: '000000000' }, []).profile.ein === null,
+    'a placeholder EIN is rejected rather than stored as an identifier')
+  check(submissionsFrom({ ...base, ein: '942404110' }, []).profile.ein === '942404110',
+    'a real EIN still comes through')
+}
+
+// 20. A FILER WITH NO US LISTING MUST NOT INVENT ONE. `tickers` is often absent entirely for a
+//     shell or a fund, and `[0]` of nothing must be null rather than "undefined".
+{
+  const base = { filings: { recent: { accessionNumber: [], form: [], filingDate: [], reportDate: [], isXBRL: [] } } }
+  const p = submissionsFrom(base, []).profile
+  check(p.usTicker === null && p.usExchange === null,
+    'no tickers array means no ticker, not a string', `${p.usTicker}`)
+  check(p.formerNames.length === 0, 'no formerNames array means an empty list')
+}
+
 console.log(failures === 0 ? '\nALL XBRL CHECKS PASSED' : `\n${failures} XBRL CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
