@@ -338,13 +338,19 @@ const ACCOUNTS_FORMS = ['10-K', '10-Q', '20-F', '40-F']
  */
 const SEGMENTS_PAGE = 20
 /**
- * WHICH METRICS ARE WORTH KEEPING PER SEGMENT. Revenue is what makes a business line visible and
- * operating income is what makes it comparable — those two answer "AWS is 19% of revenue and 60%
- * of profit", which is the question a company-level sector label cannot. Every other concept in
- * `xbrl_concept` is deliberately excluded: a segment-dimensioned balance sheet is real data that
- * nothing currently serves, and storing it would triple the table to no end.
+ * WHICH METRICS ARE WORTH KEEPING PER SEGMENT. Revenue makes a business line visible, operating
+ * income makes it comparable, and capital expenditure shows where the company is actually spending
+ * — together they answer "AWS is 18% of revenue, 59% of profit, and the majority of the capex",
+ * which is the question a company-level sector label cannot.
+ *
+ * ALL THREE COST NOTHING EXTRA: the facts are in the instance this resource already downloads and
+ * parses. Measured on Amazon's 10-Q, that document also carries segment `Assets`, `Depreciation`
+ * and `CostsAndExpenses` — deliberately not taken yet. `Assets` is an INSTANT fact and
+ * `security_segment.period_type` admits only durations; the other two are durations that would
+ * work today, but every metric added to `xbrl_concept` is also read by `security-xbrl` for the
+ * whole universe, and `security_metric` already holds 3.29M rows. See migration 146.
  */
-const SEGMENT_METRICS = ['revenue', 'operating_income']
+const SEGMENT_METRICS = ['revenue', 'operating_income', 'capital_expenditure']
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const DAILY_HISTORY_RESOURCE = 'security-daily-history'
 const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
