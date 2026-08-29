@@ -41,6 +41,12 @@ ALLOWED = {
         "reader chooses it, so nothing is hidden by a decision they cannot see",
     ("Muffin — Data coverage", "Least complete countries", "securities >= $minsize"):
         "reader-controlled $minsize; it replaced a hardcoded `securities >= 20 ... limit 30`",
+    ("Muffin — Data coverage", "Which countries have business lines, and which never will",
+     "securities >= $minsize"):
+        "reader-controlled $minsize, selectable down to 1 -- and there is no `limit` beside it, "
+        "which is the pairing that made the cross table report the best-covered country as the worst",
+    ("Muffin — Data coverage", "Which sectors have business lines", "securities >= $minsize"):
+        "reader-controlled $minsize, same as every other coverage breakdown on this dashboard",
     ("Muffin — Data coverage", "Country × facet — where is each country incomplete?",
      "securities >= $minsize"):
         "reader-controlled $minsize, and NO row limit — every country above the floor is listed",
