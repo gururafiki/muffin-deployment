@@ -430,5 +430,49 @@ console.log('segment parsing')
     JSON.stringify(assets.map((f) => f.partitionId)))
 }
 
+// 16. A CROSS-TAB CELL RECONCILES TO ITS PARENT, NOT TO THE COMPANY.
+//     Alphabet tags Search, YouTube, Network and Subscriptions with BOTH the product axis and
+//     `StatementBusinessSegments = GoogleServices` — product lines listed inside a reportable
+//     segment. Measured on the FY2025 10-K they sum to 342,721,000,000, which is Google Services
+//     itself, while the company reported 402,836,000,000. Reconciling them against the company
+//     places none of them, and **YouTube's revenue was simply absent from the database** until
+//     these facts were kept.
+//
+//     THE FIXTURE USES THE REAL FIGURES, including `GoogleAdvertising` — a subtotal of the first
+//     three that must land in partition 0 exactly as `ProductMember` does one level up.
+{
+  const GS = { [BIZ]: 'goog:GoogleServicesMember' }
+  const xml = instance([
+    { concept: REV, value: 402836000000 },
+    { concept: REV, value: 342721000000, dims: GS },
+    { concept: REV, value: 58705000000, dims: { [BIZ]: 'goog:GoogleCloudMember' } },
+    { concept: REV, value: 1537000000, dims: { [BIZ]: 'goog:AllOtherSegmentsMember' } },
+    { concept: REV, value: 224532000000, dims: { ...GS, [PROD]: 'goog:GoogleSearchOtherMember' } },
+    { concept: REV, value: 48030000000, dims: { ...GS, [PROD]: 'goog:SubscriptionsPlatformsAndDevicesRevenueMember' } },
+    { concept: REV, value: 40367000000, dims: { ...GS, [PROD]: 'goog:YouTubeAdvertisingRevenueMember' } },
+    { concept: REV, value: 29792000000, dims: { ...GS, [PROD]: 'goog:GoogleNetworkMember' } },
+    { concept: REV, value: 294691000000, dims: { ...GS, [PROD]: 'goog:GoogleAdvertisingRevenueMember' } },
+  ])
+  const out = segmentFactsFrom(xml, AXES, CONCEPTS)
+  const flat = out.filter((f) => f.parentMember === null)
+  const nested = out.filter((f) => f.parentMember !== null)
+
+  check(flat.length === 3 && flat.every((f) => f.partitionId === 1),
+    'the three reportable segments are still a flat, reconciling split', `${flat.length}`)
+  check(nested.length === 5, 'the cross-tab cells are KEPT, not rejected', `${nested.length}`)
+  const p1 = nested.filter((f) => f.partitionId === 1)
+  check(p1.length === 4 && p1.reduce((a, f) => a + f.value, 0) === 342721000000,
+    'the nested split reconciles to its PARENT (342,721,000,000), not to the company',
+    `${p1.length} members, ${p1.reduce((a, f) => a + f.value, 0)}`)
+  check(nested.find((f) => f.memberCode.includes('GoogleAdvertising'))?.partitionId === 0,
+    'GoogleAdvertising is a SUBTOTAL of Search+YouTube+Network and is excluded')
+  check(p1.some((f) => f.memberCode.includes('YouTube')),
+    'YouTube advertising revenue is now in the data at all')
+  // The finer axis is the member and the coarser is the parent — never the reverse.
+  check(nested.every((f) => f.axis === PROD && f.parentAxis === BIZ),
+    'the FINER axis is enumerated and the coarser is the parent',
+    JSON.stringify(nested.map((f) => `${f.axis.split(':')[1]}<${f.parentAxis?.split(':')[1]}`)[0]))
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

@@ -186,6 +186,67 @@ begin
   raise notice '  ok  pending_segments drains, re-queues on a parser bump, and ignores event filings';
 end $$;
 
+-- ── A LATER FILING SUPERSEDES AN EARLIER ONE, AND MEMBER CODES GET RENAMED ────────────────────
+--
+-- FOUND IN PRODUCTION BY `check_segments_reconcile.py` ON ITS FIRST RUN. An annual report carries
+-- three years of comparatives, so one period appears in several filings — and ASML renamed its
+-- member codes between them: `EuvMember` became `NXEMember`, `ArfImmersionMember` became
+-- `ArfiMember`, and `Metrologyandinspection` differs from `MetrologyAndInspection` only in case.
+-- Each filing's own split reconciles; reading them TOGETHER unions two complete splits of the same
+-- period and reported ASML's FY2022 revenue at 34,114,800,000 against a filed 21,173,400,000.
+--
+-- The fixture reproduces exactly that: two filings, the same period, the same economic lines under
+-- different codes and identical values. A view over the raw table returns four members summing to
+-- 200; the superseded-aware one returns the two the newest filing reported.
+insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
+  ('00000000-0000-0000-0000-000000014102','T141 Renamer','equity','ZY','0000937966') on conflict do nothing;
+insert into market.security_filing
+  (security_id, accession_number, report_type, filing_date, source_code) values
+  ('00000000-0000-0000-0000-000000014102','0000000000-23-000001','20-F',date '2023-02-01','sec-segments'),
+  ('00000000-0000-0000-0000-000000014102','0000000000-24-000001','20-F',date '2024-02-01','sec-segments')
+on conflict do nothing;
+insert into market.security_segment
+  (security_id, axis, member_code, metric_code, period_type, period_ending, value,
+   currency_code, partition_id, accession_number, source_code) values
+  -- The 2023 filing's names.
+  ('00000000-0000-0000-0000-000000014102','srt:ProductOrServiceAxis','x:EuvMember','revenue','annual',date '2022-12-31',60,'USD',1,'0000000000-23-000001','sec-segments'),
+  ('00000000-0000-0000-0000-000000014102','srt:ProductOrServiceAxis','x:ArfImmersionMember','revenue','annual',date '2022-12-31',40,'USD',1,'0000000000-23-000001','sec-segments'),
+  -- The 2024 filing restating the SAME period under NEW names and identical values.
+  ('00000000-0000-0000-0000-000000014102','srt:ProductOrServiceAxis','x:NXEMember','revenue','annual',date '2022-12-31',60,'USD',1,'0000000000-24-000001','sec-segments'),
+  ('00000000-0000-0000-0000-000000014102','srt:ProductOrServiceAxis','x:ArfiMember','revenue','annual',date '2022-12-31',40,'USD',1,'0000000000-24-000001','sec-segments')
+on conflict do nothing;
+
+do $$
+declare n integer; v numeric;
+begin
+  -- 1. THE RAW TABLE HOLDS BOTH, deliberately: an upsert cannot retract, and a restatement must
+  --    stay visible. The double count is real and is why nothing may read this table directly.
+  select count(*), sum(value) into n, v from market.security_segment
+   where security_id = '00000000-0000-0000-0000-000000014102';
+  if n <> 4 or v <> 200 then
+    raise exception 'the raw table should hold both filings (4 rows, 200), got % rows summing to %', n, v;
+  end if;
+
+  -- 2. THE SERVING SOURCE PICKS ONE FILING — the newest — and the split reconciles again.
+  select count(*), sum(value) into n, v from market.security_segment_latest
+   where security_id = '00000000-0000-0000-0000-000000014102';
+  if n <> 2 or v <> 100 then
+    raise exception
+      'security_segment_latest must serve ONE filing''s split (2 rows, 100), got % rows summing to % — this is the ASML defect', n, v;
+  end if;
+
+  -- 3. AND IT IS THE NEWER FILING'S NAMES. Ranking rows individually rather than by filing would
+  --    reassemble a split no filing ever reported, mixing old and new codes.
+  select count(*) into n from market.security_segment_latest
+   where security_id = '00000000-0000-0000-0000-000000014102'
+     and member_code in ('x:NXEMember','x:ArfiMember');
+  if n <> 2 then
+    raise exception 'the newest filing''s member codes must be the ones served, got % of 2', n;
+  end if;
+
+  raise notice '  ok  a renamed member code does not double a company (a period comes from ONE filing)';
+end $$;
+
 -- ── THE VOCABULARY MUST NOT BE EMPTY ──────────────────────────────────────────────────────────
 --
 -- Migrations 141 and 143 shipped the whole machinery INERT: `segment_concept` and `segment_alias`

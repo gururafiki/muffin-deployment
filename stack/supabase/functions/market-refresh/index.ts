@@ -1990,6 +1990,11 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
               value: f.value,
               currency_code: f.currency,
               partition_id: f.partitionId,
+              // NULL for an ordinary flat member; set when a filing nests one segmentation inside
+              // another (Alphabet's Search WITHIN Google Services). A nested row's siblings sum to
+              // the PARENT, not the company, so the two levels are served by two views.
+              parent_axis: f.parentAxis,
+              parent_member: f.parentMember,
               accession_number: item.accession,
               source_code: 'sec-segments',
               as_of: new Date().toISOString(),
@@ -2012,8 +2017,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
                   // the annual row as a duplicate of the quarterly one BEFORE the upsert ever sees
                   // it, and the figure is then wrong by 4x with an identical row count.
                   dedupeBy(rows.slice(i, i + 500),
-                    (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.metric_code}|${r.period_type}|${r.period_ending}`),
-                  { onConflict: 'security_id,axis,member_code,metric_code,period_type,period_ending' },
+                    (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.parent_member ?? ''}|` +
+                      `${r.metric_code}|${r.period_type}|${r.period_ending}`),
+                  // `parent_key` is a STORED GENERATED column — `coalesce(parent_member, '')` —
+                  // because a primary key admits no NULLs and the flat case must keep working. The
+                  // dedupe key above mirrors it exactly, or a nested cell and a flat member of the
+                  // same axis collapse before the upsert ever sees them.
+                  { onConflict: 'security_id,axis,member_code,parent_key,metric_code,period_type,period_ending' },
                 )
               if (error) throw new Error(`security_segment upsert failed: ${error.message}`)
             }

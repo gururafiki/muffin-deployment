@@ -57,6 +57,21 @@ export interface SegmentFact {
   value: number
   currency: string | null
   /**
+   * WHEN A FILING NESTS ONE SEGMENTATION INSIDE ANOTHER, the coarser member this fact sits under.
+   *
+   * Alphabet tags Search, YouTube, Network and Subscriptions with `ProductOrServiceAxis` **and**
+   * `StatementBusinessSegmentsAxis = GoogleServices` at the same time — a cell in a cross-tab, not
+   * a member of a flat split. Measured on the FY2025 10-K, those four sum to **342,721,000,000**,
+   * which is exactly Google Services' own revenue, and `GoogleAdvertising` (294,691,000,000) is a
+   * subtotal of the first three.
+   *
+   * Null for an ordinary single-axis fact. When set, this fact's siblings sum to the PARENT
+   * member's value rather than to the company's consolidated figure — so a reader must never mix
+   * the two levels, exactly as it must never mix partitions.
+   */
+  parentAxis: string | null
+  parentMember: string | null
+  /**
    * Which disclosed split this member belongs to. 1..n are partitions that reconcile to the
    * filing's own consolidated figure; **0 means the member is a subtotal or could not be placed**,
    * and nothing may aggregate it. See `assignPartitions`.
@@ -309,6 +324,7 @@ export function segmentFactsFrom(
   const facts = parseFacts(xml, concepts)
 
   const kindOf = new Map(axes.map((a) => [a.axis, a.kind]))
+  const priorityOfAxis = new Map(axes.map((a) => [a.axis, a.priority]))
   const priorityOf = new Map<string, number>()
   for (const c of concepts) {
     const prev = priorityOf.get(c.concept)
@@ -339,6 +355,8 @@ export function segmentFactsFrom(
   interface Candidate {
     axis: string
     memberCode: string
+    parentAxis: string | null
+    parentMember: string | null
     metricCode: string
     periodType: 'annual' | 'quarter' | 'instant'
     periodStart: string
@@ -376,10 +394,22 @@ export function segmentFactsFrom(
       if (held === undefined || priority > held.priority) totals.set(k, { value: f.value, priority })
       continue
     }
-    if (unknown.length > 0 || segs.length !== 1) continue
+    if (unknown.length > 0 || segs.length < 1 || segs.length > 2) continue
+
+    // TWO SEGMENT AXES IS A CROSS-TAB CELL, NOT A FLAT MEMBER. The FINER axis is the one being
+    // enumerated and the coarser is the parent it sits inside — Alphabet lists product lines
+    // WITHIN Google Services, never the reverse. `segment_axis.priority` already declares which is
+    // finer (product 100, business 90), so the ordering is data rather than a guess about names.
+    const ordered = segs.length === 2
+      ? [...segs].sort((a, b) =>
+        (priorityOfAxis.get(b[0]) ?? 0) - (priorityOfAxis.get(a[0]) ?? 0) ||
+        a[0].localeCompare(b[0]))
+      : segs
     candidates.push({
-      axis: segs[0][0],
-      memberCode: segs[0][1],
+      axis: ordered[0][0],
+      memberCode: ordered[0][1],
+      parentAxis: ordered[1]?.[0] ?? null,
+      parentMember: ordered[1]?.[1] ?? null,
       metricCode: f.metricCode,
       periodType: pt,
       periodStart: start,
@@ -393,7 +423,8 @@ export function segmentFactsFrom(
   // or the member would be counted twice inside its own partition.
   const seen = new Set<string>()
   const unique = candidates.filter((c) => {
-    const k = `${c.axis}|${c.memberCode}|${c.metricCode}|${c.periodType}|${c.periodEnding}`
+    const k = `${c.axis}|${c.memberCode}|${c.parentMember ?? ''}|${c.metricCode}|` +
+      `${c.periodType}|${c.periodEnding}`
     if (seen.has(k)) return false
     seen.add(k)
     return true
@@ -412,10 +443,25 @@ export function segmentFactsFrom(
   // every one of them would be partition 0 for ever.
   const groups = new Map<string, Candidate[]>()
   for (const c of unique) {
-    const g = `${c.axis}|${c.periodEnding}`
+    // A cross-tab cell is partitioned WITHIN its parent member, never beside the flat members of
+    // its own axis: Alphabet's Search sits inside Google Services and sums to that, not to the
+    // company. Mixing the two levels is the same double count as mixing two axes.
+    const g = c.parentMember === null
+      ? `${c.axis}|${c.periodEnding}`
+      : `${c.parentAxis}=${c.parentMember}|${c.axis}|${c.periodEnding}`
     const arr = groups.get(g)
     if (arr) arr.push(c)
     else groups.set(g, [c])
+  }
+
+  // What each flat member is worth, so a cross-tab group knows the total it must reconcile to.
+  const flatValue = new Map<string, number>()
+  for (const c of unique) {
+    if (c.parentMember !== null) continue
+    flatValue.set(
+      `${c.axis}|${c.memberCode}|${c.metricCode}|${c.periodType}|${c.periodStart}|${c.periodEnding}`,
+      c.value,
+    )
   }
 
   const out: SegmentFact[] = []
@@ -445,11 +491,20 @@ export function segmentFactsFrom(
     let bestPlaced = 0
     for (const [, cands] of byBucket) {
       const g0 = cands[0]
-      const total = totals.get(key(g0.metricCode, g0.periodType, g0.periodStart, g0.periodEnding))
-      if (total === undefined) continue
+      // THE TARGET IS THE PARENT'S OWN VALUE FOR A CROSS-TAB, and the company's consolidated
+      // figure for a flat split. Alphabet's four product lines inside Google Services sum to
+      // 342,721,000,000 — Google Services itself — not to the 402,836,000,000 the company
+      // reported. Reconciling them against the company would place none of them.
+      const target = g0.parentMember === null
+        ? totals.get(key(g0.metricCode, g0.periodType, g0.periodStart, g0.periodEnding))?.value
+        : flatValue.get(
+          `${g0.parentAxis}|${g0.parentMember}|${g0.metricCode}|${g0.periodType}|` +
+          `${g0.periodStart}|${g0.periodEnding}`,
+        )
+      if (target === undefined) continue
       const map = assignPartitions(
         cands.map((c) => ({ memberCode: c.memberCode, value: c.value })),
-        total.value,
+        target,
       )
       const placed = [...map.values()].filter((v) => v > 0).length
       if (placed > bestPlaced) { bestPlaced = placed; bestMap = map }

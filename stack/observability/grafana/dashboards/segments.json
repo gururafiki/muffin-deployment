@@ -236,7 +236,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "select\n  g.member_code,\n  s.name as company,\n  max(g.value) as revenue,\n  max(g.period_ending) as period\nfrom market.security_segment g\njoin market.security s on s.security_id = g.security_id\nleft join market.segment_alias a\n  on a.member_code = g.member_code\n and (a.security_id = g.security_id or a.security_id is null)\nwhere g.metric_code = 'revenue' and g.partition_id = 1 and a.concept_code is null\ngroup by g.member_code, s.name\norder by max(g.value) desc nulls last"
+          "rawSql": "select\n  g.member_code,\n  s.name as company,\n  max(g.value) as revenue,\n  max(g.period_ending) as period\nfrom market.security_segment_latest g\njoin market.security s on s.security_id = g.security_id\nleft join market.segment_alias a\n  on a.member_code = g.member_code\n and (a.security_id = g.security_id or a.security_id is null)\nwhere g.metric_code = 'revenue' and g.partition_id = 1 and a.concept_code is null\ngroup by g.member_code, s.name\norder by max(g.value) desc nulls last"
         }
       ]
     },
@@ -317,7 +317,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "with split as (\n  select g.security_id, g.axis, g.period_ending, g.period_type, sum(g.value) as total\n    from market.security_segment g\n   where g.metric_code = 'revenue' and g.partition_id = 1\n   group by 1,2,3,4\n)\nselect s.name as company, split.axis, split.period_ending as period,\n       split.total as split_total, m.value as filing_total,\n       round(100 * (split.total - m.value) / nullif(m.value, 0), 2) as disagreement_pct\n  from split\n  join market.security s on s.security_id = split.security_id\n  join market.security_metric m\n    on m.security_id = split.security_id and m.metric_code = 'revenue'\n   and m.period_type = split.period_type and m.as_of = split.period_ending\n -- 0.5%, matching segments.ts and check_segments_reconcile.py. Segment revenue\n -- carries a reconciling item (Alphabet's is 127,000,000 of hedging gains on\n -- 402,836,000,000 = 0.032%), so an exact test would list every large filer here.\n where abs(split.total - m.value) > greatest(1, abs(m.value) * 0.005)\n   and abs(m.value) > 1000\n order by abs(split.total - m.value) desc"
+          "rawSql": "with split as (\n  select g.security_id, g.axis, g.period_ending, g.period_type, sum(g.value) as total\n    from market.security_segment_latest g\n   where g.metric_code = 'revenue' and g.partition_id = 1\n   group by 1,2,3,4\n)\nselect s.name as company, split.axis, split.period_ending as period,\n       split.total as split_total, m.value as filing_total,\n       round(100 * (split.total - m.value) / nullif(m.value, 0), 2) as disagreement_pct\n  from split\n  join market.security s on s.security_id = split.security_id\n  join market.security_metric m\n    on m.security_id = split.security_id and m.metric_code = 'revenue'\n   and m.period_type = split.period_type and m.as_of = split.period_ending\n -- 0.5%, matching segments.ts and check_segments_reconcile.py. Segment revenue\n -- carries a reconciling item (Alphabet's is 127,000,000 of hedging gains on\n -- 402,836,000,000 = 0.032%), so an exact test would list every large filer here.\n where abs(split.total - m.value) > greatest(1, abs(m.value) * 0.005)\n   and abs(m.value) > 1000\n order by abs(split.total - m.value) desc"
         }
       ]
     }
