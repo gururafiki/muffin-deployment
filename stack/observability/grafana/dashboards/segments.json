@@ -388,7 +388,7 @@
   {
    "type": "table",
    "title": "Where each company earns \u2014 no curation required",
-   "description": "Revenue by the geography a filer discloses. Every row here was readable WITHOUT anyone mapping anything: `country:US` is ISO 3166 and joins `market.countries`, and the standard region members (`srt:NorthAmericaMember`, `us-gaap:EMEAMember`) carry published labels. That is 41 of the 113 members that had been sitting in the curation queue.\n\nA country is geography WHEREVER IT ARRIVES \u2014 TSMC files `country:TW` on the BUSINESS-segments axis, because its reportable segments are geographic. Reading the kind off the axis put it in the product queue.\n\n`country_iso2` is null for a REGION: `us-gaap:NonUsMember` is everywhere-except-the-US, and pinning it to one code would file a whole company's foreign revenue under an arbitrary country.",
+   "description": "Revenue by the geography a filer discloses. Every row here was readable WITHOUT anyone mapping anything: `country:US` is ISO 3166 and joins `market.countries`, and the standard region members (`srt:NorthAmericaMember`, `us-gaap:EMEAMember`) carry published labels. That is 41 of the 113 members that had been sitting in the curation queue.\n\nA country is geography WHEREVER IT ARRIVES \u2014 TSMC files `country:TW` on the BUSINESS-segments axis, because its reportable segments are geographic. Reading the kind off the axis put it in the product queue.\n\n`country_iso2` is null for a REGION: `us-gaap:NonUsMember` is everywhere-except-the-US, and pinning it to one code would file a whole company's foreign revenue under an arbitrary country.\n\nTHE AXIS COLUMN IS NOT DECORATION. A country can be disclosed on the geography axis AND appear as a segment of the same name on the business axis, with different numbers \u2014 measured live, one filer reports `country:US` at 149,617,000,000 (66.7% of its geographic split) and a business segment also called United States at 643,000,000 (0.25%). Both are real and neither is a duplicate of the other, but without the axis they read as the same row disagreeing with itself. 3 of 135 rows today; no company's shares sum above 100%, because a share is computed within its own axis.",
    "gridPos": {
     "h": 9,
     "w": 14,
@@ -408,7 +408,7 @@
      },
      "format": "table",
      "rawQuery": true,
-     "rawSql": "select\n  s.name as company,\n  g.member_label as place,\n  g.country_iso2 as iso,\n  g.revenue,\n  g.currency_code as currency,\n  g.revenue_share_pct as share_of_company_pct,\n  g.period_ending as period\nfrom market.security_segment_geography g\njoin market.security s on s.security_id = g.security_id\norder by s.name, g.revenue desc nulls last"
+     "rawSql": "select\n  s.name as company,\n  g.member_label as place,\n  g.country_iso2 as iso,\n  g.axis,\n  g.revenue,\n  g.currency_code as currency,\n  g.revenue_share_pct as share_of_its_axis_pct,\n  g.period_ending as period\nfrom market.security_segment_geography g\njoin market.security s on s.security_id = g.security_id\norder by s.name, g.axis, g.revenue desc nulls last"
     }
    ]
   },
