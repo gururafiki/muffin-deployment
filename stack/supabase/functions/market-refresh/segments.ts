@@ -51,7 +51,7 @@ export interface SegmentFact {
   axis: string
   memberCode: string
   metricCode: string
-  periodType: 'annual' | 'quarter'
+  periodType: 'annual' | 'quarter' | 'instant'
   periodStart: string
   periodEnding: string
   value: number
@@ -340,7 +340,7 @@ export function segmentFactsFrom(
     axis: string
     memberCode: string
     metricCode: string
-    periodType: 'annual' | 'quarter'
+    periodType: 'annual' | 'quarter' | 'instant'
     periodStart: string
     periodEnding: string
     value: number
@@ -350,8 +350,16 @@ export function segmentFactsFrom(
 
   for (const f of facts) {
     const ctx = contexts.get(f.ctxRef)
-    if (!ctx || ctx.instant !== null || !ctx.start || !ctx.end) continue
-    const pt = periodTypeFor(ctx.start, ctx.end)
+    if (!ctx) continue
+    // AN INSTANT IS A STOCK, NOT A FLOW, and both belong here. Revenue and capex are measured over
+    // a period; assets are measured AT a date. Rejecting instants — which this parser did until
+    // segment assets were wanted — silently drops every balance-sheet segmentation.
+    const isInstant = ctx.instant !== null
+    const start = isInstant ? ctx.instant! : ctx.start
+    const end = isInstant ? ctx.instant! : ctx.end
+    if (!start || !end) continue
+    const pt: 'annual' | 'quarter' | 'instant' | null =
+      isInstant ? 'instant' : periodTypeFor(start, end)
     if (pt === null) continue
     const currency = f.unitRef === null ? null : units.get(f.unitRef) ?? null
     if (currency === null) continue
@@ -362,7 +370,7 @@ export function segmentFactsFrom(
 
     if (dims.length === 0) {
       // The filing's own consolidated figure — the target every partition must reconcile to.
-      const k = key(f.metricCode, pt, ctx.start, ctx.end)
+      const k = key(f.metricCode, pt, start, end)
       const priority = priorityOf.get(f.concept) ?? 0
       const held = totals.get(k)
       if (held === undefined || priority > held.priority) totals.set(k, { value: f.value, priority })
@@ -374,8 +382,8 @@ export function segmentFactsFrom(
       memberCode: segs[0][1],
       metricCode: f.metricCode,
       periodType: pt,
-      periodStart: ctx.start,
-      periodEnding: ctx.end,
+      periodStart: start,
+      periodEnding: end,
       value: f.value,
       currency,
     })
@@ -391,11 +399,20 @@ export function segmentFactsFrom(
     return true
   })
 
-  // Partitions are per (axis, period) and DELIBERATELY NOT PER METRIC — see below. Two axes are
-  // never one split, and a quarter is never reconciled against a year.
+  // THE SPLIT IS A PROPERTY OF (AXIS, PERIOD END), AND IS APPLIED MORE WIDELY THAN IT IS LEARNED.
+  //
+  // Which members a filing disclosed together is one fact per axis per reporting date. It is
+  // LEARNED from whichever (metric, period type) bucket reconciles — in practice annual revenue —
+  // and APPLIED to every bucket sharing that axis and date, because they are the same members
+  // listed in the same table.
+  //
+  // That is what makes segment ASSETS usable at all. Assets are an instant, and segment assets
+  // never sum to consolidated assets — corporate and eliminations sit outside the segments, exactly
+  // as unallocated cost does for profit — so no instant bucket can ever reconcile on its own and
+  // every one of them would be partition 0 for ever.
   const groups = new Map<string, Candidate[]>()
   for (const c of unique) {
-    const g = `${c.axis}|${c.periodType}|${c.periodStart}|${c.periodEnding}`
+    const g = `${c.axis}|${c.periodEnding}`
     const arr = groups.get(g)
     if (arr) arr.push(c)
     else groups.set(g, [c])
@@ -414,18 +431,21 @@ export function segmentFactsFrom(
     // exactly the number this feature exists to serve. The split is a property of the AXIS AND THE
     // FILING — which members were disclosed together — so it is inferred from the metric that does
     // reconcile (revenue) and applied to every metric on the same axis and period.
-    const byMetric = new Map<string, Candidate[]>()
+    // Learning is still per (metric, period type, span): a quarter must never be reconciled
+    // against a year, and two metrics have different totals.
+    const byBucket = new Map<string, Candidate[]>()
     for (const c of group) {
-      const arr = byMetric.get(c.metricCode)
+      const b = `${c.metricCode}|${c.periodType}|${c.periodStart}|${c.periodEnding}`
+      const arr = byBucket.get(b)
       if (arr) arr.push(c)
-      else byMetric.set(c.metricCode, [c])
+      else byBucket.set(b, [c])
     }
 
     let bestMap: Map<string, number> | null = null
     let bestPlaced = 0
-    for (const [metricCode, cands] of byMetric) {
+    for (const [, cands] of byBucket) {
       const g0 = cands[0]
-      const total = totals.get(key(metricCode, g0.periodType, g0.periodStart, g0.periodEnding))
+      const total = totals.get(key(g0.metricCode, g0.periodType, g0.periodStart, g0.periodEnding))
       if (total === undefined) continue
       const map = assignPartitions(
         cands.map((c) => ({ memberCode: c.memberCode, value: c.value })),

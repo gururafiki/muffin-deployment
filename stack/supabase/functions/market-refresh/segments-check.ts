@@ -36,6 +36,8 @@ interface FixtureFact {
   dims?: Record<string, string>
   start?: string
   end?: string
+  /** A balance-sheet date. Emits an `<instant>` context rather than a start/end pair. */
+  instant?: string
   unit?: string
   attrs?: string
 }
@@ -50,7 +52,7 @@ function instance(facts: FixtureFact[], units: Record<string, string> = { usd: '
     const start = f.start ?? Q_START
     const end = f.end ?? Q_END
     const dims = f.dims ?? {}
-    const key = JSON.stringify([start, end, dims])
+    const key = JSON.stringify([f.instant ?? start, f.instant ?? end, f.instant ?? '', dims])
     let id = ctxIds.get(key)
     if (!id) {
       id = `c${ctxIds.size}`
@@ -61,8 +63,11 @@ function instance(facts: FixtureFact[], units: Record<string, string> = { usd: '
       ctxXml.push(
         `<xbrli:context id="${id}"><xbrli:entity><xbrli:identifier scheme="s">1</xbrli:identifier>` +
         (members ? `<xbrli:segment>${members}</xbrli:segment>` : '') +
-        `</xbrli:entity><xbrli:period><xbrli:startDate>${start}</xbrli:startDate>` +
-        `<xbrli:endDate>${end}</xbrli:endDate></xbrli:period></xbrli:context>`,
+        `</xbrli:entity><xbrli:period>` +
+        (f.instant
+          ? `<xbrli:instant>${f.instant}</xbrli:instant>`
+          : `<xbrli:startDate>${start}</xbrli:startDate><xbrli:endDate>${end}</xbrli:endDate>`) +
+        `</xbrli:period></xbrli:context>`,
       )
     }
     factXml.push(
@@ -370,6 +375,59 @@ console.log('segment parsing')
   check(p1.length === 2 && p1.reduce((a, f) => a + f.value, 0) === 100000000000,
     'a relative tolerance still rejects a subtotal counted beside its own children',
     `${p1.length} members`)
+}
+
+// 14. AN INSTANT INHERITS THE SPLIT, BECAUSE IT CAN NEVER EARN ONE.
+//     Segment ASSETS never sum to consolidated assets — corporate assets and eliminations sit
+//     outside the segments, exactly as unallocated cost does for segment profit. So no instant
+//     bucket can reconcile on its own, and a rule that requires it leaves every balance-sheet
+//     segmentation in partition 0 for ever, where nothing may aggregate it.
+//
+//     THE FIXTURE MAKES THE RULES DISAGREE: the assets deliberately sum to 900 against a
+//     consolidated 1000 (100 of corporate assets), so a self-reconciling rule places none of them,
+//     while inheriting from the revenue split on the same axis and date places both.
+{
+  const xml = instance([
+    { concept: REV, value: 100 },
+    { concept: REV, value: 60, dims: { [BIZ]: 'x:CloudMember' } },
+    { concept: REV, value: 40, dims: { [BIZ]: 'x:RetailMember' } },
+    { concept: 'Assets', value: 1000, instant: Q_END },
+    { concept: 'Assets', value: 500, dims: { [BIZ]: 'x:CloudMember' }, instant: Q_END },
+    { concept: 'Assets', value: 400, dims: { [BIZ]: 'x:RetailMember' }, instant: Q_END },
+  ])
+  const out = segmentFactsFrom(xml, AXES, [
+    ...CONCEPTS,
+    { metricCode: 'total_assets', concept: 'Assets', priority: 100 },
+  ])
+  const assets = out.filter((f) => f.metricCode === 'total_assets')
+  check(assets.length === 2 && assets.every((f) => f.periodType === 'instant'),
+    'a balance-sheet fact is stored as an INSTANT, not rejected and not mislabelled a quarter',
+    JSON.stringify(assets.map((f) => f.periodType)))
+  check(assets.every((f) => f.partitionId === 1),
+    'segment assets inherit the split from revenue on the same axis and date, though they sum to 900 against 1000',
+    JSON.stringify(assets.map((f) => f.partitionId)))
+}
+
+// 15. …BUT AN INSTANT WITH NO DURATION TO LEARN FROM STAYS UNPLACED. A balance-sheet comparative
+//     sits at a date the income statement does not cover, and asserting a split there would be a
+//     guess. Measured on Amazon's real 10-Q: 2025-06-30 is placed and the 2024-12-31 comparative
+//     is not.
+{
+  const xml = instance([
+    { concept: REV, value: 100 },
+    { concept: REV, value: 60, dims: { [BIZ]: 'x:CloudMember' } },
+    { concept: REV, value: 40, dims: { [BIZ]: 'x:RetailMember' } },
+    { concept: 'Assets', value: 500, dims: { [BIZ]: 'x:CloudMember' }, instant: '2024-12-31' },
+    { concept: 'Assets', value: 400, dims: { [BIZ]: 'x:RetailMember' }, instant: '2024-12-31' },
+  ])
+  const out = segmentFactsFrom(xml, AXES, [
+    ...CONCEPTS,
+    { metricCode: 'total_assets', concept: 'Assets', priority: 100 },
+  ])
+  const assets = out.filter((f) => f.metricCode === 'total_assets')
+  check(assets.length === 2 && assets.every((f) => f.partitionId === 0),
+    'an instant at a date with no duration bucket is stored but left unplaced',
+    JSON.stringify(assets.map((f) => f.partitionId)))
 }
 
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
