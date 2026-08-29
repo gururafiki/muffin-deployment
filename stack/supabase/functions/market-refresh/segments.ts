@@ -72,6 +72,18 @@ export interface SegmentFact {
   parentAxis: string | null
   parentMember: string | null
   /**
+   * The figure this member's split was reconciled AGAINST — the filing's own consolidated value
+   * for a flat split, or the parent member's value for a nested one.
+   *
+   * Stored because otherwise nothing downstream can tell a DOUBLE COUNT from a DISAGREEMENT
+   * BETWEEN SOURCES. A guard comparing the split against `security_metric` is comparing two
+   * independently-derived totals: companyfacts merges every filing and resolves a concept across
+   * all of them, while this parser reads one document. When they differ the split looks broken and
+   * is not. With the target stored, "does this split still add up to what it was accepted against"
+   * is exact and needs no second source.
+   */
+  reconciledTo: number | null
+  /**
    * Which disclosed split this member belongs to. 1..n are partitions that reconcile to the
    * filing's own consolidated figure; **0 means the member is a subtotal or could not be placed**,
    * and nothing may aggregate it. See `assignPartitions`.
@@ -489,6 +501,7 @@ export function segmentFactsFrom(
 
     let bestMap: Map<string, number> | null = null
     let bestPlaced = 0
+    let bestTarget: number | null = null
     for (const [, cands] of byBucket) {
       const g0 = cands[0]
       // THE TARGET IS THE PARENT'S OWN VALUE FOR A CROSS-TAB, and the company's consolidated
@@ -507,11 +520,12 @@ export function segmentFactsFrom(
         target,
       )
       const placed = [...map.values()].filter((v) => v > 0).length
-      if (placed > bestPlaced) { bestPlaced = placed; bestMap = map }
+      if (placed > bestPlaced) { bestPlaced = placed; bestMap = map; bestTarget = target }
     }
 
     for (const c of group) {
-      out.push({ ...c, partitionId: bestMap?.get(c.memberCode) ?? 0 })
+      const partitionId = bestMap?.get(c.memberCode) ?? 0
+      out.push({ ...c, partitionId, reconciledTo: partitionId > 0 ? bestTarget : null })
     }
   }
   return out
