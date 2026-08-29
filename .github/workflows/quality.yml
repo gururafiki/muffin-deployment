@@ -93,6 +93,40 @@ jobs:
           if extra:
               print(f"::error::nginx.conf proxies hosts no caller uses: {', '.join(extra)}")
               sys.exit(1)
+          # THE DIRECTION THIS GUARD WAS BLIND TO, and it cost a real provider. Both checks above
+          # compare origins.ts against nginx.conf, so a provider that never entered origins.ts is
+          # in NEITHER and passes silently. `wikidata.ts` hardcoded
+          # `https://query.wikidata.org/sparql` and went straight out on every run while this job
+          # reported success. Same shape as `exchange-listings` being deployed, reachable and
+          # absent from the cron: the guard asked "is everything declared wired up?", which cannot
+          # see something that was never declared.
+          #
+          # So: no module under market-refresh may name an external host directly. `esm.sh` is
+          # exempt because that is a MODULE IMPORT resolved by Deno at load time, not a provider
+          # call — it never goes through the data path and cannot be proxied by nginx.
+          fns = pathlib.Path('stack/supabase/functions/market-refresh')
+          EXEMPT = {'esm.sh'}
+          offenders = []
+          for f in sorted(fns.glob('*.ts')):
+              if f.name == 'origins.ts':
+                  continue
+              for n, line in enumerate(f.read_text().splitlines(), 1):
+                  st = line.lstrip()
+                  if st.startswith(('*', '/*', '//')):
+                      continue
+                  # STRIP A TRAILING COMMENT WITHOUT EATING THE SCHEME. `line.split('//')[0]`
+                  # truncates `https://host` at `https:` — so the first version of this check
+                  # reported a deliberately reintroduced defect as CLEAN. The lookbehind is what
+                  # makes the guard able to fail at all.
+                  code = re.sub(r'(?<!:)//.*$', '', line)
+                  for host in re.findall(r"https://([A-Za-z0-9.-]+)", code):
+                      if host not in EXEMPT:
+                          offenders.append(f"{f.name}:{n} {host}")
+          if offenders:
+              print("::error::provider URLs hardcoded outside origins.ts — these bypass http-cache "
+                    "silently and no other check can see them: " + '; '.join(offenders))
+              sys.exit(1)
+
           # A location nothing ROUTES to cannot fail and cannot be wrong — the same blind spot that
           # left `exchange-listings` absent from the cron for weeks. Assert the wiring, not just
           # the config: if nginx.conf caches /mcp/, the agent must be pointed at it, and openbb-mcp
