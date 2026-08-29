@@ -248,6 +248,48 @@ comment on view market.pending_segments is
 -- margin is available without a second query. Restricted to `partition_id = 1` — the finest
 -- reconciling split — because that is the only set a caller can safely sum, and serving anything
 -- else invites exactly the double count the header describes.
+-- DROP ITS DEPENDENTS FIRST, DISCOVERED RATHER THAN LISTED. Migration 157 builds
+-- `security_segment_geography` and `pending_segment_alias` on this view, and every migration
+-- re-runs in order on every deploy — so on the SECOND pass this drop meets objects that did not
+-- exist on the first and fails the whole deploy with `cannot drop view ... because other objects
+-- depend on it`. A hand-maintained list of dependents was tried in migration 35 and was wrong
+-- within hours, so `pg_depend` is asked instead.
+--
+-- THE DROP IS UNAVOIDABLE HERE, unlike in migration 35. Four files define this view with four
+-- different column lists (141, 148, 149, 150, and now 157), and `create or replace view` can only
+-- APPEND columns — so the earliest definer can never replace the latest one's shape and must drop.
+-- That means a real window, on every deploy, in which this view and its dependents do not exist:
+-- roughly sixteen files of wall clock. It is tolerable only because nothing user-facing reads them
+-- yet. Collapsing 141/148/149/150 into a single definition would remove the window entirely and is
+-- the right follow-up; it is not done here because it would rewrite four files' narrative for a
+-- view whose readers are a Grafana panel and a curation queue.
+do $$
+declare v record;
+begin
+  for v in
+    select dv.relname, dv.relkind
+    from pg_depend d
+    join pg_rewrite r   on r.oid = d.objid
+    join pg_class dv    on dv.oid = r.ev_class
+    join pg_class src   on src.oid = d.refobjid
+    join pg_namespace n on n.oid = src.relnamespace
+    where n.nspname = 'market'
+      and src.relname = 'security_segment_current'
+      and dv.relname <> 'security_segment_current'
+      -- `IF EXISTS` does not protect against a relkind mismatch: `drop view` on a matview raises
+      -- `is not a view` and the converse also raises, so neither ordering of the two is safe.
+      -- Migration 158 adds a MATERIALIZED dependent, so both kinds have to be handled — a matview
+      -- has a `pg_rewrite` entry and is therefore discovered here exactly like a plain view.
+      and dv.relkind in ('v', 'm')
+  loop
+    if v.relkind = 'm' then
+      execute format('drop materialized view if exists market.%I cascade', v.relname);
+    else
+      execute format('drop view if exists market.%I cascade', v.relname);
+    end if;
+  end loop;
+end $$;
+
 drop view if exists market.security_segment_current;
 create view market.security_segment_current as
 with latest as (

@@ -1063,8 +1063,39 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       if (!Number.isFinite(rows) || rows === 0) {
         throw new Error('refresh_facets returned 0 rows — the filter spine would serve an empty universe')
       }
+      // A SECOND RPC, NOT A THIRD STATEMENT INSIDE refresh_facets. A PostgREST RPC is ONE
+      // statement under the role's 8-second timeout, and `refresh_segment_spine` measured
+      // 7,242 ms at 1.92M qualifying rows — folding it in would take the combined call over the
+      // limit and kill the screener's spine along with the segment one. Its own request gets its
+      // own budget.
+      //
+      // `duration_ms` is reported rather than discarded: it is the only warning that this refresh
+      // is walking toward the 8s ceiling as the segment table grows, and `refresh_run` keeps the
+      // history. A number computed and thrown away is the fourth instance of that here.
+      let segmentSpineRows: number | null = null
+      let segmentSpineMs: number | null = null
+      let segmentSpineError: string | null = null
+      const { data: spine, error: spineErr } = await market.rpc('refresh_segment_spine')
+      if (spineErr) {
+        // NOT FATAL, and deliberately so: the filter spine above is what the Markets tab and the
+        // screener read, and it has already refreshed successfully. Failing the whole resource
+        // here would trade a stale segment dashboard for a stale universe.
+        segmentSpineError = spineErr.message.slice(0, 200)
+      } else {
+        const sRow = Array.isArray(spine) ? spine[0] : spine
+        segmentSpineRows = Number(sRow?.rows_refreshed ?? 0)
+        segmentSpineMs = Number(sRow?.duration_ms ?? 0)
+      }
+
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, rows_refreshed: rows, refreshed_at: row?.refreshed_at ?? null })
+      return json({
+        resource,
+        rows_refreshed: rows,
+        refreshed_at: row?.refreshed_at ?? null,
+        segment_spine_rows: segmentSpineRows,
+        segment_spine_ms: segmentSpineMs,
+        segment_spine_error: segmentSpineError,
+      })
     }
 
     if (resource === DERIVE_RESOURCE) {

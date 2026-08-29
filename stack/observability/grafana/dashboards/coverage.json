@@ -1412,6 +1412,251 @@
      }
     }
    ]
+  },
+  {
+   "type": "row",
+   "title": "Business lines, filings and classification \u2014 SEC-sourced, so read them against the SEC-filer population",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 105
+   },
+   "panels": []
+  },
+  {
+   "type": "table",
+   "title": "The denominator \u2014 what each population can even have",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "description": "READ THIS FIRST. Everything in this row comes from SEC filings and nowhere else: measured 2026-08-29, ESEF block-tags its IFRS 8 segment notes as text and EDINET carries zero segment axes, so a company with no CIK has no source at all.\n\nThat is why `segments` is NOT in `market.required_facet`. Requiring it of every equity would report ~71% of the universe permanently broken against data that is correct \u2014 the same miscalibration that made ETFs read 0% complete because `price` was required of a type this pipeline has never stored bars for. A structurally unreachable completeness number gets ignored within a week, and the real regressions go with it.\n\nSo the split is a DIMENSION. `sec_filer = yes` is the honest denominator for the four facets below; `no` should read near zero and its being near zero is not a defect.",
+   "gridPos": {
+    "h": 7,
+    "w": 9,
+    "x": 0,
+    "y": 106
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*_pct"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  case bucket when 'yes' then 'SEC filer (has a CIK)' else 'no CIK \u2014 no segment source exists' end as population,\n  securities,\n  round(100.0*with_segments/nullif(securities,0),1)           as segments_pct,\n  round(100.0*with_segment_geography/nullif(securities,0),1)  as geography_pct,\n  round(100.0*with_sic/nullif(securities,0),1)                as sic_pct,\n  round(100.0*with_weighted_industry/nullif(securities,0),1)  as weighted_industry_pct\nfrom market.coverage_sample\nwhere dimension = 'sec_filer'\n  and security_type_code = 'equity'\n  and sampled_at = (select max(sampled_at) from market.coverage_sample)\norder by bucket desc"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Business lines \u2014 coverage of the SEC-filer population",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "description": "The four SEC-sourced facets, measured against the population that can have them (`sec_filer = yes`).\n\n`segments` is a company with a READABLE business-line breakdown \u2014 a partition-1 annual row in `security_segment_spine`, not merely a parsed filing. `geography` is where it earns, resolved without curation from the published ISO and region members. `weighted_industry` is the one that answers the original question: a company whose single sector label is known to be misleading, and by how much.\n\nSAMPLED TWICE A DAY, so `showPoints: always` \u2014 a timeseries draws a LINE, and two points in a 30-day window is indistinguishable from no data. That cost a round of \"why is this empty\" on the coverage dashboard once already.",
+   "gridPos": {
+    "h": 7,
+    "w": 15,
+    "x": 9,
+    "y": 106
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "showPoints": "always",
+      "pointSize": 6,
+      "lineWidth": 2,
+      "fillOpacity": 4,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select sampled_at as time, m as metric, v as value from (\n  select sampled_at,\n         'business lines'      as m, round(100.0*with_segments/nullif(securities,0),1) as v\n    from market.coverage_sample\n   where dimension='sec_filer' and bucket='yes' and security_type_code='equity'\n  union all\n  select sampled_at, 'geography', round(100.0*with_segment_geography/nullif(securities,0),1)\n    from market.coverage_sample\n   where dimension='sec_filer' and bucket='yes' and security_type_code='equity'\n  union all\n  select sampled_at, 'SIC code', round(100.0*with_sic/nullif(securities,0),1)\n    from market.coverage_sample\n   where dimension='sec_filer' and bucket='yes' and security_type_code='equity'\n  union all\n  select sampled_at, 'weighted industry', round(100.0*with_weighted_industry/nullif(securities,0),1)\n    from market.coverage_sample\n   where dimension='sec_filer' and bucket='yes' and security_type_code='equity'\n) s where $__timeFilter(sampled_at) order by sampled_at"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Which countries have business lines, and which never will",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "description": "Segment coverage per country. A country reading 0% is usually not a backlog \u2014 it is a country whose companies do not file with SEC, and the only ones that do are those with a US listing filing a 20-F or 40-F (787 non-US securities: ASML, SAP, Diageo, Infosys, MUFG, TSMC, Novo, Toyota).\n\nThe floor is the reader-controlled `$minsize` variable, selectable down to 1, so nothing is hidden by a decision the reader cannot see \u2014 a hardcoded `limit` over a worst-first sort once made the United States, the best-covered country in the universe, appear as the worst.",
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 113
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*_pct"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  bucket as country,\n  securities,\n  with_segments as with_business_lines,\n  round(100.0*with_segments/nullif(securities,0),1) as segments_pct,\n  round(100.0*with_segment_geography/nullif(securities,0),1) as geography_pct\nfrom market.coverage_sample\nwhere dimension = 'country'\n  and security_type_code = 'equity'\n  and sampled_at = (select max(sampled_at) from market.coverage_sample)\n  and securities >= $minsize\norder by round(100.0*with_segments/nullif(securities,0),1) desc nulls last, securities desc"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Which sectors have business lines",
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "description": "The same question by sector. A conglomerate-heavy sector should be the one where a single label is least informative, so low coverage here is where the feature is worth the most rather than where it matters least.\n\n`weighted_industry` is the column that pays off: it counts companies whose revenue and profit splits DISAGREE about what they are \u2014 Amazon reads 62% consumer-discretionary by revenue and 57% information-technology by profit.",
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 113
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*_pct"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "gradient"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  bucket as sector,\n  securities,\n  with_segments as with_business_lines,\n  round(100.0*with_segments/nullif(securities,0),1) as segments_pct,\n  with_weighted_industry as reclassified,\n  round(100.0*with_weighted_industry/nullif(securities,0),1) as weighted_industry_pct\nfrom market.coverage_sample\nwhere dimension = 'sector'\n  and security_type_code = 'equity'\n  and sampled_at = (select max(sampled_at) from market.coverage_sample)\n  and securities >= $minsize\norder by round(100.0*with_segments/nullif(securities,0),1) desc nulls last, securities desc"
+    }
+   ]
   }
  ],
  "templating": {

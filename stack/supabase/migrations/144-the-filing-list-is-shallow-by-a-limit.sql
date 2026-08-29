@@ -84,7 +84,12 @@ grant select on market.pending_filing_history to service_role;
 -- with an IDENTICAL column list is safe in both orders: 141 runs first each deploy and restores
 -- the unfiltered form, then this file narrows it again. Changing a column would not be — that is
 -- the trap that killed two deploys.
-create or replace view market.pending_segments as
+-- DROP BEFORE CREATE, because migration 156 adds a `round` column to this view and every migration
+-- re-runs in order on every deploy. `create or replace view` can only APPEND columns, so without
+-- the drop this file spends every pass trying to shrink 156's definition back to its own and fails
+-- the deploy with `cannot drop columns from view`. Fourth time this shape has cost a deploy.
+drop view if exists market.pending_segments;
+create view market.pending_segments as
 select
   f.security_id,
   f.accession_number,
