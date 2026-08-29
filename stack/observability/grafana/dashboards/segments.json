@@ -216,7 +216,7 @@
   {
    "type": "table",
    "title": "Business lines nobody has mapped yet \u2014 the curation queue",
-   "description": "A DRIFT COUNTER, not a work queue: `segment_alias` is EDITORIAL, so this is expected to be non-zero for ever and the TREND is the signal. It grows when the parser reaches new filers and falls when somebody curates.\n\nRANKED BY LEVERAGE, NOT BY SIZE. `companies` first, because a shared concept is worth nothing until TWO companies sit on it; then the share of its own company the line represents. Revenue is shown for context and is deliberately NOT the sort key \u2014 it is denominated in the filer's own currency, so ordering by it ranks by exchange rate.\n\nGEOGRAPHY IS EXCLUDED. A country filed on the business-segments axis (TSMC files `country:TW` there) is served by the geography panel and needs no concept \u2014 asking someone to give Taiwan a product concept is a wrong answer waiting to be curated, not a missing one. That exclusion took 41 of 113 members out of this queue.\n\nAn unmapped line still has its revenue and profit stored \u2014 it simply cannot be COMPARED across companies until it has a shared concept.",
+   "description": "A DRIFT COUNTER, not a work queue: `segment_alias` is EDITORIAL, so this is expected to be non-zero for ever and grows with every new filer parsed.\n\nIT IS NOT RANKED BY HOW MANY COMPANIES USE THE MEMBER, and that is a measured fact rather than a preference. An XBRL extension member is minted in the filer's OWN namespace, so across the whole universe **320 extension members are used by exactly one issuer and ZERO by two** \u2014 `amzn:AmazonWebServicesMember` and `msft:IntelligentCloudMember` can never collide. The only members two companies share are the standard ones, and every one of those is geography, already resolved without curation. Ranking on that count put residual buckets at the head of the queue.\n\nRanked instead by FUND WEIGHT \u2014 a percentage, so free of currency, unlike revenue \u2014 with catch-alls demoted. `issuers` and `securities` are both shown because a dual-listed company is one company: TSMC's local line and its ADR made four `tsm:` members read as the queue's only cross-company overlap.\n\nCatch-alls are FLAGGED, NOT FILTERED. \"90% of this company is in a bucket called Other\" is a real answer about disclosure quality, and a panel must not hide the state it exists to reveal.",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -236,7 +236,7 @@
      },
      "format": "table",
      "rawQuery": true,
-     "rawSql": "select\n  q.member_code,\n  q.kind,\n  q.companies,\n  q.largest_share_pct,\n  q.largest_revenue,\n  q.a_currency_code as currency,\n  q.an_axis as axis\nfrom market.pending_segment_alias q\norder by q.companies desc, q.largest_share_pct desc nulls last, q.member_code"
+     "rawSql": "select\n  q.member_code,\n  q.kind,\n  q.best_weight,\n  q.largest_share_pct,\n  q.issuers,\n  q.securities,\n  q.is_catch_all,\n  q.largest_revenue,\n  q.a_currency_code as currency,\n  q.an_axis as axis\nfrom market.pending_segment_alias q\norder by q.is_catch_all, q.best_weight desc nulls last, q.largest_share_pct desc nulls last"
     }
    ]
   },
