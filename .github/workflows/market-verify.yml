@@ -478,6 +478,19 @@ jobs:
             fail=1
           fi
 
+          # 9b. A DISCLOSED SPLIT MUST SUM TO THE FILING'S OWN CONSOLIDATED FIGURE. An XBRL axis can
+          #     carry several overlapping splits that EACH reconcile — Amazon's FY2025 10-K holds
+          #     three, all summing to 716,924,000,000 — so `sum(value)` over an axis doubles the
+          #     company's revenue and over the table triples it, with every individual number still
+          #     correct and no error anywhere. This is the only assertion that can see it.
+          #
+          #     Segment PROFIT is deliberately exempt: ASC 280 and IFRS 8 require a reconciliation
+          #     rather than an identity (Apple's segment operating income sums to ~38.9bn against a
+          #     consolidated ~28.2bn), so demanding that it add up would fail on correct data.
+          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_segments_reconcile.py; then
+            fail=1
+          fi
+
           # 10. THE APP'S OWN READS MUST ANSWER INSIDE THE ANON CEILING. `anon` has a 3-second
           #     statement timeout and `service_role` has none, so a slow view fails for the APP
           #     while every check above — all of which run as service_role — reports it healthy.

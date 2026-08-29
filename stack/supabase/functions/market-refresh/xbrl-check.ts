@@ -5,7 +5,7 @@
  * choice yields a shorter series or a plausible-looking wrong number, never an error. So it is
  * driven over synthetic payloads shaped exactly like companyfacts.
  */
-import { factsFromCompanyFacts, pickUnitKey, type ConceptSpec } from './xbrl.ts'
+import { factsFromCompanyFacts, pickUnitKey, submissionsFrom, type ConceptSpec } from './xbrl.ts'
 
 let failures = 0
 function check(ok: boolean, label: string, detail = '') {
@@ -240,6 +240,71 @@ console.log('xbrl fact resolution')
   check(out.length === 1 && out[0].value === 100,
     'a 3-year cumulative fact tagged FY is rejected from the annual series',
     `got ${JSON.stringify(out)}`)
+}
+
+// ── The submissions document, which is where the filing HISTORY and the SIC come from ─────────
+
+// 15. TWO SHAPES. The main document nests its parallel arrays under `filings.recent`; an older
+//     page is the same arrays at the TOP level with no wrapper. Reading only the first shape
+//     returns nothing for every historical page, which is indistinguishable from a filer that has
+//     never filed — and the historical pages are the entire point of using this endpoint.
+{
+  const nested = {
+    sic: '3571', sicDescription: 'Electronic Computers',
+    filings: {
+      recent: {
+        accessionNumber: ['0000320193-25-000079'], form: ['10-K'],
+        filingDate: ['2025-10-31'], reportDate: ['2025-09-27'], isXBRL: [1],
+      },
+      files: [{ name: 'CIK0000320193-submissions-001.json' }],
+    },
+  }
+  const a = submissionsFrom(nested, ['10-K', '10-Q'])
+  check(a.filings.length === 1 && a.filings[0].accession === '0000320193-25-000079',
+    'the nested `filings.recent` shape is read', JSON.stringify(a.filings))
+  check(a.sic === '3571' && a.sicDescription === 'Electronic Computers',
+    'the SIC rides along on the same response — no extra request for the classification')
+  check(a.olderPages.length === 1, 'the older pages are reported so the walk can continue')
+
+  const older = {
+    accessionNumber: ['0001193125-14-383437'], form: ['10-K'],
+    filingDate: ['2014-10-27'], reportDate: ['2014-09-27'], isXBRL: [1],
+  }
+  const b = submissionsFrom(older, ['10-K', '10-Q'])
+  check(b.filings.length === 1 && b.filings[0].filingDate === '2014-10-27',
+    'the FLAT older-page shape is read too', JSON.stringify(b.filings))
+  check(b.olderPages.length === 0, 'an older page reports no further pages')
+}
+
+// 16. `isXBRL` IS 1/0, NOT true/false, AND THE COERCION MATTERS. `Boolean("0")` is TRUE, so a
+//     string-truthiness read would mark every pre-2009 filing as carrying XBRL and send the
+//     segment resource after two requests each to find a 404.
+{
+  const payload = {
+    accessionNumber: ['a', 'b', 'c'], form: ['10-K', '10-K', '10-K'],
+    filingDate: ['2020-01-01', '2005-01-01', '2006-01-01'],
+    reportDate: [null, null, null], isXBRL: [1, 0, '0'],
+  }
+  const out = submissionsFrom(payload, ['10-K'])
+  check(out.filings.length === 3, 'every matching form is returned')
+  check(out.filings[0].isXbrl === true && out.filings[1].isXbrl === false && out.filings[2].isXbrl === false,
+    'isXBRL is read numerically — "0" is NOT xbrl',
+    JSON.stringify(out.filings.map((f) => f.isXbrl)))
+  check(out.filings[0].reportDate === null, 'a null reportDate stays null rather than becoming ""')
+}
+
+// 17. FORMS ARE FILTERED, AND A FOREIGN PRIVATE ISSUER FILES DIFFERENT ONES. A filer's history is
+//     dominated by Form 4s and 8-Ks; asking for the accounts forms is what keeps the walk cheap.
+{
+  const payload = {
+    accessionNumber: ['a', 'b', 'c', 'd'], form: ['4', '8-K', '20-F', '10-Q'],
+    filingDate: ['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04'],
+    reportDate: [null, null, '2023-12-31', '2024-03-31'], isXBRL: [0, 0, 1, 1],
+  }
+  const out = submissionsFrom(payload, ['10-K', '10-Q', '20-F', '40-F'])
+  check(out.filings.length === 2 && out.filings.every((f) => ['20-F', '10-Q'].includes(f.form)),
+    'only the accounts forms are kept — a 20-F counts, a Form 4 does not',
+    JSON.stringify(out.filings.map((f) => f.form)))
 }
 
 console.log(failures === 0 ? '\nALL XBRL CHECKS PASSED' : `\n${failures} XBRL CHECK(S) FAILED`)

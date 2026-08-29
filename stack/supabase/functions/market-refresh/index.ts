@@ -34,7 +34,8 @@ import { fetchFundamentals } from './fundamentals.ts'
 import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
 import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
-import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, type ConceptSpec } from './xbrl.ts'
+import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
+import { fetchInstance, findInstanceUrl, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { candidateSymbols } from './symbol-repair.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
@@ -306,6 +307,44 @@ const NEWS_RESOURCE = 'security-news'
 const SHARE_STATS_RESOURCE = 'security-share-stats'
 const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
+const SEGMENTS_RESOURCE = 'security-segments'
+const FILING_HISTORY_RESOURCE = 'security-filing-history'
+/**
+ * Filers per run. Each is ONE request for a 1-5 MB submissions document plus its older pages, so
+ * like every SEC resource here the bound is memory rather than the 90-second budget. Eight is
+ * deliberately small: this runs once per filer per month and has no reason to be greedy.
+ */
+const FILING_HISTORY_PAGE = 8
+/**
+ * How many historical pages to walk per filer. Apple has ONE (1,242 filings, 1994-2015) and most
+ * filers have none — the cap exists so a filer with an unusual history cannot consume a whole run.
+ * What is skipped is re-offered next month rather than lost.
+ */
+const FILING_HISTORY_MAX_PAGES = 3
+/** The forms that carry audited accounts. A 6-K or 8-K is an event and has no segment note. */
+const ACCOUNTS_FORMS = ['10-K', '10-Q', '20-F', '40-F']
+/**
+ * Filings per run. TWO REQUESTS EACH — the directory listing, then the instance.
+ *
+ * MEASURED 2026-08-29 rather than estimated, because the first estimate was wrong by 5x. Instance
+ * sizes run 0.74 MB (AAPL 10-Q) to **10.92 MB** (Diageo's 20-F; foreign private issuers tag their
+ * whole annual report inline, so the 20-F is the big one). The costs that were feared are not the
+ * binding ones: the 10.92 MB document downloads in **0.37 s**, parses in **40 ms**, and peaks at
+ * **15 MB** of heap. Documents are processed strictly one at a time and released, so a page of 20
+ * is ~16 s of a 60 s budget and nowhere near the 256 MB worker.
+ *
+ * The real constraint is politeness: at 20 filings this is ~0.7 requests/second against SEC's
+ * documented allowance of 10.
+ */
+const SEGMENTS_PAGE = 20
+/**
+ * WHICH METRICS ARE WORTH KEEPING PER SEGMENT. Revenue is what makes a business line visible and
+ * operating income is what makes it comparable — those two answer "AWS is 19% of revenue and 60%
+ * of profit", which is the question a company-level sector label cannot. Every other concept in
+ * `xbrl_concept` is deliberately excluded: a segment-dimensioned balance sheet is real data that
+ * nothing currently serves, and storing it would triple the table to no end.
+ */
+const SEGMENT_METRICS = ['revenue', 'operating_income']
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const DAILY_HISTORY_RESOURCE = 'security-daily-history'
 const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
@@ -363,6 +402,8 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [SEGMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [FILING_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [DAILY_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [EARNINGS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -996,8 +1037,21 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     if (resource === DERIVE_RESOURCE) {
       const { data: classified, error } = await market.rpc('derive_classifications')
       if (error) throw new Error(`derive_classifications failed: ${error.message}`)
+
+      // WEIGHTED CLASSIFICATION FROM THE FILINGS, in the same resource because it is the same
+      // table and the same kind of work: pure SQL over rows other resources already wrote, with no
+      // provider, no rate limit and no backlog. It is NOT called from `security-segments`, whose
+      // five-minute schedule would recompute the whole table 288 times a day — the trap where a
+      // follow-on pass performed 576,828 upserts to derive 28 rows.
+      //
+      // This is what makes "Amazon is 19% cloud by revenue and ~60% by operating income"
+      // expressible. Every row it writes sits BELOW yfinance in source priority, so no existing
+      // sector page, donut or facet changes.
+      const { data: weighted, error: wErr } = await market.rpc('derive_segment_classification')
+      if (wErr) throw new Error(`derive_segment_classification failed: ${wErr.message}`)
+
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, classified })
+      return json({ resource, classified, weighted })
     }
 
     // Sector for securities NO sector SPDR holds — i.e. everything non-US. Written as a SECOND
@@ -1660,6 +1714,281 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       return json({
         resource, written, filers, noFacts, failed, lastError,
         remaining: await backlogSize(market, 'pending_xbrl'),
+      })
+    }
+
+    // THE COMPLETE FILING HISTORY, AND THE SIC, IN ONE REQUEST PER FILER.
+    //
+    // `security-filings` asks openbb for `equity/fundamental/filings?...&limit=40`, which is two to
+    // three years per company — measured, `security_filing` held 8,450 accounts filings for 2026
+    // and FOUR for 2015. Segment depth is exactly filing depth, so that limit was the ceiling on
+    // this whole feature. SEC's own submissions API returns everything in one keyless call, and
+    // carries `sic` in the same payload.
+    if (resource === FILING_HISTORY_RESOURCE) {
+      const deadline = Date.now() + 60_000
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_filing_history')
+        .select('security_id,cik')
+        .limit(scopeLimit ?? FILING_HISTORY_PAGE)
+      if (pErr) throw new Error(`pending_filing_history read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: String(r.security_id),
+        cik: Number(r.cik),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every filer has a walked history' })
+      }
+
+      let written = 0
+      let filers = 0
+      let classified = 0
+      let noFilings = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of wanted) {
+        if (Date.now() > deadline - 8_000) break
+        try {
+          const head = await fetchSubmissions(item.cik, Math.min(25_000, deadline - Date.now()))
+          if (head === null) {
+            // SEC HAS NO SUCH CIK — an ANSWER, not a failure, so the cursor advances. Leaving it
+            // would re-ask for a filer that will never exist, every run, for ever.
+            noFilings++
+          } else {
+            const parsed = submissionsFrom(head, ACCOUNTS_FORMS)
+            const rows = [...parsed.filings]
+
+            // The older pages hold everything before the 1,000 most recent filings, which for an
+            // active filer is where the pre-2020 accounts live.
+            for (const page of parsed.olderPages.slice(0, FILING_HISTORY_MAX_PAGES)) {
+              if (Date.now() > deadline - 10_000) break
+              const older = await fetchSubmissionsPage(page, Math.min(20_000, deadline - Date.now()))
+              if (older !== null) rows.push(...submissionsFrom(older, ACCOUNTS_FORMS).filings)
+            }
+
+            if (rows.length === 0) noFilings++
+            else {
+              const filingRows = rows.map((f) => ({
+                security_id: item.securityId,
+                accession_number: f.accession,
+                report_type: f.form,
+                filing_date: f.filingDate,
+                report_date: f.reportDate,
+                is_xbrl: f.isXbrl,
+                source_code: 'sec-submissions',
+                as_of: new Date().toISOString(),
+              }))
+              for (let i = 0; i < filingRows.length; i += 500) {
+                const { error } = await market
+                  .from('security_filing')
+                  .upsert(
+                    dedupeBy(filingRows.slice(i, i + 500),
+                      (r) => `${r.security_id}|${r.accession_number}`),
+                    // DO NOTHING, NOT DO UPDATE. `security-filings` owns the recent window and
+                    // writes `report_url` / `filing_detail_url` this endpoint does not carry; a
+                    // full-row upsert would blank those every month and the two resources would
+                    // overwrite each other's provenance on every rotation. This resource only ever
+                    // ADDS the history that was missing.
+                    { onConflict: 'security_id,accession_number', ignoreDuplicates: true },
+                  )
+                if (error) throw new Error(`security_filing history upsert failed: ${error.message}`)
+              }
+              written += filingRows.length
+            }
+
+            // THE SIC RIDES ALONG. Sixth instance in this pipeline of "the answer is already in a
+            // response you fetch" — the classification costs no request of its own.
+            const patch: Record<string, unknown> = {
+              filing_history_fetched_at: new Date().toISOString(),
+            }
+            if (parsed.sic !== null) {
+              patch.sic = parsed.sic
+              patch.sic_description = parsed.sicDescription
+              classified++
+            }
+            const { error: uErr } = await market
+              .from('security').update(patch).eq('security_id', item.securityId)
+            if (uErr) throw new Error(`filing_history cursor update failed: ${uErr.message}`)
+            filers++
+            continue
+          }
+
+          // Reached only for the "SEC has no such CIK" branch above: the cursor still advances,
+          // because that is an answer about the filer rather than a failure to ask.
+          const { error: cErr } = await market
+            .from('security')
+            .update({ filing_history_fetched_at: new Date().toISOString() })
+            .eq('security_id', item.securityId)
+          if (cErr) throw new Error(`filing_history cursor update failed: ${cErr.message}`)
+          filers++
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, filers, classified, noFilings, failed, firstError, lastError,
+        remaining: await backlogSize(market, 'pending_filing_history'),
+      })
+    }
+
+    // REVENUE AND PROFIT PER BUSINESS LINE — the numbers companyfacts cannot give.
+    //
+    // `security-xbrl` above reads the SAME company through `data.sec.gov`, and the XBRL REST APIs
+    // STRIP DIMENSIONS: measured, AAPL revenue comes back as one value per period ($416.16bn for
+    // FY2025) with no iPhone in it. The filing's own instance keeps them, and is small — 778 KB for
+    // a 10-Q, 2.07 MB for a 10-K — so this is an ordinary backlog over filings `security_filing`
+    // already holds rather than a bulk import that would need a second executor.
+    if (resource === SEGMENTS_RESOURCE) {
+      const deadline = Date.now() + 60_000
+
+      const { data: axisRows, error: aErr } = await market
+        .from('segment_axis')
+        .select('taxonomy,axis,kind,priority')
+      if (aErr) throw new Error(`segment_axis read failed: ${aErr.message}`)
+      const axes: SegmentAxisSpec[] = (axisRows ?? []).map((r) => ({
+        axis: String(r.axis),
+        kind: String(r.kind) as SegmentAxisSpec['kind'],
+        priority: Number(r.priority),
+      }))
+      if (axes.length === 0) throw new Error('segment_axis is empty — every filing would yield nothing')
+
+      // REUSED, NOT DUPLICATED. `xbrl_concept` already records which concepts express which metric
+      // for both us-gaap and ifrs-full — the same catalogue `security-xbrl` drives. A second list
+      // here would be the same fact in two places, which this schema has already watched drift.
+      const { data: conceptRows, error: cErr } = await market
+        .from('xbrl_concept')
+        .select('metric_code,concept,priority')
+        .in('metric_code', SEGMENT_METRICS)
+      if (cErr) throw new Error(`xbrl_concept read failed: ${cErr.message}`)
+      const concepts: SegmentConceptSpec[] = (conceptRows ?? []).map((r) => ({
+        metricCode: String(r.metric_code),
+        concept: String(r.concept),
+        priority: Number(r.priority),
+      }))
+      if (concepts.length === 0) throw new Error('no segment concepts — xbrl_concept has no revenue rows')
+
+      const { data: verRows, error: vErr } = await market
+        .from('segment_parser').select('version').limit(1)
+      if (vErr) throw new Error(`segment_parser read failed: ${vErr.message}`)
+      const parserVersion = Number(verRows?.[0]?.version ?? 1)
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_segments')
+        .select('security_id,accession_number,cik,report_type')
+        .limit(scopeLimit ?? SEGMENTS_PAGE)
+      if (pErr) throw new Error(`pending_segments read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: String(r.security_id),
+        accession: String(r.accession_number),
+        cik: Number(r.cik),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, written: 0, remaining: 0, note: 'every filing has been read' })
+      }
+
+      let written = 0
+      let filings = 0
+      let noInstance = 0
+      let noSegments = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of wanted) {
+        // ONE AT A TIME AND BOUNDED, for the reason `security-xbrl` records: several multi-megabyte
+        // documents held at once in a 256 MB worker is how a resource dies with a bare 502 rather
+        // than an error anyone can read.
+        if (Date.now() > deadline - 8_000) break
+        try {
+          const url = await findInstanceUrl(item.cik, item.accession, Math.min(15_000, deadline - Date.now()))
+          const xml = url === null
+            ? null
+            : await fetchInstance(url, Math.min(25_000, deadline - Date.now()))
+          const facts = xml === null ? [] : segmentFactsFrom(xml, axes, concepts)
+          filings++
+          if (url === null || xml === null) noInstance++
+          else if (facts.length === 0) noSegments++
+
+          if (facts.length > 0) {
+            const rows = facts.map((f) => ({
+              security_id: item.securityId,
+              axis: f.axis,
+              member_code: f.memberCode,
+              metric_code: f.metricCode,
+              period_type: f.periodType,
+              period_ending: f.periodEnding,
+              period_start: f.periodStart,
+              value: f.value,
+              currency_code: f.currency,
+              partition_id: f.partitionId,
+              accession_number: item.accession,
+              source_code: 'sec-segments',
+              as_of: new Date().toISOString(),
+            }))
+            // LEARN THE CURRENCY FIRST, exactly as the XBRL resource does. `currency_code` is a
+            // foreign key and a foreign private issuer reports in its own currency, so a code the
+            // table has never seen fails the STATEMENT and takes the whole filing with it.
+            const curs = [...new Set(rows.map((r) => r.currency_code).filter(Boolean))] as string[]
+            if (curs.length > 0) {
+              const { error: cuErr } = await market.from('currency')
+                .upsert(curs.map((code) => ({ code })), { onConflict: 'code', ignoreDuplicates: true })
+              if (cuErr) throw new Error(`currency learn failed: ${cuErr.message}`)
+            }
+            for (let i = 0; i < rows.length; i += 500) {
+              const { error } = await market
+                .from('security_segment')
+                .upsert(
+                  // THE DEDUPE KEY CARRIES `period_type`, and so does the conflict target. A
+                  // fiscal-year end is both an annual period and a Q4 one; a key without it drops
+                  // the annual row as a duplicate of the quarterly one BEFORE the upsert ever sees
+                  // it, and the figure is then wrong by 4x with an identical row count.
+                  dedupeBy(rows.slice(i, i + 500),
+                    (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.metric_code}|${r.period_type}|${r.period_ending}`),
+                  { onConflict: 'security_id,axis,member_code,metric_code,period_type,period_ending' },
+                )
+              if (error) throw new Error(`security_segment upsert failed: ${error.message}`)
+            }
+            written += rows.length
+          }
+
+          // STAMPED ONLY AFTER SEC ANSWERED, and stamped whether or not it had segments — "this
+          // filing discloses none" is a permanent fact about an immutable document, which is why
+          // this is a cursor rather than a `%_missing_at` with an expiry. A fetch that THREW never
+          // reaches here, so an outage re-queues the filing instead of marking it read.
+          const { error: tErr } = await market
+            .from('security_filing')
+            .update({
+              segments_parsed_at: new Date().toISOString(),
+              segments_parser_version: parserVersion,
+            })
+            .eq('security_id', item.securityId)
+            .eq('accession_number', item.accession)
+          if (tErr) throw new Error(`segments_parsed_at update failed: ${tErr.message}`)
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          // BOTH ENDS OF THE RUN. A rate limit at call two otherwise overwrites the real failure at
+          // call one, which cost a whole diagnosis on `security-eps-history`.
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, filings, noInstance, noSegments, failed, firstError, lastError,
+        remaining: await backlogSize(market, 'pending_segments'),
       })
     }
 
