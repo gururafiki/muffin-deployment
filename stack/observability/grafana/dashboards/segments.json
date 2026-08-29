@@ -1,325 +1,454 @@
 {
-  "uid": "muffin-segments",
-  "title": "Muffin \u2014 Business lines",
-  "description": "Revenue and operating income per disclosed business line, parsed from each filing's own XBRL instance. AGGREGATE WITHIN ONE partition ONLY \u2014 an axis can carry several overlapping splits that each sum to the consolidated total (Amazon's FY2025 10-K holds three, all 716,924,000,000), so summing an axis doubles the company's revenue and summing the table triples it. Every panel here reads `security_segment_current`, which serves partition 1 alone, or filters partition_id explicitly.",
-  "tags": [
-    "muffin"
-  ],
-  "editable": true,
-  "schemaVersion": 39,
-  "version": 1,
-  "refresh": "5m",
-  "time": {
-    "from": "now-30d",
-    "to": "now"
-  },
-  "timepicker": {},
-  "panels": [
+ "uid": "muffin-segments",
+ "title": "Muffin \u2014 Business lines",
+ "description": "Revenue and operating income per disclosed business line, parsed from each filing's own XBRL instance. AGGREGATE WITHIN ONE partition ONLY \u2014 an axis can carry several overlapping splits that each sum to the consolidated total (Amazon's FY2025 10-K holds three, all 716,924,000,000), so summing an axis doubles the company's revenue and summing the table triples it. Every panel here reads `security_segment_current`, which serves partition 1 alone, or filters partition_id explicitly.",
+ "tags": [
+  "muffin"
+ ],
+ "editable": true,
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "5m",
+ "time": {
+  "from": "now-30d",
+  "to": "now"
+ },
+ "timepicker": {},
+ "panels": [
+  {
+   "type": "table",
+   "title": "Business lines \u2014 what is actually readable today",
+   "description": "Every company whose filing has been parsed into a disclosed split, with the largest line.\n\nORDERED BY THE NUMBER OF LINES, NOT BY REVENUE. Revenue is in each filer's own currency, so sorting on it ranks by exchange rate \u2014 TSMC's TWD 3,272,600,000,000 outranks every US company while being nothing like the largest. `split_total` is safe because it is summed WITHIN one (company, axis), which is one currency by construction.\n\nReads `security_segment_spine` (materialised, refreshed hourly): the live view is 3.8 ms for one security and 6.1 s for all of them.",
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
     {
-      "type": "table",
-      "title": "Business lines \u2014 what is actually readable today",
-      "description": "The point of the whole feature, as one row per company: how many disclosed lines it has, what the largest is, and whether the split reconciles to the filing.\n\nNO `limit` AND NO `> 0` FILTER. A company whose segments stopped parsing must still draw \u2014 that is the state this panel exists to reveal, and hiding it is the defect the cross table and the throughput chart both had. Use the column sort instead.",
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select\n  s.name as company,\n  c.axis,\n  count(*) as lines,\n  max(c.revenue) as largest_line_revenue,\n  (array_agg(coalesce(c.concept_name, c.member_code) order by c.revenue desc nulls last))[1] as largest_line,\n  sum(c.revenue) as split_total,\n  max(c.period_ending) as period\nfrom market.security_segment_current c\njoin market.security s on s.security_id = c.security_id\nwhere c.kind in ('product','business')\ngroup by s.name, c.axis\norder by max(c.revenue) desc nulls last"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Companies with a business-line breakdown",
-      "description": "Counted over SECURITIES, not rows. Read it beside the filings-parsed panel: this rising while filings-parsed is flat means nothing new is being read.",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 0,
-        "y": 9
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select count(distinct security_id) as value from market.security_segment"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Filings read for segments",
-      "description": "Filings whose XBRL instance has been parsed. A filed document is immutable, so this only ever goes up \u2014 unless `segment_parser.version` is bumped, which deliberately re-queues everything.",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 6,
-        "y": 9
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select count(*) as value from market.security_filing where segments_parsed_at is not null"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Filings still to read",
-      "description": "The live backlog. `pending_segments` is auto-sampled into `backlog_sample` like every other `pending_%` view, so the TREND is on the Pipeline dashboard \u2014 this is the current depth.",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 12,
-        "y": 9
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select count(*) as value from market.pending_segments"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Filings with no XBRL to read",
-      "description": "Not a failure. XBRL became mandatory in phases from 2009, so a full history reaches thousands of filings that can never carry a segment \u2014 this counts what the submissions walk told us to skip rather than pay two requests to discover.",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 18,
-        "y": 9
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select count(*) as value from market.security_filing where is_xbrl = false"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Segment facts written per run",
-      "description": "Throughput for `security-segments` and `security-filing-history`.\n\nDELIBERATELY DRAWS ZEROS. A run that wrote nothing is the single most informative point on this chart \u2014 it is what a stalled backlog, an exhausted page and a silently failing provider all look like \u2014 and a `written > 0` filter would delete exactly that.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 14
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "time_series",
-          "rawQuery": true,
-          "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history')\n group by 1, 2 order by 1"
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Members nobody has mapped yet \u2014 the curation queue",
-      "description": "A DRIFT COUNTER, not a work queue in the backlog sense: `segment_alias` is editorial, so this is expected to be non-zero and the TREND is the signal. Ordered by revenue, because mapping the largest unmapped line is worth more than clearing the tail.\n\nAn unmapped member still has its revenue and profit stored \u2014 it simply cannot be COMPARED across companies until someone gives it a shared concept.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 14
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select\n  g.member_code,\n  s.name as company,\n  max(g.value) as revenue,\n  max(g.period_ending) as period\nfrom market.security_segment_latest g\njoin market.security s on s.security_id = g.security_id\nleft join market.segment_alias a\n  on a.member_code = g.member_code\n and (a.security_id = g.security_id or a.security_id is null)\nwhere g.metric_code = 'revenue' and g.partition_id = 1 and a.concept_code is null\ngroup by g.member_code, s.name\norder by max(g.value) desc nulls last"
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Can these companies actually be compared?",
-      "description": "The question the feature is FOR: for each shared concept, how many companies disclose it. One company is not a comparison.\n\nIt is also the honest answer to \"compare the iPhone with the Pixel\": Alphabet does not disclose Pixel revenue (it sits inside Google other) and Samsung is not an SEC filer, so no amount of ingestion will make that row appear. AWS vs Google Cloud vs Intelligent Cloud does, because all three disclose it.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 22
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select\n  c.concept_name as concept,\n  count(distinct c.security_id) as companies,\n  sum(c.revenue) as combined_revenue,\n  round(avg(c.operating_margin_pct), 1) as avg_segment_margin_pct\nfrom market.security_segment_current c\nwhere c.concept_name is not null\ngroup by c.concept_name\norder by count(distinct c.security_id) desc, sum(c.revenue) desc nulls last"
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Weighted classification \u2014 where a single sector label is misleading",
-      "description": "The Amazon case, generalised: companies whose profit is concentrated somewhere other than their headline sector. `weight` is the share of revenue or of operating income that a classification accounts for; a company appears here when the two disagree most.\n\nThese rows are ADDITIVE \u2014 they sit below yfinance in source priority and never change the sector a page puts in its header.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 22
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select\n  s.name as company,\n  i.name as line,\n  max(i.weight) filter (where i.source_code = 'segment-revenue') as revenue_weight,\n  max(i.weight) filter (where i.source_code = 'segment-profit')  as profit_weight,\n  round(abs(coalesce(max(i.weight) filter (where i.source_code = 'segment-profit'), 0)\n          - coalesce(max(i.weight) filter (where i.source_code = 'segment-revenue'), 0)), 3) as gap\nfrom market.security_industries i\njoin market.security s on s.security_id = i.security_id\nwhere i.source_code in ('segment-revenue','segment-profit')\ngroup by s.name, i.name\norder by gap desc nulls last"
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Splits that do NOT reconcile to the filing",
-      "description": "The same arithmetic `check_segments_reconcile.py` runs in market-verify, drawn continuously. A split whose members do not sum to the company's own consolidated revenue means the parser lost a member, counted a subtotal, or partitioned a filing shape it has not seen.\n\nEMPTY IS THE HEALTHY STATE, and that is why this panel has no floor and no limit: the first row to appear is the whole point.",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 30
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "muffin-postgres"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "muffin-postgres"
-          },
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "with split as (\n  select g.security_id, g.axis, g.period_ending, g.period_type, sum(g.value) as total\n    from market.security_segment_latest g\n   where g.metric_code = 'revenue' and g.partition_id = 1\n   group by 1,2,3,4\n)\nselect s.name as company, split.axis, split.period_ending as period,\n       split.total as split_total, m.value as filing_total,\n       round(100 * (split.total - m.value) / nullif(m.value, 0), 2) as disagreement_pct\n  from split\n  join market.security s on s.security_id = split.security_id\n  join market.security_metric m\n    on m.security_id = split.security_id and m.metric_code = 'revenue'\n   and m.period_type = split.period_type and m.as_of = split.period_ending\n -- 0.5%, matching segments.ts and check_segments_reconcile.py. Segment revenue\n -- carries a reconciling item (Alphabet's is 127,000,000 of hedging gains on\n -- 402,836,000,000 = 0.032%), so an exact test would list every large filer here.\n where abs(split.total - m.value) > greatest(1, abs(m.value) * 0.005)\n   and abs(m.value) > 1000\n order by abs(split.total - m.value) desc"
-        }
-      ]
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  s.name as company,\n  c.axis,\n  count(*) as lines,\n  max(c.currency_code) as currency,\n  (array_agg(coalesce(c.concept_name, c.member_code) order by c.revenue desc nulls last))[1] as largest_line,\n  max(c.revenue) as largest_line_revenue,\n  sum(c.revenue) as split_total,\n  max(c.period_ending) as period\nfrom market.security_segment_spine c\njoin market.security s on s.security_id = c.security_id\nwhere c.kind in ('product','business')\ngroup by s.name, c.axis\norder by count(*) desc, s.name"
     }
-  ]
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Companies with a business-line breakdown",
+   "description": "Counted over SECURITIES, not rows. Read it beside the filings-parsed panel: this rising while filings-parsed is flat means nothing new is being read.",
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 0,
+    "y": 9
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select count(distinct security_id) as value from market.security_segment"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Filings read for segments",
+   "description": "Filings whose XBRL instance has been parsed. A filed document is immutable, so this only ever goes up \u2014 unless `segment_parser.version` is bumped, which deliberately re-queues everything.",
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 6,
+    "y": 9
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select count(*) as value from market.security_filing where segments_parsed_at is not null"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Filings still to read",
+   "description": "The live backlog. `pending_segments` is auto-sampled into `backlog_sample` like every other `pending_%` view, so the TREND is on the Pipeline dashboard \u2014 this is the current depth.",
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 12,
+    "y": 9
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select count(*) as value from market.pending_segments"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Filings with no XBRL to read",
+   "description": "Not a failure. XBRL became mandatory in phases from 2009, so a full history reaches thousands of filings that can never carry a segment \u2014 this counts what the submissions walk told us to skip rather than pay two requests to discover.",
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 18,
+    "y": 9
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select count(*) as value from market.security_filing where is_xbrl = false"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Segment facts written per run",
+   "description": "Throughput for `security-segments` and `security-filing-history`.\n\nDELIBERATELY DRAWS ZEROS. A run that wrote nothing is the single most informative point on this chart \u2014 it is what a stalled backlog, an exhausted page and a silently failing provider all look like \u2014 and a `written > 0` filter would delete exactly that.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 14
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history')\n group by 1, 2 order by 1"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Business lines nobody has mapped yet \u2014 the curation queue",
+   "description": "A DRIFT COUNTER, not a work queue: `segment_alias` is EDITORIAL, so this is expected to be non-zero for ever and the TREND is the signal. It grows when the parser reaches new filers and falls when somebody curates.\n\nRANKED BY LEVERAGE, NOT BY SIZE. `companies` first, because a shared concept is worth nothing until TWO companies sit on it; then the share of its own company the line represents. Revenue is shown for context and is deliberately NOT the sort key \u2014 it is denominated in the filer's own currency, so ordering by it ranks by exchange rate.\n\nGEOGRAPHY IS EXCLUDED. A country filed on the business-segments axis (TSMC files `country:TW` there) is served by the geography panel and needs no concept \u2014 asking someone to give Taiwan a product concept is a wrong answer waiting to be curated, not a missing one. That exclusion took 41 of 113 members out of this queue.\n\nAn unmapped line still has its revenue and profit stored \u2014 it simply cannot be COMPARED across companies until it has a shared concept.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 14
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  q.member_code,\n  q.kind,\n  q.companies,\n  q.largest_share_pct,\n  q.largest_revenue,\n  q.a_currency_code as currency,\n  q.an_axis as axis\nfrom market.pending_segment_alias q\norder by q.companies desc, q.largest_share_pct desc nulls last, q.member_code"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Can these companies actually be compared?",
+   "description": "The question the feature is FOR: for each shared concept, how many companies disclose it. One company is not a comparison.\n\nNO COMBINED REVENUE COLUMN, deliberately \u2014 it used to sum TWD, DKK and USD into one number and present it as a fact, which is the shape that once rendered Alibaba's CNY revenue as \"$1.02T\". A segment MARGIN is a percentage and is safe to average across currencies; `currencies` says how many are behind the row.\n\nIt is also the honest answer to \"compare the iPhone with the Pixel\": Alphabet does not disclose Pixel revenue (it sits inside Google other) and Samsung is not an SEC filer, so no amount of ingestion will make that row appear. AWS vs Google Cloud vs Intelligent Cloud does, because all three disclose it.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 22
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  c.concept_name as concept,\n  count(distinct c.security_id) as companies,\n  round(avg(c.operating_margin_pct), 1) as avg_segment_margin_pct,\n  round(avg(c.revenue_share_pct), 1) as avg_share_of_its_company_pct,\n  count(distinct c.currency_code) as currencies\nfrom market.security_segment_spine c\nwhere c.concept_name is not null\ngroup by c.concept_name\norder by count(distinct c.security_id) desc, c.concept_name"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Weighted classification \u2014 where a single sector label is misleading",
+   "description": "The Amazon case, generalised: companies whose profit is concentrated somewhere other than their headline sector. `weight` is the share of revenue or of operating income that a classification accounts for; a company appears here when the two disagree most.\n\nThese rows are ADDITIVE \u2014 they sit below yfinance in source priority and never change the sector a page puts in its header.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 22
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  s.name as company,\n  i.name as line,\n  max(i.weight) filter (where i.source_code = 'segment-revenue') as revenue_weight,\n  max(i.weight) filter (where i.source_code = 'segment-profit')  as profit_weight,\n  round(abs(coalesce(max(i.weight) filter (where i.source_code = 'segment-profit'), 0)\n          - coalesce(max(i.weight) filter (where i.source_code = 'segment-revenue'), 0)), 3) as gap\nfrom market.security_industries i\njoin market.security s on s.security_id = i.security_id\nwhere i.source_code in ('segment-revenue','segment-profit')\ngroup by s.name, i.name\norder by gap desc nulls last"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Splits that do NOT reconcile to the filing",
+   "description": "The same arithmetic `check_segments_reconcile.py` runs in market-verify, drawn continuously. A split whose members do not sum to the company's own consolidated revenue means the parser lost a member, counted a subtotal, or partitioned a filing shape it has not seen.\n\nEMPTY IS THE HEALTHY STATE, and that is why this panel has no floor and no limit: the first row to appear is the whole point.",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 30
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "with split as (\n  select g.security_id, g.axis, g.period_ending, g.period_type, sum(g.value) as total\n    from market.security_segment_latest g\n   where g.metric_code = 'revenue' and g.partition_id = 1\n   group by 1,2,3,4\n)\nselect s.name as company, split.axis, split.period_ending as period,\n       split.total as split_total, m.value as filing_total,\n       round(100 * (split.total - m.value) / nullif(m.value, 0), 2) as disagreement_pct\n  from split\n  join market.security s on s.security_id = split.security_id\n  join market.security_metric m\n    on m.security_id = split.security_id and m.metric_code = 'revenue'\n   and m.period_type = split.period_type and m.as_of = split.period_ending\n -- 0.5%, matching segments.ts and check_segments_reconcile.py. Segment revenue\n -- carries a reconciling item (Alphabet's is 127,000,000 of hedging gains on\n -- 402,836,000,000 = 0.032%), so an exact test would list every large filer here.\n where abs(split.total - m.value) > greatest(1, abs(m.value) * 0.005)\n   and abs(m.value) > 1000\n order by abs(split.total - m.value) desc"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Breadth \u2014 companies reached, against filings parsed",
+   "description": "THE NUMBER THAT GATES THE FEATURE, and the one that was invisible while it was wrong. Until migration 156 `pending_segments` was ordered by fund weight \u2014 a property of the SECURITY \u2014 so the queue walked one company's entire 20-year history before starting the next. Measured 2026-08-29: 440 filings parsed, belonging to **14 securities** (69, 69, 69, 65, 61, 57, 39, 15, 10, 9, 9, 9, 8, 5 each) out of ~3,500 SEC filers.\n\nNothing could report it. `written` read as throughput, `remaining` fell, `ok` was true and the reconciliation guard passed \u2014 because the rows being written were CORRECT. They were the wrong rows first. The two lines diverging is the healthy shape; them moving together at a ratio of ~30:1 is the defect returning.\n\n`showPoints: always` because these come from an hourly sampler: a timeseries draws a LINE, and a handful of points at the right-hand edge is indistinguishable from no data.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 38
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "showPoints": "always",
+      "lineWidth": 2,
+      "pointSize": 6
+     }
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select date_trunc('hour', u.sampled_at) as time,\n       case u.metric when 'segments.companies' then 'companies reached'\n                     else 'filings parsed' end as metric,\n       max(u.value) as value\nfrom market.universe_sample u\nwhere $__timeFilter(u.sampled_at)\n  and u.metric in ('segments.companies','segments.filings_parsed')\ngroup by 1, 2 order by 1"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "How deep is the queue into each company?",
+   "description": "`round` is a filing's depth into its OWN company's history \u2014 round 1 is every filer's most recent annual report. Breadth-first means the queue drains round 1 across all ~3,500 filers before touching any company's second filing, so a healthy queue is dominated by a low round number and the number climbs as coverage deepens.\n\nIf round 1 stops shrinking while later rounds do, the ordering has regressed to depth-first.\n\nNO `limit` AND NO `round > 0` FILTER: a round that has drained to zero is exactly what this panel is for, and dropping it would make a finished pass look like one that never ran.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 38
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  b.depth,\n  count(*) as filings,\n  count(distinct p.security_id) as companies\nfrom market.pending_segments p\ncross join lateral (\n  -- The bucket AND its sort key together: labelled buckets ordered by their own text put '21+'\n  -- above '6-20', which reads as a queue that has skipped ahead.\n  select case when p.round = 1 then 1 when p.round <= 5 then 2 when p.round <= 20 then 3 else 4 end as ord,\n         case when p.round = 1 then '1 - latest annual, every filer'\n              when p.round <= 5 then '2-5'\n              when p.round <= 20 then '6-20'\n              else '21+' end as depth\n) b\ngroup by b.ord, b.depth\norder by b.ord"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Where each company earns \u2014 no curation required",
+   "description": "Revenue by the geography a filer discloses. Every row here was readable WITHOUT anyone mapping anything: `country:US` is ISO 3166 and joins `market.countries`, and the standard region members (`srt:NorthAmericaMember`, `us-gaap:EMEAMember`) carry published labels. That is 41 of the 113 members that had been sitting in the curation queue.\n\nA country is geography WHEREVER IT ARRIVES \u2014 TSMC files `country:TW` on the BUSINESS-segments axis, because its reportable segments are geographic. Reading the kind off the axis put it in the product queue.\n\n`country_iso2` is null for a REGION: `us-gaap:NonUsMember` is everywhere-except-the-US, and pinning it to one code would file a whole company's foreign revenue under an arbitrary country.",
+   "gridPos": {
+    "h": 9,
+    "w": 14,
+    "x": 0,
+    "y": 46
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select\n  s.name as company,\n  g.member_label as place,\n  g.country_iso2 as iso,\n  g.revenue,\n  g.currency_code as currency,\n  g.revenue_share_pct as share_of_company_pct,\n  g.period_ending as period\nfrom market.security_segment_geography g\njoin market.security s on s.security_id = g.security_id\norder by s.name, g.revenue desc nulls last"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Segment spine refresh \u2014 milliseconds against the 8s ceiling",
+   "description": "A TRIPWIRE, not a performance chart. `security_segment_spine` is materialised because the live aggregation is 6.1 s at 1.92M qualifying rows while a single-security read is 3.8 ms \u2014 so every whole-table reader was a few hundred thousand rows from `57014 canceling statement due to statement timeout` while every probe said the view was healthy. Fourth occurrence of that shape here.\n\nThe refresh is a PostgREST RPC, which is ONE statement under the role's **8,000 ms** timeout. Measured at 7,242 ms concurrent on 1.92M qualifying rows \u2014 and 38.3% of production's segment rows qualify, so that is roughly a 5M-row table. When this line approaches 8,000 the fix is the one migration 142 already established: give it a pg_cron job, which has no PostgREST timeout.\n\nIt is plotted because a number computed and thrown away cannot warn anybody \u2014 the same reason `refresh_log` was replaced by `refresh_run`.",
+   "gridPos": {
+    "h": 9,
+    "w": 10,
+    "x": 14,
+    "y": 46
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-postgres"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "showPoints": "always",
+      "lineWidth": 2,
+      "pointSize": 6
+     },
+     "unit": "ms"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-postgres"
+     },
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select date_trunc('hour', r.started_at) as time,\n       'spine refresh' as metric,\n       max((r.report->>'segment_spine_ms')::numeric) as value\nfrom market.refresh_run r\nwhere $__timeFilter(r.started_at)\n  and r.resource = 'facets-refresh'\n  and jsonb_typeof(r.report->'segment_spine_ms') = 'number'\ngroup by 1 order by 1"
+    }
+   ]
+  }
+ ]
 }
