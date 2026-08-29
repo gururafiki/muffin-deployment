@@ -51,7 +51,9 @@ TOLERANCE_FRACTION = 0.005
 MIN_TOTAL = 1000
 
 
-def get(path: str):
+def get(path: str, offset: int = 0, limit: int = 1000):
+    """One page. `Range` rather than `limit`, because `limit` above PGRST_DB_MAX_ROWS is silently
+    truncated — see `get_all`."""
     req = urllib.request.Request(
         f"{BASE}/rest/v1/{path}",
         headers={
@@ -59,10 +61,34 @@ def get(path: str):
             "Authorization": f"Bearer {KEY}",
             "Accept-Profile": "market",
             "User-Agent": UA,
+            "Range-Unit": "items",
+            "Range": f"{offset}-{offset + limit - 1}",
         },
     )
     with urllib.request.urlopen(req, timeout=90) as r:
         return json.loads(r.read() or b"[]")
+
+
+def get_all(path: str, cap: int = 60_000):
+    """Every row, paged.
+
+    `PGRST_DB_MAX_ROWS` IS 1000 AND A BIGGER `limit` IS NOT AN ERROR — it is a shorter answer. This
+    guard asked for `limit=4000`, got 1000, and reported ASML's FY2021 split at 7,226,500,000
+    against a filed 18,611,000,000: a ratio of 0.39 and a completely false alarm, because half the
+    split was past the end of a page whose end could not be seen. That is the fourth time this
+    exact trap has cost this pipeline a defect, and the first time it was inside a guard.
+
+    A partial split can never reconcile, so this check is meaningless on anything but whole ones.
+    """
+    out, offset = [], 0
+    while offset < cap:
+        page = get(path, offset)
+        out.extend(page)
+        if len(page) < 1000:
+            return out
+        offset += 1000
+    print(f"::error::{path} exceeded {cap} rows — the sample is truncated and cannot reconcile")
+    sys.exit(1)
 
 
 def main() -> int:
@@ -75,9 +101,9 @@ def main() -> int:
     # from `MetrologyAndInspection` only in case). Reading the raw table unions two complete
     # splits of the same period; this check found exactly that on its first production run,
     # reporting ASML's FY2022 split at 34,114,800,000 against a filed 21,173,400,000.
-    rows = get(
+    rows = get_all(
         "security_segment_latest?select=security_id,axis,member_code,metric_code,period_type,"
-        "period_ending,value,partition_id&order=as_of.desc&limit=4000"
+        "period_ending,value,partition_id,currency_code&order=security_id,axis,period_ending"
     )
     if not rows:
         print("::notice::no segment rows yet — nothing to reconcile")
@@ -87,34 +113,59 @@ def main() -> int:
     # it because `security-xbrl` writes exactly the undimensioned facts this needs.
     keys = {(r["security_id"], r["metric_code"], r["period_type"], r["period_ending"]) for r in rows}
     sec_ids = sorted({k[0] for k in keys})
+    # (security, metric, period_type, as_of) -> (value, currency)
     totals = {}
     # ~100 per `in.()` chunk: the filter is a URL, so the limit is a LENGTH budget. 500 ISINs made
     # a ~6.5 KB URL that the proxy answered with a bare 502.
     for i in range(0, len(sec_ids), 100):
         chunk = ",".join(sec_ids[i : i + 100])
-        for m in get(
-            "security_metric?select=security_id,metric_code,period_type,as_of,value"
+        for m in get_all(
+            "security_metric?select=security_id,metric_code,period_type,as_of,value,currency_code"
             f"&security_id=in.({chunk})&metric_code=in.(revenue,operating_income)"
+            # ONLY A FILING-SOURCED TOTAL IS A VALID TARGET. The segment split comes from the
+            # filing's own instance, so comparing it against a PROVIDER's revenue compares two
+            # different measurements of two different things — and often in two different
+            # currencies. Measured on Credicorp: its geography split sums correctly to
+            # 28,555,000,000 **PEN**, and this check called it broken (ratio 1.19) against a
+            # yfinance figure of 23,986,309,000 carrying NO currency at all.
+            "&source_code=in.(sec-xbrl,sec)"
+            "&order=security_id,as_of"
         ):
-            totals[(m["security_id"], m["metric_code"], m["period_type"], m["as_of"])] = float(
-                m["value"]
+            totals[(m["security_id"], m["metric_code"], m["period_type"], m["as_of"])] = (
+                float(m["value"]),
+                m.get("currency_code"),
             )
 
     sums: dict[tuple, float] = {}
     partitions: dict[tuple, set] = {}
+    currencies: dict[tuple, str | None] = {}
     for r in rows:
         base = (r["security_id"], r["metric_code"], r["period_type"], r["period_ending"])
         gk = base + (r["axis"],)
         partitions.setdefault(gk, set()).add(r["partition_id"])
         if r["partition_id"] == 1:
             sums[gk] = sums.get(gk, 0.0) + float(r["value"])
+            currencies[gk] = r.get("currency_code")
 
     checked = 0
+    skipped_currency = 0
     bad = []
     for gk, total_of_split in sums.items():
         base = gk[:4]
-        consolidated = totals.get(base)
-        if consolidated is None or abs(consolidated) < MIN_TOTAL:
+        found = totals.get(base)
+        if found is None:
+            continue
+        consolidated, total_currency = found
+        if abs(consolidated) < MIN_TOTAL:
+            continue
+        # AND IT MUST BE THE SAME CURRENCY. A foreign private issuer files in its own — Credicorp in
+        # PEN, Diageo in USD despite being British — so a mismatch is two numbers that were never
+        # comparable, not a defect in the split. `is not None` on both: an unknown currency on
+        # either side is not evidence of agreement.
+        split_currency = currencies.get(gk)
+        if total_currency is not None and split_currency is not None \
+                and total_currency != split_currency:
+            skipped_currency += 1
             continue
         # SEGMENT PROFIT IS EXEMPT AND THAT IS NOT A LOOPHOLE. ASC 280 and IFRS 8 both require a
         # RECONCILIATION rather than an identity: shared costs are deliberately unallocated, so
@@ -145,7 +196,8 @@ def main() -> int:
             merged_ok += 1
     print(
         f"::notice::reconciled {checked} revenue splits against the filing; "
-        f"{merged_ok} axes carry more than one split (summing them would double the revenue)"
+        f"{merged_ok} axes carry more than one split (summing them would double the revenue); "
+        f"{skipped_currency} skipped on a currency mismatch"
     )
 
     if bad:
