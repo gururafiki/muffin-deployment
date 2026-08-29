@@ -1065,8 +1065,15 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       const { data: weighted, error: wErr } = await market.rpc('derive_segment_classification')
       if (wErr) throw new Error(`derive_segment_classification failed: ${wErr.message}`)
 
+      // SEC's own industry code for each registrant, which `security-filing-history` writes to
+      // `security.sic` from the submissions response. A second opinion that is neither a
+      // provider's nor a fund's, and it exists for every filer regardless of whether yfinance has
+      // ever answered for the symbol.
+      const { data: sic, error: sErr } = await market.rpc('derive_sic_classification')
+      if (sErr) throw new Error(`derive_sic_classification failed: ${sErr.message}`)
+
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, classified, weighted })
+      return json({ resource, classified, weighted, sic })
     }
 
     // Sector for securities NO sector SPDR holds — i.e. everything non-US. Written as a SECOND
