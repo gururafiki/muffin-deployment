@@ -41,6 +41,7 @@ import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
 import { loadFundDirectory } from './edgar.ts'
 import {
   BACKLOG_TTL_MINUTES,
+  SEC_BACKLOG_TTL_MINUTES,
   barFrom,
   dedupeBy,
   fetchWithIsolation,
@@ -413,8 +414,11 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [SEGMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [FILING_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    // NOT `BACKLOG_TTL_MINUTES`: these two have their own five-minute pg_cron jobs, and a
+    // ten-minute TTL made every other firing a no-op — measured in production, half the runs came
+    // back `skipped: fresh or in flight` while reporting ok.
+    [SEGMENTS_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
+    [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [DAILY_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [EARNINGS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,

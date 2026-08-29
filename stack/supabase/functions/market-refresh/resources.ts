@@ -803,6 +803,23 @@ export const SEC_PERF_TTL_MINUTES = 24 * 60
 export const BACKLOG_TTL_MINUTES = 10
 
 /**
+ * TTL for the two SEC backlogs, which run on their OWN five-minute pg_cron schedules rather than
+ * in the provider-paced rotation (migration 142).
+ *
+ * MEASURED IN PRODUCTION ON THE FIRST DAY, and it was the schedule fighting the TTL. With
+ * `BACKLOG_TTL_MINUTES` at 10 and the job firing every 5, every OTHER run returned
+ * `{"skipped": true, "reason": "fresh or in flight"}` — so `security-segments` drained at half the
+ * rate the schedule implies, and its 30,060-filing backlog would take ~10 days instead of ~5. It
+ * reports `ok: true` throughout, which is why nothing but reading the run records finds it.
+ *
+ * FOUR, not five: a TTL exactly equal to the interval is a coin flip on clock jitter, and losing a
+ * run to rounding is the same defect in a quieter form. There is no cost to the shorter value —
+ * a backlog resource with nothing to do returns without calling any provider, and at 20 filings a
+ * run this is ~0.13 requests/second against SEC's documented 10.
+ */
+export const SEC_BACKLOG_TTL_MINUTES = 4
+
+/**
  * Multi-period returns for EQUITIES, batched.
  *
  * Separate from `etfReturns` because the endpoint differs (`equity/price/historical`, not
