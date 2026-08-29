@@ -18,10 +18,10 @@ function check(ok: boolean, label: string, detail = '') {
 }
 
 const AXES: SegmentAxisSpec[] = [
-  { axis: 'srt:ProductOrServiceAxis', kind: 'product', priority: 100 },
-  { axis: 'us-gaap:StatementBusinessSegmentsAxis', kind: 'business', priority: 90 },
-  { axis: 'ifrs-full:ProductsAndServicesAxis', kind: 'product', priority: 100 },
-  { axis: 'srt:ConsolidationItemsAxis', kind: 'qualifier', priority: 0 },
+  { axis: 'srt:ProductOrServiceAxis', kind: 'product', priority: 100, requiredMember: null },
+  { axis: 'us-gaap:StatementBusinessSegmentsAxis', kind: 'business', priority: 90, requiredMember: null },
+  { axis: 'ifrs-full:ProductsAndServicesAxis', kind: 'product', priority: 100, requiredMember: null },
+  { axis: 'srt:ConsolidationItemsAxis', kind: 'qualifier', priority: 0, requiredMember: null },
 ]
 const CONCEPTS: SegmentConceptSpec[] = [
   { metricCode: 'revenue', concept: 'RevenueFromContractWithCustomerExcludingAssessedTax', priority: 100 },
@@ -319,21 +319,24 @@ console.log('segment parsing')
 //     "highest priority" and "last seen" disagree — with it first, both rules give the same answer
 //     and a mutation removing the priority test passes clean.
 {
+  // THE MEMBERS' OWN CONCEPT HAS NO UNDIMENSIONED FACT, which is the only arrangement where the
+  // priority fallback decides anything — Alphabet's real shape. Two other concepts ARE stated
+  // undimensioned, with the LOW-priority one last, so "highest priority" and "last seen" disagree.
   const xml = instance([
-    // High priority (100) FIRST, and it is the one that matches the members.
-    { concept: REV, value: 100 },
+    { concept: 'Revenues', value: 100 },              // priority 120 below — the right answer
     { concept: REV, value: 60, dims: prod('x:AMember') },
     { concept: REV, value: 40, dims: prod('x:BMember') },
-    // Low priority (80), stated LAST, and deliberately a different number.
-    { concept: 'Revenues', value: 137 },
+    { concept: 'SalesRevenueNet', value: 137 },       // priority 70, stated LAST
   ])
   const out = segmentFactsFrom(xml, AXES, [
-    ...CONCEPTS,
-    { metricCode: 'revenue', concept: 'Revenues', priority: 80 },
+    { metricCode: 'revenue', concept: REV, priority: 100 },
+    { metricCode: 'revenue', concept: 'Revenues', priority: 120 },
+    { metricCode: 'revenue', concept: 'SalesRevenueNet', priority: 70 },
+    { metricCode: 'operating_income', concept: 'OperatingIncomeLoss', priority: 100 },
   ])
   const members = out.filter((f) => f.memberCode.startsWith('x:'))
   check(members.length === 2 && members.every((f) => f.partitionId === 1),
-    'the split reconciles against the HIGHEST-PRIORITY consolidated concept, not the last one seen',
+    'with no same-concept total, the HIGHEST-PRIORITY one is used — not the last seen',
     JSON.stringify(members.map((f) => `${f.memberCode}=p${f.partitionId}`)))
 }
 
@@ -472,6 +475,95 @@ console.log('segment parsing')
   check(nested.every((f) => f.axis === PROD && f.parentAxis === BIZ),
     'the FINER axis is enumerated and the coarser is the parent',
     JSON.stringify(nested.map((f) => `${f.axis.split(':')[1]}<${f.parentAxis?.split(':')[1]}`)[0]))
+}
+
+// ── The four rules the Korean spike forced out, each measured on a real DART filing ───────────
+
+const CS = 'ifrs-full:ConsolidatedAndSeparateFinancialStatementsAxis'
+const KR_AXES: SegmentAxisSpec[] = [
+  ...AXES,
+  { axis: 'ifrs-full:ProductsAndServicesAxis', kind: 'product', priority: 100, requiredMember: null },
+  // Pinned: `SeparateMember` is parent-only accounts, a different set of numbers entirely.
+  { axis: CS, kind: 'qualifier', priority: 0, requiredMember: 'ifrs-full:ConsolidatedMember' },
+]
+const IPROD = 'ifrs-full:ProductsAndServicesAxis'
+
+// 17. A PINNED QUALIFIER REJECTS THE WRONG MEMBER. Korean filings tag EVERY fact consolidated or
+//     separate — measured, 1,538 against 1,213 on one filing — so an open qualifier would store a
+//     parent-only split beside a consolidated one, or reconcile one against the other.
+{
+  const xml = instance([
+    { concept: REV, value: 100, dims: { [CS]: 'ifrs-full:ConsolidatedMember' } },
+    { concept: REV, value: 60, dims: { [CS]: 'ifrs-full:ConsolidatedMember', [IPROD]: 'x:AMember' } },
+    { concept: REV, value: 40, dims: { [CS]: 'ifrs-full:ConsolidatedMember', [IPROD]: 'x:BMember' } },
+    // The SAME company's parent-only accounts, on a member the consolidated split does NOT have —
+    // otherwise the duplicate rule discards it and the fixture cannot tell the two rules apart.
+    { concept: REV, value: 30, dims: { [CS]: 'ifrs-full:SeparateMember', [IPROD]: 'x:ParentOnlyMember' } },
+  ])
+  const out = segmentFactsFrom(xml, KR_AXES, CONCEPTS)
+  check(out.length === 2 && out.every((f) => f.partitionId === 1),
+    'a pinned qualifier keeps only the consolidated split', `${out.length} facts`)
+  check(!out.some((f) => f.value === 30), 'the parent-only (separate) figure is rejected outright')
+}
+
+// 18. "NO SEGMENT DIMENSIONS" IS THE TOTAL, NOT "NO DIMENSIONS AT ALL". Nothing in a Korean filing
+//     is ever literally undimensioned, so the older test found no target, left every split
+//     unplaced, and produced partition 0 for a whole jurisdiction while parsing cleanly.
+{
+  const xml = instance([
+    { concept: REV, value: 100, dims: { [CS]: 'ifrs-full:ConsolidatedMember' } },
+    { concept: REV, value: 60, dims: { [CS]: 'ifrs-full:ConsolidatedMember', [IPROD]: 'x:AMember' } },
+    { concept: REV, value: 40, dims: { [CS]: 'ifrs-full:ConsolidatedMember', [IPROD]: 'x:BMember' } },
+  ])
+  const out = segmentFactsFrom(xml, KR_AXES, CONCEPTS)
+  check(out.length === 2 && out.every((f) => f.partitionId === 1),
+    'a fact carrying only qualifiers IS the consolidated total',
+    JSON.stringify(out.map((f) => f.partitionId)))
+}
+
+// 19. THE TARGET IS THE MEMBERS' OWN CONCEPT FIRST. SK Gas states BOTH `Revenue` 7,095,902,060,317
+//     and `RevenueFromContractsWithCustomers` 7,050,068,258,000 for FY2024, and tags its product
+//     split with the second. Reconciling against the higher-priority `Revenue` leaves it 0.65%
+//     short — just outside tolerance — and the split is lost. The fixture uses those real figures.
+{
+  const xml = instance([
+    { concept: 'Revenues', value: 7095902060317 },
+    { concept: REV, value: 7050068258000 },
+    { concept: REV, value: 6517517172000, dims: prod('x:LpgMember') },
+    { concept: REV, value: 347127843000, dims: prod('x:OtherMember') },
+    { concept: REV, value: 185423243000, dims: prod('x:ElectricityMember') },
+  ])
+  // `Revenues` at a HIGHER priority than the members' own concept, which is the arrangement that
+  // makes the two rules disagree.
+  const out = segmentFactsFrom(xml, AXES, [
+    ...CONCEPTS,
+    { metricCode: 'revenue', concept: 'Revenues', priority: 120 },
+  ])
+  const p1 = out.filter((f) => f.partitionId === 1)
+  check(p1.length === 3 && p1.reduce((a, f) => a + f.value, 0) === 7050068258000,
+    'the split reconciles against ITS OWN concept, not the highest-priority one',
+    `${p1.length} members`)
+}
+
+// 20. AMONG TIED SPLITS, THE ONE A HUMAN CAN READ WINS. Korean filers emit a generated
+//     `udf_NOTE_<timestamp>Member` beside a named member for the same line and the same value —
+//     two complete, equally valid splits. Partition 1 is what the app serves, and "LPG sales"
+//     beats a timestamp. A PREFERENCE AMONG EQUALS: nothing is renamed or dropped.
+{
+  const xml = instance([
+    { concept: REV, value: 100 },
+    { concept: REV, value: 60, dims: prod('x:udf_NOTE_20231114182510391Member') },
+    { concept: REV, value: 40, dims: prod('x:udf_NOTE_20231114182516257Member') },
+    { concept: REV, value: 60, dims: prod('x:LpgSalesMember') },
+    { concept: REV, value: 40, dims: prod('x:OtherSalesMember') },
+  ])
+  const out = segmentFactsFrom(xml, AXES, CONCEPTS)
+  const p1 = out.filter((f) => f.partitionId === 1)
+  check(p1.length === 2 && p1.every((f) => !f.memberCode.includes('udf_')),
+    'the readable split is partition 1 and the generated one is not',
+    JSON.stringify(p1.map((f) => f.memberCode)))
+  check(out.filter((f) => f.partitionId === 2).length === 2,
+    'the generated split is still STORED, as a second partition')
 }
 
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
