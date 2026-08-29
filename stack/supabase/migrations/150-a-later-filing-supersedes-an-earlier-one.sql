@@ -48,6 +48,11 @@ with ranked as (
 select
   security_id, axis, member_code, parent_axis, parent_member, metric_code,
   period_type, period_ending, period_start, value, currency_code, partition_id,
+  -- LISTED EXPLICITLY, and that is why the column had to be declared in migration 141 rather than
+  -- in the file that introduced it: a view names its columns at creation time (`select *` freezes
+  -- them just the same), so a reader asking for a column this list omits gets a **400**, not a
+  -- null. The reconciliation guard could not run at all until this line existed.
+  reconciled_to,
   accession_number, filing_date, source_code, as_of
 from ranked
 where filing_rank = 1;

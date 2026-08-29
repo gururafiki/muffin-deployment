@@ -121,6 +121,15 @@ comment on table market.security_segment is
 comment on column market.security_segment.partition_id is
   'Which disclosed split this member belongs to. 1 is the finest split that reconciles to the filing''s own consolidated figure; 2+ are coarser splits of the same total; 0 is a subtotal (Apple''s ProductMember is the sum of iPhone/iPad/Mac/Wearables) or a member the parser could not place.';
 
+-- ADDED BY MIGRATION 154 and declared here, because migration 150's `security_segment_latest`
+-- lists its columns EXPLICITLY and runs BEFORE 154 — so a column introduced later cannot appear in
+-- the view without the view's own file failing on the first pass. `if not exists` keeps this
+-- idempotent on a database where 154 already added it.
+alter table market.security_segment add column if not exists reconciled_to numeric;
+
+comment on column market.security_segment.reconciled_to is
+  'The figure this member''s split was accepted against — the filing''s own consolidated value for a flat split, the parent member''s value for a nested one. NULL for partition 0, which was never placed. Stored so a guard can ask "does this split still add up" without comparing against a second, independently derived total.';
+
 create index if not exists security_segment_lookup_idx
   on market.security_segment (security_id, metric_code, period_type, period_ending desc);
 create index if not exists security_segment_member_idx
