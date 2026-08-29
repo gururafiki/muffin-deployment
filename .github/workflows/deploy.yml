@@ -163,6 +163,8 @@ jobs:
           fred_api_key: "${{ secrets.FRED_API_KEY }}"
           alpha_vantage_api_key: "${{ secrets.ALPHA_VANTAGE_API_KEY }}"
           tiingo_token: "${{ secrets.TIINGO_TOKEN }}"
+          dart_api_key: "${{ secrets.DART_API_KEY }}"
+          edinet_api_key: "${{ secrets.EDINET_API_KEY }}"
           biztoc_api_key: "${{ secrets.BIZTOC_API_KEY }}"
           openfigi_api_key: "${{ secrets.OPENFIGI_API_KEY }}"
           postgres_password: "${{ secrets.POSTGRES_PASSWORD }}"
