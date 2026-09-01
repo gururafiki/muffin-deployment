@@ -192,7 +192,7 @@
   {
    "type": "table",
    "title": "Country \u00d7 sector \u2014 completeness (sortable; worst first by default)",
-   "description": "Every (country, sector) bucket holding at least 20 securities \u2014 106 of the 637 combinations. Click a column to re-sort; the default is worst-first because that is where the work is.\n\nIT USED TO BE `limit 60`, AND THAT HID THE UNITED STATES. US is the best-covered country, so its eleven real sectors ranked 90-98 of 106 and fell off the end \u2014 leaving only `US / unknown` (92 securities with no sector, genuinely 0%) visible, which read as 'the US is missing'. A worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy things are the ones you check when something looks wrong.\n\nThe >=20 floor stays: a completeness figure over a handful of securities is noise, and a two-stock bucket at 0% would otherwise top the list for ever.\n\nTHE SIZE FLOOR IS A VARIABLE, NOT A CONSTANT. At the default of 20 it hides 531 of 637 buckets \u2014 a defensible choice (a 2-security bucket at 0% is noise, not a signal) but not one that should be invisible. Set `Min securities in bucket` to 1 to see all of them. The panel previously ALSO carried `limit 60`, which deleted the United States: 106 buckets cleared the floor, the US ranked 90-98 of them BECAUSE it is well covered, and the only US row that survived was `US / unknown` at 0%.\n\nEvery percentage column is coloured by a NEGATIVE match. It used to name `complete %` alone, so `statements %` and `industry %` rendered as plain numbers in a heatmap \u2014 found by CI, not by looking, and the same stale-enumeration shape as the four facets that rendered uncoloured on the \u00d7 facet tables.",
+   "description": "Every (country, sector) bucket holding at least 20 securities \u2014 106 of the 637 combinations. Click a column to re-sort; the default is worst-first because that is where the work is.\n\nIT USED TO BE `limit 60`, AND THAT HID THE UNITED STATES. US is the best-covered country, so its eleven real sectors ranked 90-98 of 106 and fell off the end \u2014 leaving only `US / unknown` (92 securities with no sector, genuinely 0%) visible, which read as 'the US is missing'. A worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy things are the ones you check when something looks wrong.\n\nThe >=20 floor stays: a completeness figure over a handful of securities is noise, and a two-stock bucket at 0% would otherwise top the list for ever.\n\nTHE SIZE FLOOR IS A VARIABLE, NOT A CONSTANT. At the default of 20 it hides 531 of 637 buckets \u2014 a defensible choice (a 2-security bucket at 0% is noise, not a signal) but not one that should be invisible. Set `Min securities in bucket` to 1 to see all of them. The panel previously ALSO carried `limit 60`, which deleted the United States: 106 buckets cleared the floor, the US ranked 90-98 of them BECAUSE it is well covered, and the only US row that survived was `US / unknown` at 0%.\n\nEvery percentage column is coloured by a NEGATIVE match. It used to name `complete %` alone, so `statements %` and `industry %` rendered as plain numbers in a heatmap \u2014 found by CI, not by looking, and the same stale-enumeration shape as the four facets that rendered uncoloured on the \u00d7 facet tables.\n\n**`core %` is the typed GATE** \u2014 holds every facet `required_facet` demands of its type \u2014 and **`all facets %` is BREADTH**: of the 23 facets a security could have, how many it has, with the four regulator-sourced ones excluded from the denominator where no regulator can serve it. One number was ambiguous: a bucket can read 100% core while not one of its companies has a business line.",
    "gridPos": {
     "h": 11,
     "w": 12,
@@ -274,7 +274,7 @@
       "type": "postgres",
       "uid": "muffin-postgres"
      },
-     "rawSql": "select split_part(bucket,'|',1) as \"country\",\n       split_part(bucket,'|',2) as \"sector\",\n       securities,\n       round(100.0*complete/nullif(securities,0),1) as \"core %\",\n       round(100.0*with_statements/nullif(securities,0),1) as \"statements %\",\n       round(100.0*with_industry/nullif(securities,0),1)   as \"industry %\"\n  from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and securities >= $minsize\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\n order by 100.0*complete/nullif(securities,0) asc"
+     "rawSql": "select split_part(bucket,'|',1) as \"country\",\n       split_part(bucket,'|',2) as \"sector\",\n       securities,\n       round(100.0*complete/nullif(securities,0),1) as \"core %\", round(100.0*present_facets/nullif(applicable_facets,0),1) as \"all facets %\",\n       round(100.0*with_statements/nullif(securities,0),1) as \"statements %\",\n       round(100.0*with_industry/nullif(securities,0),1)   as \"industry %\"\n  from market.coverage_sample\n where dimension = 'country_sector'\n   and sampled_at = (select max(sampled_at) from market.coverage_sample)\n   and security_type_code = 'equity'\n   and securities >= $minsize\n   and split_part(bucket,'|',1) like '$country'\n   and split_part(bucket,'|',2) like '$sector'\n order by 100.0*complete/nullif(securities,0) asc"
     }
    ]
   },
@@ -400,7 +400,7 @@
   {
    "type": "timeseries",
    "title": "Completeness by security type",
-   "description": "The same figure over time. ETFs read 0% because `required_facet` asks them for a `price` row and ETF returns are computed from `etf/historical` into `performance` \u2014 bars were never stored. That is a one-row fix in `required_facet`, not an ingestion failure.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "The same figure over time. ETFs read 0% because `required_facet` asks them for a `price` row and ETF returns are computed from `etf/historical` into `performance` \u2014 bars were never stored. That is a one-row fix in `required_facet`, not an ingestion failure.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\nThis plots `core %` \u2014 the typed gate. It is deliberately NOT joined by `all facets %`: these already draw one series per bucket, and a second metric would double the legend. Read breadth on the `\u00d7 facet` tables, which carry both side by side.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -511,7 +511,7 @@
   {
    "type": "timeseries",
    "title": "Completeness by MSCI tier",
-   "description": "Developed / emerging / frontier. Tier is MSCI's lens; region below is the World Bank's, because MSCI's regions are INVESTMENT regions and file Poland under EMEA.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "Developed / emerging / frontier. Tier is MSCI's lens; region below is the World Bank's, because MSCI's regions are INVESTMENT regions and file Poland under EMEA.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\nThis plots `core %` \u2014 the typed gate. It is deliberately NOT joined by `all facets %`: these already draw one series per bucket, and a second metric would double the legend. Read breadth on the `\u00d7 facet` tables, which carry both side by side.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -567,7 +567,7 @@
   {
    "type": "timeseries",
    "title": "Completeness by market-cap band",
-   "description": "Market cap is denominated in each security's OWN currency, so the bands are computed from `security_market_cap_usd`, not the raw column.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "Market cap is denominated in each security's OWN currency, so the bands are computed from `security_market_cap_usd`, not the raw column.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\nThis plots `core %` \u2014 the typed gate. It is deliberately NOT joined by `all facets %`: these already draw one series per bucket, and a second metric would double the legend. Read breadth on the `\u00d7 facet` tables, which carry both side by side.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -623,7 +623,7 @@
   {
    "type": "timeseries",
    "title": "Completeness by style",
-   "description": "Value / growth / blend, from `security_style`. A percentile needs a peer group: ranked globally, 70% of equities are cheaper than the median US large cap, which once labelled 89% of the universe 'value'.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "Value / growth / blend, from `security_style`. A percentile needs a peer group: ranked globally, 70% of equities are cheaper than the median US large cap, which once labelled 89% of the universe 'value'.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\nThis plots `core %` \u2014 the typed gate. It is deliberately NOT joined by `all facets %`: these already draw one series per bucket, and a second metric would double the legend. Read breadth on the `\u00d7 facet` tables, which carry both side by side.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -679,7 +679,7 @@
   {
    "type": "timeseries",
    "title": "Completeness by MSCI region",
-   "description": "Regional completeness.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "Regional completeness.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\nThis plots `core %` \u2014 the typed gate. It is deliberately NOT joined by `all facets %`: these already draw one series per bucket, and a second metric would double the legend. Read breadth on the `\u00d7 facet` tables, which carry both side by side.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -735,7 +735,7 @@
   {
    "type": "timeseries",
    "title": "Completeness by World Bank income group",
-   "description": "Income group is the World Bank lens.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "Income group is the World Bank lens.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\nThis plots `core %` \u2014 the typed gate. It is deliberately NOT joined by `all facets %`: these already draw one series per bucket, and a second metric would double the legend. Read breadth on the `\u00d7 facet` tables, which carry both side by side.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -846,7 +846,7 @@
   {
    "type": "table",
    "title": "Least complete countries",
-   "description": "Every country above the `$minsize` floor, worst first \u2014 and NO row limit. It previously carried `limit 30`, the same defect that hid the United States from the cross table: a worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy rows are the ones you go looking for when something seems wrong.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "Every country above the `$minsize` floor, worst first \u2014 and NO row limit. It previously carried `limit 30`, the same defect that hid the United States from the cross table: a worst-first list truncated at an arbitrary row silently deletes whatever is healthy, and the healthy rows are the ones you go looking for when something seems wrong.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\n**`core %` is the typed GATE** \u2014 holds every facet `required_facet` demands of its type \u2014 and **`all facets %` is BREADTH**: of the 23 facets a security could have, how many it has, with the four regulator-sourced ones excluded from the denominator where no regulator can serve it. One number was ambiguous: a bucket can read 100% core while not one of its companies has a business line.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -905,7 +905,7 @@
      "refId": "A",
      "format": "table",
      "rawQuery": true,
-     "rawSql": "select bucket as \"country\", security_type_code as \"type\", securities, complete, round(100.0*complete/nullif(securities,0),1) as \"core %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='country' and securities >= $minsize order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "rawSql": "select bucket as \"country\", security_type_code as \"type\", securities, complete, round(100.0*complete/nullif(securities,0),1) as \"core %\", round(100.0*present_facets/nullif(applicable_facets,0),1) as \"all facets %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='country' and securities >= $minsize order by 100.0*complete/nullif(securities,0) asc nulls first",
      "datasource": {
       "type": "postgres",
       "uid": "muffin-postgres"
@@ -916,7 +916,7 @@
   {
    "type": "table",
    "title": "Completeness by quote currency",
-   "description": "All 59 currencies, no limit. A currency is the QUOTE currency; a company's REPORTING currency can differ (BHP.AX quotes AUD and reports USD), which is why a ratio across the two needs an fx rate per bar.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "All 59 currencies, no limit. A currency is the QUOTE currency; a company's REPORTING currency can differ (BHP.AX quotes AUD and reports USD), which is why a ratio across the two needs an fx rate per bar.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\n**`core %` is the typed GATE** \u2014 holds every facet `required_facet` demands of its type \u2014 and **`all facets %` is BREADTH**: of the 23 facets a security could have, how many it has, with the four regulator-sourced ones excluded from the denominator where no regulator can serve it. One number was ambiguous: a bucket can read 100% core while not one of its companies has a business line.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -975,7 +975,7 @@
      "refId": "A",
      "format": "table",
      "rawQuery": true,
-     "rawSql": "select bucket as \"currency\", securities, round(100.0*complete/nullif(securities,0),1) as \"core %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='currency' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "rawSql": "select bucket as \"currency\", securities, round(100.0*complete/nullif(securities,0),1) as \"core %\", round(100.0*present_facets/nullif(applicable_facets,0),1) as \"all facets %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='currency' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
      "datasource": {
       "type": "postgres",
       "uid": "muffin-postgres"
@@ -986,7 +986,7 @@
   {
    "type": "table",
    "title": "Completeness by industry",
-   "description": "All 156 industries, no limit \u2014 sortable and filterable. Industry is level 2 of the taxonomy and is the pipeline's slowest facet; the serving views pick level 1 explicitly, because `distinct on \u2026 order by priority` could otherwise return an INDUSTRY as a security's sector.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.",
+   "description": "All 156 industries, no limit \u2014 sortable and filterable. Industry is level 2 of the taxonomy and is the pipeline's slowest facet; the serving views pick level 1 explicitly, because `distinct on \u2026 order by priority` could otherwise return an INDUSTRY as a security's sector.\n\nTHIS PANEL COVERS THE WHOLE UNIVERSE and is NOT affected by the country/sector variables above. `coverage_sample` holds one bucket list per dimension, so there is no (cap band x country) cross to filter on \u2014 reading these as if they were scoped would be reading a number that is not what it says.\n\n**`core %` is the typed GATE** \u2014 holds every facet `required_facet` demands of its type \u2014 and **`all facets %` is BREADTH**: of the 23 facets a security could have, how many it has, with the four regulator-sourced ones excluded from the denominator where no regulator can serve it. One number was ambiguous: a bucket can read 100% core while not one of its companies has a business line.",
    "datasource": {
     "type": "postgres",
     "uid": "muffin-postgres"
@@ -1045,7 +1045,7 @@
      "refId": "A",
      "format": "table",
      "rawQuery": true,
-     "rawSql": "select bucket as \"industry\", securities, round(100.0*complete/nullif(securities,0),1) as \"core %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='industry' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
+     "rawSql": "select bucket as \"industry\", securities, round(100.0*complete/nullif(securities,0),1) as \"core %\", round(100.0*present_facets/nullif(applicable_facets,0),1) as \"all facets %\" from market.coverage_sample where sampled_at=(select max(sampled_at) from market.coverage_sample) and dimension='industry' and security_type_code='equity' order by 100.0*complete/nullif(securities,0) asc nulls first",
      "datasource": {
       "type": "postgres",
       "uid": "muffin-postgres"

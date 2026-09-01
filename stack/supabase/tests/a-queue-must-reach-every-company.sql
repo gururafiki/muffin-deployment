@@ -45,7 +45,10 @@ insert into market.security_filing
   ('9600002-0003','00000000-0000-0000-0000-000000009602', date '2024-04-01','10-K','sec-submissions',true),
   ('9600003-0001','00000000-0000-0000-0000-000000009603', date '2026-03-01','10-K','sec-submissions',true),
   ('9600003-0002','00000000-0000-0000-0000-000000009603', date '2025-03-01','10-K','sec-submissions',true),
-  ('9600003-0003','00000000-0000-0000-0000-000000009603', date '2024-03-01','10-K','sec-submissions',true)
+  ('9600003-0003','00000000-0000-0000-0000-000000009603', date '2024-03-01','10-K','sec-submissions',true),
+  -- AN EVENT, NOT ACCOUNTS. An 8-K has no row in `market.filing_form`, so it must never be queued
+  -- — a company files dozens a year and they carry no audited segment note.
+  ('9600003-0004','00000000-0000-0000-0000-000000009603', date '2026-06-01','8-K', 'sec-submissions',true)
 on conflict do nothing;
 
 do $$
@@ -74,6 +77,21 @@ begin
   if first_form <> '10-K' then
     raise exception 'the heaviest company''s first filing is a % (%) rather than its 10-K — security_segment_current serves annual periods, so a quarterly-first queue delivers nothing it can read', first_form, first_acc;
   end if;
+
+  -- THE FORM VOCABULARY IS A CONTROL TABLE AND MUST BE LOAD-BEARING. Migration 163 created
+  -- `market.filing_form` to retire the hardcoded `report_type in (...)` and left the list in
+  -- place, so the table was read by NOTHING for a release — an unread table cannot be wrong, the
+  -- same blind spot that left `exchange-listings` deployed and never scheduled.
+  if exists (select 1 from market.pending_segments where accession_number = '9600003-0004') then
+    raise exception 'an 8-K is queued for segment parsing — it has no row in market.filing_form, so the view is still carrying its own copy of the form list';
+  end if;
+
+  -- And turning a form OFF must remove its filings, or the table is decoration.
+  update market.filing_form set carries_segments = false where form_code = '10-Q';
+  if exists (select 1 from market.pending_segments where accession_number = '9600001-0001') then
+    raise exception 'a 10-Q is still queued after filing_form.carries_segments was set false — the vocabulary is not being read';
+  end if;
+  update market.filing_form set carries_segments = true where form_code = '10-Q';
 
   -- And the round must be per COMPANY, not global: every company has a round 1.
   select count(*) into companies
