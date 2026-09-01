@@ -71,7 +71,31 @@ begin
     raise exception 'the Cayman shell reads % — no source covers KY, so its absence is PERMANENT and must not be counted as backlog', cap_ky;
   end if;
 
-  -- 4. And the coverage dimension must carry all three, or the panel cannot ask the question.
+  -- 4. THE SAME FACT LIVES IN TWO PLACES AND THEY MUST AGREE. `security.cik` is still written by
+  --    `sec-cik-map` and read by five resources; `security_filer` is what capability resolves
+  --    through. This schema has been bitten by exactly this before — the venue map drifted to 54
+  --    rows against 38 — and the rule there was that where a fact genuinely must exist twice, BOTH
+  --    are asserted. Migrating the readers off `cik` is Phase 3 work; until then this is the guard.
+  select count(*) into n
+    from market.security s
+    left join market.security_filer f
+      on f.security_id = s.security_id and f.source_code = 'sec'
+   where (s.cik is not null and f.filer_id is distinct from s.cik::text)
+      or (s.cik is null and f.security_id is not null);
+  if n <> 0 then
+    raise exception '% securities disagree between security.cik and security_filer — the trigger is not covering every write path, and capability would read from a stale registration', n;
+  end if;
+
+  -- A CLEARED CIK MUST RETRACT, or the security keeps reading `held` against a registration we no
+  -- longer believe in. An upsert cannot retract; the trigger deletes.
+  update market.security set cik = null where security_id = '00000000-0000-0000-0000-000000016301';
+  if exists (select 1 from market.security_filer
+              where security_id = '00000000-0000-0000-0000-000000016301' and source_code = 'sec') then
+    raise exception 'clearing a cik left the filer row behind — the security still reads as addressable by SEC';
+  end if;
+  update market.security set cik = 1630001 where security_id = '00000000-0000-0000-0000-000000016301';
+
+  -- 5. And the coverage dimension must carry all three, or the panel cannot ask the question.
   select count(distinct bucket) into n from market.coverage_current where dimension = 'segment_source';
   if n < 2 then
     raise exception 'the segment_source dimension produced % bucket(s) — it must name the regulator, not collapse to a boolean', n;
