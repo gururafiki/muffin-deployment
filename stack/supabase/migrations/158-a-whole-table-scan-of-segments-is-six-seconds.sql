@@ -75,28 +75,9 @@ where c.kind = 'geography'
 comment on view market.security_segment_geography is
   'Revenue and operating income by the geography a filer discloses, for members whose meaning is published (ISO countries and standard regions) so nothing here required curation. A filer''s own extension for a region — bud:LatinAmericaWestMember — is deliberately absent: it needs a segment_member row before it can be named.';
 
-drop view if exists market.pending_segment_alias;
-create view market.pending_segment_alias as
-select
-  c.member_code,
-  min(c.kind)                   as kind,
-  count(distinct c.security_id) as companies,
-  max(c.revenue_share_pct)      as largest_share_pct,
-  -- Context only, never the sort key: revenue is in the filer's own currency, so ordering by it
-  -- ranks by exchange rate. TSMC's 3,272,600,000,000 TWD would outrank every US line.
-  max(c.revenue)                as largest_revenue,
-  max(c.currency_code)          as a_currency_code,
-  min(c.axis)                   as an_axis
-from market.security_segment_spine c
-where c.concept_code is null
-  -- Geography is not a curation task: `security_segment_geography` already serves the published
-  -- members, and a product concept for a country would be a wrong answer rather than a missing one.
-  and c.kind in ('product', 'business')
-group by c.member_code
-order by companies desc, largest_share_pct desc nulls last, c.member_code;
-
-comment on view market.pending_segment_alias is
-  'Business lines with no shared concept, ranked by how many companies use the member and then by the share of its own company it represents. Ordered by leverage, NOT by revenue — revenue is in the filer''s own currency, so it ranks by exchange rate rather than by importance.';
+-- `pending_segment_alias` is defined once, in migration 162 — see the note there. Defining a view
+-- in several migrations forces the earliest to DROP (a `create or replace` cannot reorder or
+-- rename columns), and that drop cascades to its dependents on every single deploy.
 
 -- ── Refreshed on its OWN statement, because it will outgrow one ──────────────────────────────
 -- A MATVIEW WITH NO SCHEDULED REFRESH IS A STALE VIEW NOBODY NOTICES — recorded when
@@ -171,6 +152,6 @@ on conflict (backlog) do update
 -- `drop view` DISCARDS THE ACL, so every line here is load-bearing rather than tidy.
 grant select on market.security_segment_spine, market.security_segment_geography
   to anon, authenticated, service_role;
-grant select on market.pending_segment_alias to service_role;
+-- `pending_segment_alias` is granted in 162, where it is now defined.
 
 notify pgrst, 'reload schema';
