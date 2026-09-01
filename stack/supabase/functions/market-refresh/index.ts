@@ -35,7 +35,7 @@ import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts
 import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
-import { fetchInstance, findInstanceUrl, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
+import { TOO_LARGE, fetchInstance, findInstanceUrl, instanceIsTooLarge, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { fetchIndustries, slug } from './wikidata.ts'
 import { candidateSymbols } from './symbol-repair.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
@@ -2154,6 +2154,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       let filings = 0
       let noInstance = 0
       let noSegments = 0
+      let tooLarge = 0
       let failed = 0
       let firstError: string | null = null
       let lastError: string | null = null
@@ -2164,13 +2165,25 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // than an error anyone can read.
         if (Date.now() > deadline - 8_000) break
         try {
-          const url = await findInstanceUrl(item.cik, item.accession, Math.min(15_000, deadline - Date.now()))
-          const xml = url === null
+          const ref = await findInstanceUrl(item.cik, item.accession, Math.min(15_000, deadline - Date.now()))
+          // REFUSED BEFORE IT IS FETCHED, from the size `index.json` already told us. A 128 MB
+          // instance is ~256 MB as a UTF-16 string against a 256 MB worker, and the worker does not
+          // throw — it is KILLED, so nothing is stamped and the same filing returns at the head of
+          // every run. That wedged this resource for two days. See MAX_INSTANCE_BYTES.
+          const refused = ref !== null && instanceIsTooLarge(ref.bytes)
+          const fetched = ref === null || refused
             ? null
-            : await fetchInstance(url, Math.min(25_000, deadline - Date.now()))
+            : await fetchInstance(ref.url, Math.min(25_000, deadline - Date.now()))
+          // The second gate, for the HTML-index path where no size was known up front.
+          const oversize = refused || fetched === TOO_LARGE
+          const xml = typeof fetched === 'string' ? fetched : null
           const facts = xml === null ? [] : segmentFactsFrom(xml, axes, concepts)
           filings++
-          if (url === null || xml === null) noInstance++
+          // THREE OUTCOMES, NOT TWO. "no XBRL to read", "too large to read" and "read, no segments"
+          // are different facts; counting a refusal as an absence is how this pipeline has twice
+          // mistaken a decision of its own for a property of the data.
+          if (oversize) tooLarge++
+          else if (ref === null || xml === null) noInstance++
           else if (facts.length === 0) noSegments++
 
           if (facts.length > 0) {
@@ -2254,7 +2267,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
-        resource, written, filings, noInstance, noSegments, failed, firstError, lastError,
+        resource, written, filings, noInstance, noSegments, tooLarge, failed, firstError, lastError,
         remaining: await backlogSize(market, 'pending_segments'),
       })
     }

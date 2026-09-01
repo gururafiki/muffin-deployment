@@ -9,7 +9,7 @@
  * carries three partitions rather than one, and why the profit figures deliberately do NOT sum to
  * the consolidated profit.
  */
-import { assignPartitions, periodTypeFor, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
+import { assignPartitions, instanceIsTooLarge, periodTypeFor, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 
 let failures = 0
 function check(ok: boolean, label: string, detail = '') {
@@ -564,6 +564,28 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
     JSON.stringify(p1.map((f) => f.memberCode)))
   check(out.filter((f) => f.partitionId === 2).length === 2,
     'the generated split is still STORED, as a second partition')
+}
+
+// ── The size gate that unwedged the queue ────────────────────────────────────────────────────
+//
+// A 128 MB instance is ~256 MB as a UTF-16 string against a 256 MB worker, and the supervisor
+// KILLS rather than throwing — so nothing is stamped and the same filing returns at the head of
+// every run. `security-segments` parsed nothing for two days that way.
+//
+// The boundaries matter more than the middle: the largest document known to PARSE is Diageo's
+// 20-F at 10.92 MB, and the one that killed the worker was AEP's 2015 10-K at 127.72 MB. A gate
+// that rejected Diageo would lose exactly the foreign private issuers this feature exists to
+// reach, so both ends are asserted rather than one.
+{
+  const MB = 1024 * 1024
+  check(instanceIsTooLarge(127.72 * MB), 'AEP 2015 10-K (127.72 MB) is refused — it killed the worker')
+  check(!instanceIsTooLarge(10.92 * MB), 'Diageo 20-F (10.92 MB) is ACCEPTED — the largest that parses')
+  check(!instanceIsTooLarge(6.53 * MB), 'Cemex 20-F (6.53 MB) is accepted')
+  check(!instanceIsTooLarge(0.74 * MB), 'AAPL 10-Q (0.74 MB) is accepted')
+  // UNKNOWN IS NOT TOO LARGE. The HTML-index fallback carries no size, and `index.json` is the
+  // listing that is unreliable for foreign private issuers — refusing on a null would silently
+  // drop every filing that fell back, which is the path Diageo and Infosys take.
+  check(!instanceIsTooLarge(null), 'an unknown size is NOT refused — the HTML fallback has no size')
 }
 
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
