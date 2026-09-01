@@ -520,10 +520,12 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // been touched, because `written` counts ACTION ROWS (521 of them) and `wanted.length` counts
   // SECURITIES — the subtraction went negative and clamped. A drained backlog and a refused one
   // looked identical, which is the failure this whole file exists to prevent.
+  // The expression now reports `unanswered` rather than `remaining` (see the scope guard below),
+  // but the UNITS rule it encodes is unchanged and still worth pinning: `covered` counts
+  // securities, `written` counts action rows.
   check(index.includes('wanted.length - covered - none - noTicker'),
-    'corporate-actions remaining counts SECURITIES, not rows',
-    'remaining uses `covered`, not `written`')
-
+    'corporate-actions counts SECURITIES, not rows, in its page arithmetic',
+    'the expression uses `covered`, not `written`')
   const pageOrders = index.match(/\.range\(/g)?.length ?? 0
   const tiebreaks = index.match(/\.order\('security_id', \{ ascending: true \}\)/g)?.length ?? 0
   check(tiebreaks >= pageOrders,
@@ -1257,6 +1259,60 @@ console.log('\nresource registry — the cron and the function agree')
   check(offenders.length === 0,
     'every `remaining` uses only the identifiers its resource declares (rows are not securities)',
     offenders.join(' | '))
+
+
+  // ── `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE ────────────────────────────────
+  //
+  // The whitelist above enforces UNITS — securities versus rows — and is blind to SCOPE. A page
+  // arithmetic like `wanted.length - covered - none` is made of perfectly good security counts and
+  // still answers the wrong question: it reads ~0 after any successful run, however deep the queue
+  // is. Measured 2026-09-01 against the true depths:
+  //
+  //   security-prices             reported remaining 0   against pending_prices             9,013
+  //   security-corporate-actions  reported remaining 60  against pending_corporate_actions  2,533
+  //
+  // The other seven agreed only because their backlogs happened to be drained — the defect was
+  // invisible until one of them had real work. CLAUDE.md has recorded the rule since
+  // `security-statements` was fixed ("`remaining` MUST MEAN THE SAME THING IN EVERY RESOURCE, AND
+  // PAGE-SCOPED IS THE WRONG ONE"); it was never propagated to the other nine, and nothing could
+  // see that because the existing guard only ever asked about units.
+  //
+  // THE RULE: a resource that READS a `pending_*` view must report THAT view's size as `remaining`.
+  // The page-scoped number keeps its own name, `unanswered`. A resource driven by a cursor rather
+  // than a backlog reads no `pending_` view and is therefore untouched by this — which is why the
+  // test is "reads a pending view", not a list of exemptions that would rot.
+  {
+    const scopeOffenders: string[] = []
+    let scopeChecked = 0
+    const blocks: { name: string; start: number; end: number }[] = []
+    idxLines.forEach((l, i) => {
+      const m = l.match(/resource === ([A-Z_]+_RESOURCE)/)
+      if (m) {
+        if (blocks.length > 0) blocks[blocks.length - 1].end = i
+        blocks.push({ name: m[1], start: i, end: idxLines.length })
+      }
+    })
+    for (const b of blocks) {
+      const body = idxLines.slice(b.start, b.end)
+      const views = [...new Set(
+        body.flatMap((l) => [...l.matchAll(/\.from\('(pending_\w+)'\)/g)].map((m) => m[1])),
+      )]
+      if (views.length === 0) continue
+      const remainingLine = body.find((l) => /^\s*remaining:/.test(l))
+      if (remainingLine === undefined) continue
+      scopeChecked++
+      const declared = remainingLine.match(/backlogSize\(market, '(pending_\w+)'\)/)?.[1]
+      if (declared === undefined) {
+        scopeOffenders.push(`${b.name} reads ${views.join('/')} but reports a page-scoped remaining`)
+      } else if (!views.includes(declared)) {
+        scopeOffenders.push(`${b.name} reports ${declared} but drives ${views.join('/')}`)
+      }
+    }
+    check(scopeOffenders.length === 0 && scopeChecked >= 15,
+      `every backlog-driven resource reports its BACKLOG as remaining — ${scopeChecked} checked`,
+      scopeOffenders.join('; ') || `${scopeChecked} backlog-driven resources, all reporting their own pending view`)
+  }
+
   // The exempted backlog-count lines still increment `checkedExpressions`, so this tally keeps
   // meaning "every resource's remaining was looked at" rather than silently shrinking as
   // resources move to the count.
