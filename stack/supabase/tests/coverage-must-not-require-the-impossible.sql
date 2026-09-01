@@ -50,6 +50,10 @@ declare
   required int;
   yes_pct numeric; no_pct numeric;
   yes_n int; no_n int;
+  core_n int; present_n int; applicable_n int;
+  -- DISTINCT names: reusing yes_n/no_n across assertions silently compared a bucket count against
+  -- a security_type count, and the guard failed on arithmetic rather than on the rule.
+  sec_secs int; none_secs int; sec_applicable int; none_applicable int; type_secs int;
 begin
   -- 1. `segments` MUST NOT gate completeness, for any security type.
   select count(*) into required from market.required_facet where facet = 'segments';
@@ -63,27 +67,57 @@ begin
     raise exception '% SEC-only facet(s) are marked required — see above', required;
   end if;
 
-  -- 2. The dimension must actually SPLIT the population, or the panel cannot ask the question.
+  -- 2. The dimension must SPLIT the population, and NAME the regulator. It was `sec_filer` with
+  --    yes/no; segment disclosure comes from a regulator rather than from the United States, so a
+  --    boolean on the CIK stops being true the day DART ships.
   select securities, round(100.0 * with_segments / nullif(securities,0), 1)
     into yes_n, yes_pct
   from market.coverage_current
-   where dimension = 'sec_filer' and bucket = 'yes' and security_type_code = 'equity';
+   where dimension = 'segment_source' and bucket = 'sec' and security_type_code = 'equity';
   select securities, round(100.0 * with_segments / nullif(securities,0), 1)
     into no_n, no_pct
   from market.coverage_current
-   where dimension = 'sec_filer' and bucket = 'no' and security_type_code = 'equity';
+   where dimension = 'segment_source' and bucket = 'none' and security_type_code = 'equity';
 
   if yes_n is null or no_n is null then
-    raise exception 'the sec_filer dimension does not produce both buckets (yes=%, no=%) — a denominator nobody can select is not a denominator', yes_n, no_n;
-  end if;
-  if yes_pct is not distinct from no_pct then
-    raise exception 'sec_filer yes and no both report %%%— the dimension is not splitting on the CIK, so segment coverage is being measured against companies that can never have it', yes_pct;
+    raise exception 'the segment_source dimension does not produce both a `sec` and a `none` bucket (sec=%, none=%) — a denominator nobody can select is not a denominator', yes_n, no_n;
   end if;
   if yes_pct <= no_pct then
-    raise exception 'SEC filers report %%% segment coverage against %%% for non-filers — the split is inverted', yes_pct, no_pct;
+    raise exception 'securities SEC can serve report % percent segment coverage against % percent for those no regulator can — the split is inverted or absent', yes_pct, no_pct;
+  end if;
+
+  -- 3. TWO COMPLETENESS NUMBERS, AND THEY MUST MEAN DIFFERENT THINGS. `complete` is the typed GATE
+  --    (holds every facet required_facet demands of its type). `present/applicable` is BREADTH.
+  --    A view where they are equal has collapsed one into the other, and the whole reason for the
+  --    second number is that a country could read 100 percent "complete" while not one of its
+  --    companies had a business line.
+  select complete, securities, present_facets, applicable_facets
+    into core_n, type_secs, present_n, applicable_n
+  from market.coverage_current
+   where dimension = 'security_type' and bucket = 'equity' and security_type_code = 'equity';
+
+  if applicable_n is null or applicable_n = 0 then
+    raise exception 'applicable_facets is % for equities — breadth cannot be measured against nothing', coalesce(applicable_n::text,'null');
+  end if;
+  if present_n > applicable_n then
+    raise exception 'present_facets (%) exceeds applicable_facets (%) — a security is being credited for a facet it cannot have', present_n, applicable_n;
+  end if;
+
+  -- 4. AND APPLICABLE MUST SHRINK FOR A SECURITY NO REGULATOR CAN SERVE. Four of the 23 facets are
+  --    regulator-sourced; charging a Cayman shell for them is the ETF/`price` miscalibration, which
+  --    made 74 funds read 0 percent complete against a facet this pipeline never produced for them.
+  select securities, applicable_facets into none_secs, none_applicable
+    from market.coverage_current
+   where dimension = 'segment_source' and bucket = 'none' and security_type_code = 'equity';
+  select securities, applicable_facets into sec_secs, sec_applicable
+    from market.coverage_current
+   where dimension = 'segment_source' and bucket = 'sec' and security_type_code = 'equity';
+  if none_applicable::numeric / greatest(none_secs,1) >= sec_applicable::numeric / greatest(sec_secs,1) then
+    raise exception 'a security no regulator can serve is charged for % facets each against % for one SEC can serve — the four regulator-sourced facets must not be applicable when nothing can supply them',
+      round(none_applicable::numeric / greatest(none_secs,1), 1), round(sec_applicable::numeric / greatest(sec_secs,1), 1);
   end if;
 end $$;
 
 rollback;
 
-\echo 'ok: segments never gate completeness, and sec_filer splits the population that can have them'
+\echo 'ok: segments never gate completeness, segment_source names the regulator, and breadth is measured against what a security can have'
