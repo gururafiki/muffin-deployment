@@ -1270,7 +1270,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // Tiingo actually uses rather than the one we assumed.
         throttledOut: failed > 0 && !!lastError && throttled(lastError),
         asked: wanted.length,
-        remaining: Math.max(0, wanted.length - covered - none - noTicker),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_corporate_actions'),
+        unanswered: Math.max(0, wanted.length - covered - none - noTicker),
       })
     }
 
@@ -4296,7 +4303,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // provider degrading, not us — and it is the only visible sign, since the corrected value
         // looks perfectly ordinary once stored.
         currencyOverruled,
-        remaining: Math.max(0, wanted.length - written - missing),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_fundamentals'),
+        unanswered: Math.max(0, wanted.length - written - missing),
       })
     }
 
@@ -5077,7 +5091,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         resolved: resolvedCount,
         unresolved,
         requestsUsed,
-        remaining: Math.max(0, addressable.length - resolvedCount - unresolved),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_local_symbol'),
+        unanswered: Math.max(0, addressable.length - resolvedCount - unresolved),
       })
     }
 
@@ -5341,7 +5362,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         plans: plans.length, securitiesPriced: securitiesPriced.size,
         // Securities from THIS PAGE still pending afterwards. A security is done when it got bars
         // or was confirmed empty one at a time; a batch that merely failed leaves it pending.
-        remaining: Math.max(0, wanted.length - securitiesPriced.size - emptySeries),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_prices'),
+        unanswered: Math.max(0, wanted.length - securitiesPriced.size - emptySeries),
       })
     }
 
@@ -5510,7 +5538,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         failed,
         lastError,
         examples: changed,
-        remaining: wanted.length - resolved - unresolved - failed,
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_yahoo_symbol'),
+        unanswered: wanted.length - resolved - unresolved - failed,
       })
     }
 
@@ -5797,7 +5832,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // Without it a throttled run is indistinguishable from a drained backlog.
         throttledOut,
         lastError,
-        remaining: Math.max(0, wanted.length - classifiedSecurities.size - noIndustry),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_industry'),
+        unanswered: Math.max(0, wanted.length - classifiedSecurities.size - noIndustry),
       })
     }
 
@@ -6087,7 +6129,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         homed,
         noCountryMarked,
         unresolvedCountries: [...unresolvedCountries],
-        remaining: Math.max(0, wanted.length - classifiedSecurities.size - unmapped - noProfile),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_profile'),
+        unanswered: Math.max(0, wanted.length - classifiedSecurities.size - unmapped - noProfile),
       })
     }
 
@@ -6297,7 +6346,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // yields seven to nine performance rows, so `symbols.length - written` went negative and
         // clamped. Measured live 2026-08-17: `refreshed: 2751, remaining: 0` (2,751 rows is ~306
         // securities) while `pending_performance` stood at 6,909.
-        remaining: Math.max(0, symbols.length - symbolsCovered.size),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_performance'),
+        unanswered: Math.max(0, symbols.length - symbolsCovered.size),
       })
     }
 
@@ -6403,7 +6459,14 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         unresolved,
         requestsUsed,
         // What is left for the next run — this resource is incremental by design.
-        remaining: Math.max(0, wanted.length - resolvedCount - unresolved),
+                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
+        // after any successful run however deep the queue is — measured 2026-09-01,
+        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
+        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
+        // to decide whether a backlog is progressing. The page-scoped figure is kept as
+        // `unanswered`, which is a different and also useful fact.
+        remaining: await backlogSize(market, 'pending_ticker'),
+        unanswered: Math.max(0, wanted.length - resolvedCount - unresolved),
       })
     }
 
