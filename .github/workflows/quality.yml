@@ -354,6 +354,15 @@ jobs:
       - name: Offline check — a panel must not filter away the state it reveals
         run: python3 .github/scripts/check_panels_do_not_hide_data.py
 
+      # A panel that cannot RENDER is invisible and nothing reports it. `Sector × facet` selected
+      # two columns named `sector` and showed "No Data" from the day PR #261 created it; four
+      # facets added in migration 160 were dropped by a panel titled "every facet" and rendered
+      # uncoloured in two heatmaps. Every one is a piece of config that ENUMERATES something and
+      # went stale — which is why the facet list this guard checks against is parsed out of the
+      # migration rather than written here.
+      - name: Offline check — every panel can actually render
+        run: python3 .github/scripts/check_dashboards_can_render.py
+
       - name: Offline check — bash-only syntax declares bash
         run: |
           python3 - <<'PYCHK'

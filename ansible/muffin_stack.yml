@@ -623,6 +623,26 @@
       changed_when: false
       failed_when: false
 
+    # A COLUMN ADDED TO A SAMPLE TABLE IS NULL IN EVERY ROW THAT CAME BEFORE IT,
+    # and the coverage panels read `max(sampled_at)` — so a new column renders
+    # BLANK, with nothing on screen saying why, until the next scheduled sample.
+    # `sample_coverage()` runs twice a day, so that is up to twelve hours of a
+    # dashboard quietly showing empty cells. It happened to `sec_filers` the day
+    # migration 161 shipped.
+    #
+    # Taking one sample at the end of the deploy costs a single call and closes
+    # the window entirely. It is deliberately NOT fatal: the deploy has already
+    # succeeded by this point, and a sampler that is slow or busy must not fail a
+    # release — the next cron firing will take it.
+    - name: Take a coverage sample so newly added columns are populated at once
+      shell: >
+        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
+        psql -U postgres -d postgres -c "select market.sample_coverage();"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+
 # --- 6. Nightly database backups (pg_dumpall -> OCI Object Storage) --------
 - name: Configure database backups
   hosts: manager
