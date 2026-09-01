@@ -637,6 +637,33 @@ async function secText(url: string, timeoutMs: number): Promise<string | null> {
   }
 }
 
+/**
+ * THE LARGEST INSTANCE THIS WORKER CAN SURVIVE.
+ *
+ * MEASURED, AFTER A TWO-DAY OUTAGE. `security-segments` parsed nothing between 2026-08-30 08:22
+ * and 2026-09-01: the supervisor killed the worker on every firing, in under two seconds, even
+ * with a page of ONE. The filing at the head of the queue was American Electric Power's 2015 10-K
+ * — `aep-20151231.xml`, **127.72 MB**. A JS string is UTF-16, so the text alone is ~256 MB against
+ * a 256 MB worker, before a byte is parsed. Utilities tag every subsidiary and sit far outside the
+ * range this parser was measured on (AAPL 0.74 MB, AMZN 1.98 MB, Cemex 6.53, Yandex 4.90,
+ * Diageo's 20-F 10.92 — the largest previously seen).
+ *
+ * IT WAS A PERMANENT HEAD-OF-LINE BLOCK, which is the part worth remembering. A filing is stamped
+ * `segments_parsed_at` only after a successful parse, and a KILLED WORKER STAMPS NOTHING — it does
+ * not throw, it dies — so the same document returned at the head of every run for ever. Second
+ * head-of-line block in this resource after the depth-first ordering, and the shape is the same:
+ * one row nothing can retire.
+ *
+ * 32 MB leaves ~3x headroom over the largest document known to parse, and roughly 4x its own size
+ * in peak heap. Skipping is the right answer rather than streaming: an instance this large is a
+ * utility holding company tagging hundreds of subsidiaries, and its segment note is not worth the
+ * whole worker.
+ */
+const MAX_INSTANCE_BYTES = 32 * 1024 * 1024
+
+/** Where a filing's instance is, and how big — `null` bytes when only the HTML index knew. */
+export type InstanceRef = { url: string; bytes: number | null }
+
 /** `0001018724-25-000086` -> `000101872425000086`, which is how the archive path spells it. */
 const bare = (accession: string) => accession.replace(/-/g, '')
 
@@ -672,19 +699,24 @@ export async function findInstanceUrl(
   cik: number,
   accession: string,
   timeoutMs: number,
-): Promise<string | null> {
+): Promise<InstanceRef | null> {
   const dir = `${secWww()}/Archives/edgar/data/${cik}/${bare(accession)}`
 
   const listing = await secText(`${dir}/index.json`, timeoutMs)
   if (listing !== null) {
     try {
-      const parsed = JSON.parse(listing) as { directory?: { item?: { name?: unknown }[] } }
-      const names = (parsed.directory?.item ?? [])
-        .map((i) => String(i.name ?? ''))
-        .filter(isInstanceName)
+      const parsed = JSON.parse(listing) as
+        { directory?: { item?: { name?: unknown; size?: unknown }[] } }
+      // THE SIZE IS IN A RESPONSE WE ALREADY FETCH, and it was being discarded — the seventh time
+      // that has been true in this pipeline. Gating on it costs no extra request and is what stops
+      // a 128 MB filing killing the worker before it can be stamped.
+      const items = (parsed.directory?.item ?? [])
+        .map((i) => ({ name: String(i.name ?? ''), bytes: Number(i.size ?? 0) || null }))
+        .filter((i) => isInstanceName(i.name))
       // Shortest wins: a filing occasionally carries an amended companion, and the base instance
       // is the one whose name is the bare `{ticker}-{date}` form.
-      if (names.length > 0) return `${dir}/${names.sort((a, b) => a.length - b.length)[0]}`
+      items.sort((a, b) => a.name.length - b.name.length)
+      if (items.length > 0) return { url: `${dir}/${items[0].name}`, bytes: items[0].bytes }
     } catch { /* fall through to the HTML index */ }
   }
 
@@ -694,10 +726,53 @@ export async function findInstanceUrl(
     .map((m) => m[1])
     .filter(isInstanceName)
   if (found.length === 0) return null
-  return `${dir}/${found.sort((a, b) => a.length - b.length)[0]}`
+  // The HTML index carries no size, so this one is gated at fetch time on `Content-Length`.
+  return { url: `${dir}/${found.sort((a, b) => a.length - b.length)[0]}`, bytes: null }
 }
 
-/** The instance itself. 0.8-2.3 MB in every filing measured; parsed one at a time by the caller. */
-export async function fetchInstance(url: string, timeoutMs: number): Promise<string | null> {
-  return await secText(url, timeoutMs)
+/** Is this instance small enough to read into a 256 MB worker? See MAX_INSTANCE_BYTES. */
+export function instanceIsTooLarge(bytes: number | null): boolean {
+  return bytes !== null && bytes > MAX_INSTANCE_BYTES
+}
+
+/**
+ * The instance itself, refused if it is too large to hold.
+ *
+ * A SECOND GATE, because the first one cannot always fire: the HTML-index fallback carries no
+ * size, and `index.json` is the listing that is unreliable for exactly the foreign private issuers
+ * this feature exists to reach. Checking `Content-Length` before reading the body costs nothing
+ * and closes that path — `res.text()` is where the 256 MB allocation happens, so refusing after it
+ * would be refusing too late.
+ *
+ * Returns `TOO_LARGE` rather than null so the caller can count it separately: "this filing has no
+ * XBRL" and "we declined to read 128 MB" are different facts, and conflating an absence with a
+ * refusal is the mistake this pipeline has made in six other places.
+ */
+export const TOO_LARGE = Symbol('instance too large')
+
+export async function fetchInstance(
+  url: string,
+  timeoutMs: number,
+): Promise<string | null | typeof TOO_LARGE> {
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': SEC_UA, 'Accept-Encoding': 'gzip' },
+      signal: ctl.signal,
+    })
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`sec ${res.status} for ${url.slice(0, 90)}`)
+    // `Content-Length` is the COMPRESSED size when the response is gzipped, so this is a floor on
+    // the decompressed document rather than an exact bound — which is the safe direction: anything
+    // it rejects is certainly too big, and the `index.json` gate above catches the rest.
+    const declared = Number(res.headers.get('content-length') ?? 0)
+    if (declared > MAX_INSTANCE_BYTES) {
+      await res.body?.cancel()
+      return TOO_LARGE
+    }
+    return await res.text()
+  } finally {
+    clearTimeout(timer)
+  }
 }
