@@ -111,11 +111,33 @@ on conflict (member_code) do update
 do $$
 declare
   v record;
-  ddl constant text := $ddl$with latest as (
+  ddl constant text := $ddl$with newest as (
+  -- ONE PERIOD PER (SECURITY, AXIS), CHOSEN BEFORE ANY MEMBER IS LOOKED AT.
+  --
+  -- Picking the latest period PER MEMBER — which `distinct on (..., member_code)` does — unions
+  -- every member spelling the filer has ever used, each at its own newest year, and reassembles a
+  -- split no filing ever reported. Measured in production 2026-09-02: Apple's business-segments
+  -- axis served 25 members spanning 2008..2025 summing 627.3bn against a true FY2025 416.2bn, and
+  -- Shell's product split came to 1,201bn against a revenue of 266.9bn. 129 of 216 (security, axis)
+  -- groups spanned more than one period; 83 of the 104 securities with segments were affected.
+  --
+  -- This is migration 150's ASML lesson one level up. There it was two FILINGS of one period
+  -- disagreeing about member names (`asml:EuvMember` -> `asml:NXEMember`), fixed with `dense_rank`
+  -- so a whole filing is chosen rather than a row. Here it is two PERIODS, and the same rule
+  -- applies: choose the period first, then take its members. A split is a statement a filer made
+  -- about one year, and it is only true as a whole.
+  select g.security_id, g.axis, max(g.period_ending) as period_ending
+  from market.security_segment_latest g
+  where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is null
+  group by g.security_id, g.axis
+),
+latest as (
   select distinct on (g.security_id, g.axis, g.member_code, g.metric_code)
     g.security_id, g.axis, g.member_code, g.metric_code,
     g.value, g.currency_code, g.period_ending, g.accession_number
   from market.security_segment_latest g
+  join newest n
+    on n.security_id = g.security_id and n.axis = g.axis and n.period_ending = g.period_ending
   where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is null
   order by g.security_id, g.axis, g.member_code, g.metric_code, g.period_ending desc
 ),

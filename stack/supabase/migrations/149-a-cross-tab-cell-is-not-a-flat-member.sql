@@ -55,49 +55,10 @@ alter table market.security_segment add constraint security_segment_pkey
 
 
 -- ── The nested level ──────────────────────────────────────────────────────────────────────────
-drop view if exists market.security_segment_detail;
-create view market.security_segment_detail as
-with latest as (
-  select distinct on (g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code)
-    g.security_id, g.parent_axis, g.parent_member, g.axis, g.member_code, g.metric_code,
-    g.value, g.currency_code, g.period_ending
-  from market.security_segment g
-  where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is not null
-  order by g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code,
-           g.period_ending desc
-),
-pivoted as (
-  select
-    l.security_id, l.parent_axis, l.parent_member, l.axis, l.member_code,
-    max(l.currency_code) as currency_code,
-    max(l.period_ending) as period_ending,
-    max(l.value) filter (where l.metric_code = 'revenue')          as revenue,
-    max(l.value) filter (where l.metric_code = 'operating_income') as operating_income
-  from latest l
-  group by l.security_id, l.parent_axis, l.parent_member, l.axis, l.member_code
-)
-select
-  p.security_id, p.parent_axis, p.parent_member, p.axis, p.member_code,
-  c.code as concept_code, c.name as concept_name,
-  p.revenue, p.operating_income,
-  -- Share OF THE PARENT, which is the only denominator that means anything at this level.
-  round(100 * p.revenue
-        / nullif(sum(p.revenue) over (partition by p.security_id, p.parent_member, p.axis), 0), 2)
-    as share_of_parent_pct,
-  p.currency_code, p.period_ending
-from pivoted p
-left join lateral (
-  select al.concept_code from market.segment_alias al
-  where al.member_code = p.member_code
-    and (al.security_id = p.security_id or al.security_id is null)
-  order by (al.security_id is not null) desc limit 1
-) al on true
-left join market.segment_concept c on c.code = al.concept_code;
-
-comment on view market.security_segment_detail is
-  'Product lines disclosed WITHIN a reportable segment — Alphabet''s Search, YouTube, Network and Subscriptions inside Google Services. Their share is OF THE PARENT, not of the company. Never sum these beside `security_segment_current`: the parent is already there and would be counted twice.';
-
-grant select on market.security_segment_detail
-  to anon, authenticated, service_role;
+-- THE DDL FOR `security_segment_detail` NOW LIVES IN MIGRATION 150, ITS SOLE DEFINER.
+-- Two files defined it with `drop view` + `create view`, so every deploy dropped and rebuilt it
+-- twice and the two bodies were free to drift — which they had, by a comment. The header above
+-- still records WHY the nested level exists and why its share is OF THE PARENT; only the DDL
+-- moved, for the same reason `security_segment_current` was consolidated into 157.
 
 notify pgrst, 'reload schema';

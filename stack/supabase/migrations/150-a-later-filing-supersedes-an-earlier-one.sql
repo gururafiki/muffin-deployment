@@ -75,11 +75,26 @@ grant select on market.security_segment_latest to anon, authenticated, service_r
 
 drop view if exists market.security_segment_detail;
 create view market.security_segment_detail as
-with latest as (
+with newest as (
+  -- ONE PERIOD PER NESTED GROUP, chosen before any member is looked at — the same defect and the
+  -- same fix as `security_segment_current`; see the note in migration 157. 56 of 242 nested groups
+  -- spanned more than one period in production, which makes a child's share OF ITS PARENT wrong:
+  -- the denominator is a sum over years the parent never reported together.
+  select g.security_id, g.parent_axis, g.parent_member, g.axis,
+         max(g.period_ending) as period_ending
+  from market.security_segment_latest g
+  where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is not null
+  group by g.security_id, g.parent_axis, g.parent_member, g.axis
+),
+latest as (
   select distinct on (g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code)
     g.security_id, g.parent_axis, g.parent_member, g.axis, g.member_code, g.metric_code,
     g.value, g.currency_code, g.period_ending
   from market.security_segment_latest g
+  join newest n
+    on n.security_id = g.security_id and n.parent_axis is not distinct from g.parent_axis
+   and n.parent_member = g.parent_member and n.axis = g.axis
+   and n.period_ending = g.period_ending
   where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is not null
   order by g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code,
            g.period_ending desc

@@ -66,6 +66,21 @@ QUERIES = [
     # of them. Measured — the two forms return different rows — so that probe was timing a query the
     # app never sends, which is precisely what this guard exists to prevent.
     ("stock leadership", "security_leadership?select=name,title,pay,pay_currency,is_ceo&security_id=eq.09a147af-5ec6-45f3-8db7-fe0f2403e6ed&order=is_ceo.desc,pay.desc.nullslast&limit=12"),
+    # ── The business-lines section (Sankey + donuts), added when the stock page first read the
+    # segment views. Apple, because it is the deepest filer here: three axes, a nested split, and
+    # eighteen years of filings behind the one period the view must choose.
+    #
+    # `security_segment_current` is `security_segment_latest` twice over (a dense_rank across
+    # filings, then a period choice across years), and BOTH views sit above a table that grows with
+    # every filing parsed — 245,000 of them queued. It is exactly the shape that timed out for anon
+    # while answering service_role fine in `fund_sector_weight`, `security_facets` and
+    # `price_series`, so it is timed here before it can do it a fourth time.
+    ("stock business lines", "security_segment_current?select=axis,kind,member_code,member_label,concept_name,revenue,operating_income,operating_margin_pct,revenue_share_pct,currency_code,period_ending&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=revenue.desc.nullslast"),
+    ("stock business lines, nested", "security_segment_detail?select=parent_axis,parent_member,member_code,concept_name,revenue,operating_income,share_of_parent_pct,currency_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=revenue.desc.nullslast"),
+    # The Sankey's right half. Six metric codes for one security across every annual period it has —
+    # an `in.()` over a table of 3.29M rows, which is a different plan from the single-metric reads
+    # already timed above.
+    ("stock income flow", "security_metric?select=metric_code,value,as_of,currency_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&period_type=eq.annual&metric_code=in.(revenue,gross_profit,operating_income,pretax_income,income_tax,net_income)&order=as_of.desc&limit=18"),
 ]
 
 
