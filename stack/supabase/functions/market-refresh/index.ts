@@ -70,6 +70,15 @@ import {
   type PerfRow,
 } from './resources.ts'
 
+/**
+ * The symbol that proves yfinance is answering at all.
+ *
+ * `fetchWithIsolation` defaults its own control to AAPL for the same reason: an empty answer about
+ * a symbol is only evidence about that symbol once the provider is known to be talking to us, and
+ * yfinance signals a throttle with an empty 200 rather than an error.
+ */
+const PERF_CONTROL_SYMBOL = 'AAPL'
+
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -6238,10 +6247,28 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // The bound is the DEADLINE, not a count of misses: a run isolates what it has budget for
         // and leaves the rest for the next one. Nothing is marked for want of time — that is the
         // negative-cache equivalent of blaming the victim, and `fetchWithIsolation` already refuses
-        // to do it. A throttle makes every isolation throw, so a throttled run marks NOTHING.
+        // to do it.
+        //
+        // THIS USED TO SAY "a throttle makes every isolation throw, so a throttled run marks
+        // NOTHING". THAT IS FALSE FOR yfinance, WHICH ANSWERS A THROTTLE WITH AN EMPTY 200 — the
+        // seventh instance of that shape in this file, and the only one whose comment asserted the
+        // opposite. Nothing throws, nothing answers, and every isolated symbol looks individually
+        // dead.
+        //
+        // Measured 2026-09-04: ten Thai securities marked in ONE run at 22:35 — TTB-R.BK, CRC-R.BK,
+        // TU-R.BK and seven more — each holding daily bars back to 2006-2007 and zero performance
+        // rows. Neither theory that fits the surface survived: it is not the `-R` NVDR symbol
+        // (34 of 40 such symbols carry performance perfectly well) and it is not a young series
+        // (TTB-R.BK has bars from 2007-12-24). One run, one country, every isolation empty, is a
+        // provider refusal wearing a per-symbol answer.
+        //
+        // So an empty isolated answer is only evidence about the SYMBOL once the provider is known
+        // to be talking to us. That is what `fetchWithIsolation`'s `control` argument is for; this
+        // loop is hand-rolled and never had it.
         const got = new Set(fetched.map((r) => r.scope_id))
         const missed = batch.filter((sym) => !got.has(sym))
         const confirmedDead: string[] = []
+        let isolatedAnswered = 0
         for (const sym of missed) {
           if (Date.now() > deadline - 4_000) break
           try {
@@ -6254,6 +6281,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
               // evidence about the SYMBOL, which is the only thing that earns a mark.
               confirmedDead.push(sym)
             } else {
+              isolatedAnswered += 1
               rows.push(...alone.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id })))
             }
           } catch (e) {
@@ -6262,6 +6290,35 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
             if (throttled(msg)) { lastError = msg; throttledOut = true; break }
           }
         }
+        // THE CONTROL PROBE. If not one isolated call answered, we have no evidence the provider is
+        // talking to us at all — so ask about a symbol that certainly has returns. If the control
+        // is empty too, the emptiness is ours, not the symbols', and NOTHING is marked; the next
+        // run will try again, which costs one cycle. Marking wrongly costs 30 days and freezes the
+        // stale returns behind it, because a marked security is excluded from the backlog that
+        // would have corrected them.
+        //
+        // Only when nothing answered: a run where some isolations succeeded has already proved the
+        // provider is up, and paying for an extra call every time would be waste.
+        if (confirmedDead.length > 0 && isolatedAnswered === 0 && !throttledOut) {
+          let controlAnswered = false
+          try {
+            const probe = await loadEquityReturns(
+              fetcher, [PERF_CONTROL_SYMBOL], now, SEC_PERF_TTL_MINUTES,
+              Math.min(8_000, Math.max(1_000, deadline - Date.now())),
+            )
+            controlAnswered = probe.length > 0
+          } catch (e) {
+            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+            lastError = msg
+          }
+          if (!controlAnswered) {
+            lastError = lastError ??
+              `every isolated symbol returned an empty series and ${PERF_CONTROL_SYMBOL} did too — ` +
+              'treating it as a provider refusal and marking nothing'
+            confirmedDead.length = 0
+          }
+        }
+
         const missedIds = confirmedDead
           .map((sym) => fetchToSecurity.get(sym))
           .filter((id): id is string => !!id)
