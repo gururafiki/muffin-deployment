@@ -124,6 +124,28 @@ begin
     return false;
   end if;
 
+  -- RECORD THE TTL BEFORE THE SKIP CHECK, NOT AFTER IT — and that ordering is the whole point.
+  --
+  -- `min_interval` exists so the stalled-resource alert can judge a resource by its OWN schedule: a
+  -- 7-day TTL over quarterly filings is correctly quiet for a week, and a flat 12-hour rule flags it
+  -- beside resources that have genuinely stopped. But the write started out below, after both early
+  -- returns, so a resource that SKIPPED never recorded anything — and the skipping ones are exactly
+  -- the ones the TTL is needed for. Measured 2026-09-04, one deploy after shipping it: 18 of 46
+  -- resources had a TTL, all of them ones that had actually claimed, and the alert went on flagging
+  -- `fund-holdings`, `derive-classifications` and six others against the 12-hour fallback.
+  --
+  -- A self-defeating fix, in other words: the evidence was collected only where it was not needed.
+  -- The TTL is a property of the CALLER's intent, not of whether this particular call won the race,
+  -- so it is recorded whenever we are serialised enough to write it safely — which is here, inside
+  -- the advisory lock, before any decision about skipping.
+  --
+  -- `is distinct from` so a steady-state call writes nothing: this runs on every invocation of every
+  -- resource, most of which skip.
+  update market.refresh_log
+     set min_interval = p_min_interval
+   where resource = p_resource
+     and min_interval is distinct from p_min_interval;
+
   if exists (
     select 1 from market.refresh_log
      where resource = p_resource
