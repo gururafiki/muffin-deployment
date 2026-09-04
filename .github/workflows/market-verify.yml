@@ -280,7 +280,7 @@ jobs:
           #     overwritten every run, so a resource whose worker DIES on every five-minute firing
           #     always has a fresh `started_at` and reads as just-started for ever — measured
           #     2026-09-01, security-segments was dead for two days and this reported healthy.
-          health=$(curl -sS --max-time 60 "$BASE/rest/v1/resource_health?select=resource,first_seen,last_worked,skips_6h,runs_6h" \
+          health=$(curl -sS --max-time 60 "$BASE/rest/v1/resource_health?select=resource,first_seen,last_worked,skips_6h,runs_6h,ttl_hours" \
             -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' \
             | python3 .github/scripts/check_resource_health.py) && rc=0 || rc=1
           if [ "$rc" -ne 0 ]; then
