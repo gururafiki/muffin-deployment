@@ -35,7 +35,15 @@ select
   -- worker is dying while its in-flight lock answers skips.
   max(r.finished_at) filter (where r.ok)                              as last_ok_including_skips,
   count(*) filter (where r.skipped and r.started_at > now() - interval '6 hours') as skips_6h,
-  count(*) filter (where r.started_at > now() - interval '6 hours')    as runs_6h
+  count(*) filter (where r.started_at > now() - interval '6 hours')    as runs_6h,
+  -- HOW LONG THIS RESOURCE IS SUPPOSED TO BE QUIET FOR, from the TTL its own caller passed to
+  -- `begin_refresh` (recorded on `refresh_log` in migration 002). A resource is not late until it
+  -- is late BY ITS OWN SCHEDULE: `fund-holdings` has a 7-day TTL over quarterly SEC filings and is
+  -- correctly silent for days, while `security-eps-history` on a short TTL and silent for 170h is
+  -- genuinely stuck. Judging both against one 12-hour rule reported eight broken resources of
+  -- which at least two were healthy — and an alert that cries wolf is how the real ones hide.
+  (select extract(epoch from l.min_interval) / 3600.0
+     from market.refresh_log l where l.resource = r.resource)          as ttl_hours
 from market.refresh_run r
 where r.started_at > now() - interval '30 days'
 group by r.resource;

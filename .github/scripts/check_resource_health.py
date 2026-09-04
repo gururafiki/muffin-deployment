@@ -30,6 +30,9 @@ import json
 import sys
 
 STALE_AFTER_HOURS = 12
+# Two full cycles late before it is a fault. One missed cycle is a blip; the point of the TTL is
+# that the resource is ALLOWED to be quiet for it.
+TTL_CYCLES_BEFORE_STALE = 2.5
 
 
 def main() -> int:
@@ -59,12 +62,27 @@ def main() -> int:
             continue
 
         if not last_worked:
+            # Same allowance: a 7-day-TTL resource that has not worked inside a 200h window has
+            # missed barely one cycle, which is not evidence of a fault.
+            ttl_h = r.get("ttl_hours")
+            if ttl_h and recorded_h < float(ttl_h) * TTL_CYCLES_BEFORE_STALE:
+                continue
             bad.append(f"{resource}: has NEVER done work in the recorded window "
                        f"({recorded_h:.0f}h) — only skips or failures")
             continue
 
+        # LATE BY ITS OWN SCHEDULE, not by one global rule. A resource with a 7-day TTL is
+        # supposed to be quiet for a week; measured 2026-09-04, judging every resource against a
+        # flat 12 hours flagged eight, of which `fund-holdings` (7-day TTL, quarterly filings) and
+        # `derive-classifications` (30-day) were behaving exactly as designed. The multiplier gives
+        # a resource two whole cycles to miss before anyone is woken.
+        ttl_hours = r.get("ttl_hours")
+        threshold = STALE_AFTER_HOURS
+        if ttl_hours:
+            threshold = max(STALE_AFTER_HOURS, float(ttl_hours) * TTL_CYCLES_BEFORE_STALE)
+
         hours = (now - datetime.datetime.fromisoformat(last_worked)).total_seconds() / 3600
-        if hours <= STALE_AFTER_HOURS:
+        if hours <= threshold:
             continue
 
         # A resource answering skips while doing nothing is the specific shape that used to read as
@@ -75,7 +93,8 @@ def main() -> int:
             bad.append(f"{resource}: no work in {hours:.0f}h, and all {runs} runs in the last 6h "
                        f"were SKIPS — its worker is dying and the in-flight lock is answering")
         else:
-            bad.append(f"{resource}: no work in {hours:.0f}h ({runs} run(s) in the last 6h)")
+            bad.append(f"{resource}: no work in {hours:.0f}h, threshold {threshold:.0f}h "
+                       f"({runs} run(s) in the last 6h)")
 
     if bad:
         print(" | ".join(bad))

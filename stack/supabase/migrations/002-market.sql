@@ -79,6 +79,20 @@ create table if not exists market.refresh_log (
   error       text
 );
 
+-- THE TTL THE CALLER USED, recorded by the writer rather than restated anywhere else.
+--
+-- `min_interval` is what makes a long-TTL resource distinguishable from a dying one. Without it,
+-- the stalled-resource alert had no way to tell `fund-holdings` (a 7-day TTL over quarterly SEC
+-- filings, correctly quiet for days) from a worker being killed on every firing — and it reported
+-- eight resources broken on 2026-09-04 of which at least two were behaving exactly as designed. An
+-- alert that cries wolf is one that stops being read, which is how the genuinely stalled ones
+-- (`security-eps-history`, 170h) stay invisible.
+--
+-- Recorded HERE, in the claim, because `begin_refresh` is already handed the interval: the
+-- alternative was a second copy of `EXTRA_TTL_MINUTES` in SQL or in the checker, and this file has
+-- paid for same-fact-in-two-places often enough.
+alter table market.refresh_log add column if not exists min_interval interval;
+
 -- === Refresh claim / release =================================================
 -- The refresh trigger is reachable by anyone holding the anon key (it is published
 -- in runtime-config.js), so the claim MUST be atomic and self-limiting: N concurrent
@@ -127,10 +141,11 @@ begin
     return false;
   end if;
 
-  insert into market.refresh_log (resource, started_at, finished_at, ok, error)
-       values (p_resource, now(), null, false, null)
+  insert into market.refresh_log (resource, started_at, finished_at, ok, error, min_interval)
+       values (p_resource, now(), null, false, null, p_min_interval)
   on conflict (resource) do update
-     set started_at = now(), finished_at = null, ok = false, error = null;
+     set started_at = now(), finished_at = null, ok = false, error = null,
+         min_interval = excluded.min_interval;
 
   return true;
 end $$;

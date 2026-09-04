@@ -67,7 +67,23 @@ jobs:
           # get_bin_path(required=...), removed in ansible-core 2.19 -> keep ansible-core < 2.19.
           # setup-python puts THIS ansible on PATH (the runner's pre-installed one is newer).
           python3 -m pip install 'ansible-core>=2.18,<2.19'
-          ansible-galaxy collection install -r ansible/requirements.yml
+          # RETRY GALAXY. It answered 504 Gateway Timeout twice on 2026-09-04 and burned two whole
+          # deploy runs — once on `cloud.terraform`, once on `ansible.posix:1.6.2` — while
+          # galaxy.ansible.com answered 200 from elsewhere in the same minute. It is a runner-side
+          # transient, not a retired mirror (which is what the apt failure turned out to be), so it
+          # is worth retrying rather than routing around. Bounded: five tries, growing backoff, then
+          # fail honestly rather than deploying with collections half-installed.
+          for attempt in 1 2 3 4 5; do
+            if ansible-galaxy collection install -r ansible/requirements.yml; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::ansible-galaxy failed 5 times — galaxy.ansible.com is unreachable from this runner"
+              exit 1
+            fi
+            echo "::warning::ansible-galaxy attempt $attempt failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
           echo "using $(command -v ansible-playbook)"; ansible --version | head -1
       - name: Materialise keys
         run: |

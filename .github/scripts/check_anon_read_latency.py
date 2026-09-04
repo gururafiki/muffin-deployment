@@ -84,7 +84,37 @@ QUERIES = [
 ]
 
 
-def timed(path: str):
+def timed(path: str, attempts: int = 3):
+    """Time a read, BEST OF `attempts`.
+
+    A SINGLE READING IS A MEASUREMENT OF A MOMENT, NOT OF THE QUERY, and this check cried wolf twice
+    in one day on the same one. `stock statements` reported 2,166 ms against a 2,000 ms budget on
+    2026-09-02 and a hard `57014` statement timeout on 2026-09-04, both immediately after a deploy —
+    and re-measured 0.34-0.65 s across five runs and three symbols each time. The node runs matview
+    refreshes, a PostgREST reload and eight ingestion resources; contention is normal and is not
+    what this guard is for.
+    
+    Best-of-three, because the failure this exists to catch is a query that is SLOW BY
+    CONSTRUCTION — a plan flip, a lost index, a view that grew a lateral. That is slow every time,
+    so the best of three is still over budget. A guard that fires on contention is one that gets
+    ignored, and then the plan flip it exists for goes unnoticed.
+    """
+    best = None
+    for attempt in range(attempts):
+        ms, rows, err = _timed_once(path)
+        if err is None and (best is None or ms < best[0]):
+            best = (ms, rows, None)
+        elif err is not None and best is None:
+            best = (ms, rows, err)
+        # A clean read under budget is the answer; no point paying for more.
+        if err is None and ms <= BUDGET_MS:
+            return ms, rows, None
+        if attempt < attempts - 1:
+            time.sleep(1.5)
+    return best
+
+
+def _timed_once(path: str):
     req = urllib.request.Request(
         f"{BASE}/rest/v1/{path}",
         headers={"apikey": ANON, "Authorization": f"Bearer {ANON}",
