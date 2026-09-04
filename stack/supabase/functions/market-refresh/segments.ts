@@ -576,8 +576,22 @@ export function segmentFactsFrom(
 
     let bestMap: Map<string, number> | null = null
     let bestPlaced = 0
-    let bestTarget: number | null = null
-    for (const [, cands] of byBucket) {
+    // THE SPLIT IS SHARED ACROSS THE GROUP; THE TARGET IS NOT.
+    //
+    // `bestMap` — which members belong together — is one fact per axis per reporting date and is
+    // deliberately applied to every bucket (see the note above; it is what makes segment ASSETS
+    // usable at all). `reconciled_to` is a different kind of fact: it is the consolidated figure
+    // for ONE metric over ONE span. Stamping the winning bucket's target on the whole group hands
+    // a quarter the year's revenue and an older comparative the newest year's.
+    //
+    // The group is keyed `axis|periodEnding`, so it spans BOTH period types and every metric — and
+    // a fiscal-year end is also Q4's end, the same collision migration 106 had to put into
+    // `security_statement`'s primary key. Measured 2026-09-04 on the live data: 3,021 of 11,211
+    // flat revenue splits did not sum to the target stored beside them, and the damage tracks the
+    // shape exactly — 47% of older comparatives wrong against 24% of quarters and 26% of newest
+    // annuals, with the largest ratio bucket below 0.5 (a quarter's split against a year's total).
+    const targetByBucket = new Map<string, number>()
+    for (const [bucketKey, cands] of byBucket) {
       const g0 = cands[0]
       // THE TARGET IS THE PARENT'S OWN VALUE FOR A CROSS-TAB, and the company's consolidated
       // figure for a flat split. Alphabet's four product lines inside Google Services sum to
@@ -602,13 +616,21 @@ export function segmentFactsFrom(
         cands.map((c) => ({ memberCode: c.memberCode, value: c.value })),
         target,
       )
+      targetByBucket.set(bucketKey, target)
       const placed = [...map.values()].filter((v) => v > 0).length
-      if (placed > bestPlaced) { bestPlaced = placed; bestMap = map; bestTarget = target }
+      if (placed > bestPlaced) { bestPlaced = placed; bestMap = map }
     }
 
     for (const c of group) {
       const partitionId = bestMap?.get(c.memberCode) ?? 0
-      out.push({ ...c, partitionId, reconciledTo: partitionId > 0 ? bestTarget : null })
+      // ITS OWN BUCKET'S TARGET, or NOTHING. A bucket whose metric and span the filing never
+      // states undimensioned has no consolidated figure to have been reconciled against, and
+      // saying so is the honest answer — `check_segments_reconcile` skips a null target rather
+      // than asserting against a borrowed one, which is how 3,021 false disagreements arose.
+      const own = targetByBucket.get(
+        `${c.metricCode}|${c.periodType}|${c.periodStart}|${c.periodEnding}`,
+      )
+      out.push({ ...c, partitionId, reconciledTo: partitionId > 0 ? own ?? null : null })
     }
   }
   return out
