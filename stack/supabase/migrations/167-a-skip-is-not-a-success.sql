@@ -43,7 +43,14 @@ select
   -- genuinely stuck. Judging both against one 12-hour rule reported eight broken resources of
   -- which at least two were healthy — and an alert that cries wolf is how the real ones hide.
   (select extract(epoch from l.min_interval) / 3600.0
-     from market.refresh_log l where l.resource = r.resource)          as ttl_hours
+     from market.refresh_log l where l.resource = r.resource)          as ttl_hours,
+  -- IS ANYTHING STILL ASKING FOR IT. A retired resource keeps its history for the 30 days this
+  -- view looks back over, so it goes on looking stalled long after it was correctly switched off —
+  -- `security-eps-history` was deleted from the cron by migration 138 when the nasdaq earnings
+  -- calendar replaced it (one 3-day window returns 643 companies against alpha_vantage's 25 calls
+  -- a DAY), and was still being reported as broken a week later. A resource nothing schedules
+  -- cannot be late.
+  exists (select 1 from market.cron_resource cr where cr.resource = r.resource) as scheduled
 from market.refresh_run r
 where r.started_at > now() - interval '30 days'
 group by r.resource;

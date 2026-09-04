@@ -588,5 +588,53 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
   check(!instanceIsTooLarge(null), 'an unknown size is NOT refused — the HTML fallback has no size')
 }
 
+// N. A TARGET BELONGS TO ITS OWN BUCKET. The group key is `axis|periodEnding`, so ONE group holds
+//    every metric AND both period types that share a reporting date — and a fiscal-year end is
+//    also Q4's end. `bestMap` (which members belong together) is deliberately shared across the
+//    group; `reconciled_to` is not, because it is the consolidated figure for ONE metric over ONE
+//    span. Stamping the winning bucket's target on the whole group handed a quarter the YEAR's
+//    revenue.
+//
+//    Measured on the live data 2026-09-04, before the fix: 3,021 of 11,211 flat revenue splits did
+//    not sum to the target stored beside them, and the damage tracked the shape — 47% of older
+//    comparatives wrong against 24% of quarters, with the largest ratio bucket below 0.5, which is
+//    a quarter's split against a year's total.
+//
+//    THE FIXTURE MAKES THE TWO RULES DISAGREE: the annual and quarterly splits share a period end
+//    and have DIFFERENT totals (1000 vs 250), so a shared target is visibly the wrong one.
+{
+  const Y_START = '2024-07-01'
+  const xml = instance([
+    // The year, ending on the same date as the quarter.
+    { concept: REV, value: 1000, start: Y_START, end: Q_END },
+    { concept: REV, value: 600, start: Y_START, end: Q_END, dims: prod('x:AlphaMember') },
+    { concept: REV, value: 400, start: Y_START, end: Q_END, dims: prod('x:BetaMember') },
+    // The quarter, same axis, same members, same end date, a quarter of the size.
+    { concept: REV, value: 250, dims: {} },
+    { concept: REV, value: 150, dims: prod('x:AlphaMember') },
+    { concept: REV, value: 100, dims: prod('x:BetaMember') },
+  ])
+  const out = segmentFactsFrom(xml, AXES, CONCEPTS).filter((f) => f.partitionId > 0)
+  const annual = out.filter((f) => f.periodType === 'annual')
+  const quarter = out.filter((f) => f.periodType === 'quarter')
+
+  check(annual.length === 2 && quarter.length === 2,
+    'both period types are placed in a partition',
+    `annual ${annual.length}, quarter ${quarter.length}`)
+  check(annual.every((f) => f.reconciledTo === 1000),
+    "the annual split carries the YEAR's total",
+    `got ${[...new Set(annual.map((f) => f.reconciledTo))].join(',')}`)
+  check(quarter.every((f) => f.reconciledTo === 250),
+    "the quarterly split carries the QUARTER's total, not the year's",
+    `got ${[...new Set(quarter.map((f) => f.reconciledTo))].join(',')} (1000 was the bug)`)
+  // And the property the whole thing exists for: a split sums to the figure stored beside it.
+  for (const [label, rows] of [['annual', annual], ['quarter', quarter]] as const) {
+    const sum = rows.reduce((a, f) => a + f.value, 0)
+    check(rows.length > 0 && sum === rows[0].reconciledTo,
+      `the ${label} split sums to its own target`,
+      `${sum} vs ${rows[0]?.reconciledTo}`)
+  }
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

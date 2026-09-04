@@ -52,6 +52,17 @@ def main() -> int:
         first_seen = r.get("first_seen")
         last_worked = r.get("last_worked")
 
+        # A RESOURCE NOTHING SCHEDULES CANNOT BE LATE. A retired one keeps its history for the
+        # 30 days `resource_health` looks back over, so it goes on looking stalled long after it
+        # was correctly switched off. `security-eps-history` was deleted from the cron by migration
+        # 138 when the nasdaq earnings calendar replaced it, and was still being reported broken a
+        # week later — sitting in the same list as the resources that really had stopped.
+        #
+        # `scheduled is None` means an older view that does not report it; treat that as scheduled
+        # rather than silently exempting everything.
+        if r.get("scheduled") is False:
+            continue
+
         # COLD-START GUARD. A resource we have only been recording for an hour CANNOT have been
         # broken for twelve, and without this every fresh deployment reports half its resources
         # broken for half a day — which is how the first alert anyone sees becomes one they ignore.
