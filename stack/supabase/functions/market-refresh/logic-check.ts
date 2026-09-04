@@ -542,6 +542,33 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     'security-prices KEEPS what isolation recovers rather than discarding it',
     'isolatedWrites',
   )
+  // AND AN EMPTY ISOLATED ANSWER IS ONLY EVIDENCE ONCE THE PROVIDER IS PROVEN TO BE ANSWERING.
+  //
+  // The comment above this loop used to assert "a throttle makes every isolation throw, so a
+  // throttled run marks NOTHING". That is FALSE for yfinance, which signals a throttle with an
+  // empty 200 — the seventh instance of that shape in this codebase and the only one whose comment
+  // claimed the opposite. Nothing throws, nothing answers, and every isolated symbol looks
+  // individually dead.
+  //
+  // Measured 2026-09-04: ten Thai securities marked in ONE run at 22:35 (TTB-R.BK, CRC-R.BK,
+  // TU-R.BK and seven more), each holding daily bars back to 2006-2007 and zero performance rows.
+  // Both surface theories died on measurement — 34 of 40 `-R.BK` NVDR symbols carry performance
+  // perfectly well, and the series are nineteen years deep, not young.
+  //
+  // So marking is now gated on a CONTROL probe when nothing answered during isolation, exactly as
+  // `fetchWithIsolation` gates its own `dead` set. Deleting either half re-opens it: the counter
+  // that notices nothing answered, or the probe that asks whether that is our fault.
+  check(
+    index.includes('confirmedDead.length > 0 && isolatedAnswered === 0'),
+    'security-performance will not mark when NOTHING answered during isolation',
+    'confirmedDead.length > 0 && isolatedAnswered === 0',
+  )
+  check(
+    index.includes('PERF_CONTROL_SYMBOL') && index.includes('controlAnswered'),
+    'security-performance proves the provider is up with a control symbol before marking',
+    'PERF_CONTROL_SYMBOL / controlAnswered',
+  )
+
   check(
     index.includes('const missedIds = confirmedDead'),
     'security-performance marks only symbols confirmed ALONE',
