@@ -97,15 +97,47 @@ on conflict (member_code) do update
 -- every one reported `cannot drop view ... because other objects depend on it`, so four "guarded"
 -- verdicts would have been four no-ops. A named list is right here, unlike in 141, because these
 -- are this file's OWN views rather than whatever some later migration may build.
-drop view if exists market.security_segment_geography;
-drop view if exists market.pending_segment_alias;
-drop view if exists market.security_segment_current;
-create view market.security_segment_current as
-with latest as (
+-- REPLACE FIRST, DROP ONLY IF THE SHAPE MOVED — migration 35's pattern, for its reason.
+--
+-- This file is now the SOLE definer of `security_segment_current`. 141, 148, 149 and 150 used to
+-- define it as well, each with a different column list, so the earliest could never impose the
+-- latest one's shape and had to DROP — opening a window on every deploy, roughly sixteen files
+-- wide, in which the view and the segment spine did not exist. Consolidating narrowed that to one
+-- file. This removes it: in steady state `create or replace` succeeds, nothing is dropped, and
+-- there is no window at all. The cascade below runs only when the column list genuinely changes.
+--
+-- ONE DEFINITION, used by both paths. Writing the DDL twice is the same-fact-in-two-places this
+-- schema has already been bitten by.
+do $$
+declare
+  v record;
+  ddl constant text := $ddl$with newest as (
+  -- ONE PERIOD PER (SECURITY, AXIS), CHOSEN BEFORE ANY MEMBER IS LOOKED AT.
+  --
+  -- Picking the latest period PER MEMBER — which `distinct on (..., member_code)` does — unions
+  -- every member spelling the filer has ever used, each at its own newest year, and reassembles a
+  -- split no filing ever reported. Measured in production 2026-09-02: Apple's business-segments
+  -- axis served 25 members spanning 2008..2025 summing 627.3bn against a true FY2025 416.2bn, and
+  -- Shell's product split came to 1,201bn against a revenue of 266.9bn. 129 of 216 (security, axis)
+  -- groups spanned more than one period; 83 of the 104 securities with segments were affected.
+  --
+  -- This is migration 150's ASML lesson one level up. There it was two FILINGS of one period
+  -- disagreeing about member names (`asml:EuvMember` -> `asml:NXEMember`), fixed with `dense_rank`
+  -- so a whole filing is chosen rather than a row. Here it is two PERIODS, and the same rule
+  -- applies: choose the period first, then take its members. A split is a statement a filer made
+  -- about one year, and it is only true as a whole.
+  select g.security_id, g.axis, max(g.period_ending) as period_ending
+  from market.security_segment_latest g
+  where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is null
+  group by g.security_id, g.axis
+),
+latest as (
   select distinct on (g.security_id, g.axis, g.member_code, g.metric_code)
     g.security_id, g.axis, g.member_code, g.metric_code,
     g.value, g.currency_code, g.period_ending, g.accession_number
   from market.security_segment_latest g
+  join newest n
+    on n.security_id = g.security_id and n.axis = g.axis and n.period_ending = g.period_ending
   where g.partition_id = 1 and g.period_type = 'annual' and g.parent_member is null
   order by g.security_id, g.axis, g.member_code, g.metric_code, g.period_ending desc
 ),
@@ -168,32 +200,53 @@ left join lateral (
     and (al.security_id = p.security_id or al.security_id is null)
   order by (al.security_id is not null) desc limit 1
 ) al on true
-left join market.segment_concept c on c.code = al.concept_code;
+left join market.segment_concept c on c.code = al.concept_code
+$ddl$;
+begin
+  begin
+    execute 'create or replace view market.security_segment_current as ' || ddl;
+    return;                     -- unchanged: nothing dropped, no window
+  exception when others then
+    null;                       -- the column list moved; the cascade below is now required
+  end;
+
+  raise notice '  --  157: security_segment_current shape changed, rebuilding dependents';
+
+  -- RELKIND-AWARE and DISCOVERED, never a named list. This file used to name
+  -- `security_segment_geography` and `pending_segment_alias`; migration 158 later built
+  -- `security_segment_spine` — a MATERIALIZED view — on the same source, and the list could not
+  -- see it. `drop view if exists` raises `is not a view` for a matview and `IF EXISTS` does not
+  -- help, so the kind has to be branched on.
+  for v in
+    select distinct dv.relname as name, dv.relkind as kind
+    from pg_depend d
+    join pg_rewrite r   on r.oid = d.objid
+    join pg_class dv    on dv.oid = r.ev_class
+    join pg_class src   on src.oid = d.refobjid
+    join pg_namespace n on n.oid = src.relnamespace
+    where n.nspname = 'market'
+      and src.relname = 'security_segment_current'
+      and dv.relname <> 'security_segment_current'
+      and dv.relkind in ('v', 'm')
+  loop
+    if v.kind = 'm' then
+      execute format('drop materialized view if exists market.%I cascade', v.name);
+    else
+      execute format('drop view if exists market.%I cascade', v.name);
+    end if;
+  end loop;
+
+  execute 'drop view if exists market.security_segment_current cascade';
+  execute 'create view market.security_segment_current as ' || ddl;
+end $$;
 
 comment on view market.security_segment_current is
   'Latest annual revenue and operating income per disclosed business line, with each line''s share of its own split. Restricted to partition 1 — the finest split that reconciles to the filing — so the rows on one (security, axis) can safely be summed. `kind` is the MEMBER''s kind where that is published (a country filed on the business axis is geography), falling back to the axis''s. operating_margin_pct is a SEGMENT margin: it excludes unallocated corporate cost by design and does not roll up to the company''s operating margin.';
 
 -- ── Where a company earns, with no curation at all ────────────────────────────────────────────
-drop view if exists market.security_segment_geography;
-create view market.security_segment_geography as
-select
-  c.security_id,
-  c.member_code,
-  c.country_iso2,
-  c.member_label,
-  c.axis,
-  c.revenue,
-  c.operating_income,
-  c.revenue_share_pct,
-  c.currency_code,
-  c.period_ending,
-  c.accession_number
-from market.security_segment_current c
-where c.kind = 'geography'
-  and c.member_label is not null;
-
-comment on view market.security_segment_geography is
-  'Revenue and operating income by the geography a filer discloses, for members whose meaning is published (ISO countries and standard regions) so nothing here required curation. A filer''s own extension for a region — bud:LatinAmericaWestMember — is deliberately absent: it needs a segment_member row before it can be named.';
+-- `security_segment_geography` is defined once, in migration 158 — see the note there. Defining a view
+-- in several migrations forces the earliest to DROP (a `create or replace` cannot reorder or
+-- rename columns), and that drop cascades to its dependents on every single deploy.
 
 -- ── The curation queue ────────────────────────────────────────────────────────────────────────
 -- What a human still has to decide, ranked by LEVERAGE rather than by size.
@@ -205,35 +258,19 @@ comment on view market.security_segment_geography is
 -- therefore free of currency, and it answers the question that matters: how much of this company
 -- is the line nobody has mapped. Companies-sharing-the-member comes first, because a concept is
 -- only worth anything once TWO companies sit on it.
-drop view if exists market.pending_segment_alias;
-create view market.pending_segment_alias as
-select
-  c.member_code,
-  min(c.kind)                                   as kind,
-  count(distinct c.security_id)                 as companies,
-  max(c.revenue_share_pct)                      as largest_share_pct,
-  -- Context only, never the sort key — see above.
-  max(c.revenue)                                as largest_revenue,
-  max(c.currency_code)                          as a_currency_code,
-  min(c.axis)                                   as an_axis
-from market.security_segment_current c
-where c.concept_code is null
-  -- Geography is not a curation task: `security_segment_geography` already serves the published
-  -- members, and a product concept for a country would be a wrong answer rather than a missing one.
-  and c.kind in ('product', 'business')
-group by c.member_code
-order by companies desc, largest_share_pct desc nulls last, c.member_code;
-
-comment on view market.pending_segment_alias is
-  'Business lines with no shared concept, ranked by how many companies use the member and then by the share of its own company it represents. Ordered by leverage, NOT by revenue — revenue is in the filer''s own currency, so it ranks by exchange rate rather than by importance.';
+-- `pending_segment_alias` is defined once, in migration 162 — see the note there. Defining a view
+-- in several migrations forces the earliest to DROP (a `create or replace` cannot reorder or
+-- rename columns), and that drop cascades to its dependents on every single deploy.
 
 -- ── Grants ────────────────────────────────────────────────────────────────────────────────────
 -- `drop view` DISCARDS THE ACL, so every re-grant below is load-bearing rather than tidy.
-grant select on market.segment_member, market.security_segment_current,
-                market.security_segment_geography
+-- `security_segment_geography` is granted in 158 and `pending_segment_alias` in 162, where each is
+-- now defined. A grant naming a relation this file no longer creates would abort the whole
+-- migration — and because these apply `--single-transaction`, that leaves the view above uncreated
+-- and every later file failing on it.
+grant select on market.segment_member, market.security_segment_current
   to anon, authenticated, service_role;
 grant insert, update, delete on market.segment_member to service_role;
-grant select on market.pending_segment_alias to service_role;
 
 alter table market.segment_member enable row level security;
 drop policy if exists segment_member_read on market.segment_member;

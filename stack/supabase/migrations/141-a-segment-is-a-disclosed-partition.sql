@@ -248,118 +248,21 @@ comment on view market.pending_segments is
 -- margin is available without a second query. Restricted to `partition_id = 1` — the finest
 -- reconciling split — because that is the only set a caller can safely sum, and serving anything
 -- else invites exactly the double count the header describes.
--- DROP ITS DEPENDENTS FIRST, DISCOVERED RATHER THAN LISTED. Migration 157 builds
--- `security_segment_geography` and `pending_segment_alias` on this view, and every migration
--- re-runs in order on every deploy — so on the SECOND pass this drop meets objects that did not
--- exist on the first and fails the whole deploy with `cannot drop view ... because other objects
--- depend on it`. A hand-maintained list of dependents was tried in migration 35 and was wrong
--- within hours, so `pg_depend` is asked instead.
---
--- THE DROP IS UNAVOIDABLE HERE, unlike in migration 35. Four files define this view with four
--- different column lists (141, 148, 149, 150, and now 157), and `create or replace view` can only
--- APPEND columns — so the earliest definer can never replace the latest one's shape and must drop.
--- That means a real window, on every deploy, in which this view and its dependents do not exist:
--- roughly sixteen files of wall clock. It is tolerable only because nothing user-facing reads them
--- yet. Collapsing 141/148/149/150 into a single definition would remove the window entirely and is
--- the right follow-up; it is not done here because it would rewrite four files' narrative for a
--- view whose readers are a Grafana panel and a curation queue.
-do $$
-declare v record;
-begin
-  for v in
-    select dv.relname, dv.relkind
-    from pg_depend d
-    join pg_rewrite r   on r.oid = d.objid
-    join pg_class dv    on dv.oid = r.ev_class
-    join pg_class src   on src.oid = d.refobjid
-    join pg_namespace n on n.oid = src.relnamespace
-    where n.nspname = 'market'
-      and src.relname = 'security_segment_current'
-      and dv.relname <> 'security_segment_current'
-      -- `IF EXISTS` does not protect against a relkind mismatch: `drop view` on a matview raises
-      -- `is not a view` and the converse also raises, so neither ordering of the two is safe.
-      -- Migration 158 adds a MATERIALIZED dependent, so both kinds have to be handled — a matview
-      -- has a `pg_rewrite` entry and is therefore discovered here exactly like a plain view.
-      and dv.relkind in ('v', 'm')
-  loop
-    if v.relkind = 'm' then
-      execute format('drop materialized view if exists market.%I cascade', v.relname);
-    else
-      execute format('drop view if exists market.%I cascade', v.relname);
-    end if;
-  end loop;
-end $$;
 
-drop view if exists market.security_segment_current;
-create view market.security_segment_current as
-with latest as (
-  select distinct on (g.security_id, g.axis, g.member_code, g.metric_code)
-    g.security_id, g.axis, g.member_code, g.metric_code,
-    g.value, g.currency_code, g.period_ending, g.accession_number
-  from market.security_segment g
-  where g.partition_id = 1 and g.period_type = 'annual'
-  order by g.security_id, g.axis, g.member_code, g.metric_code, g.period_ending desc
-),
-pivoted as (
-  select
-    l.security_id, l.axis, l.member_code,
-    max(l.currency_code)                                          as currency_code,
-    max(l.period_ending)                                          as period_ending,
-    max(l.accession_number)                                       as accession_number,
-    max(l.value) filter (where l.metric_code = 'revenue')          as revenue,
-    max(l.value) filter (where l.metric_code = 'operating_income') as operating_income
-  from latest l
-  group by l.security_id, l.axis, l.member_code
-)
-select
-  p.security_id,
-  p.axis,
-  a.kind,
-  p.member_code,
-  c.code as concept_code,
-  c.name as concept_name,
-  p.revenue,
-  p.operating_income,
-  -- A MARGIN, not a "profitability". Segment operating income excludes unallocated corporate cost
-  -- by design (ASC 280 / IFRS 8), so these do not sum to the company's own operating margin and
-  -- must never be presented as if they did.
-  case when p.revenue is not null and p.revenue <> 0
-       then round(100 * p.operating_income / p.revenue, 2) end as operating_margin_pct,
-  round(100 * p.revenue / nullif(sum(p.revenue) over (partition by p.security_id, p.axis), 0), 2)
-    as revenue_share_pct,
-  p.currency_code,
-  p.period_ending,
-  p.accession_number
-from pivoted p
--- A SCALAR SUBQUERY, NOT A JOIN. `segment_axis` is keyed (taxonomy, axis) and the `srt:` axes are
--- shared between us-gaap and ifrs-full filers, so the same axis name legitimately appears twice —
--- a plain join would then return every segment row TWICE and double every company's revenue in the
--- view that exists to prevent exactly that. Part C adds Japanese and Korean taxonomies, which makes
--- the collision likelier rather than hypothetical.
-cross join lateral (
-  select ax.kind from market.segment_axis ax where ax.axis = p.axis
-  order by ax.priority desc, ax.taxonomy limit 1
-) a
--- SAME REASON, AND THE SPECIFIC ALIAS MUST WIN. A member can carry both a company-scoped mapping
--- and a generic one; a plain left join would emit the row once per alias, so a curation added for
--- one company would silently double that company's revenue in this view. `security_id is not null`
--- sorts first, so the scoped alias is chosen when both exist.
-left join lateral (
-  select al.concept_code
-  from market.segment_alias al
-  where al.member_code = p.member_code
-    and (al.security_id = p.security_id or al.security_id is null)
-  order by (al.security_id is not null) desc
-  limit 1
-) al on true
-left join market.segment_concept c on c.code = al.concept_code;
+-- ── `security_segment_current` IS DEFINED ONCE, IN MIGRATION 157 ──────────────────────────────
+-- It used to be defined here too. FIVE migrations (141, 148, 149, 150, 157) each carried a
+-- `create view` for it with a different column list, and `create or replace view` can only APPEND
+-- columns — so the earliest definer could never impose the latest one's shape and had to DROP,
+-- taking its dependents with it. That is a real window on EVERY deploy, roughly sixteen files
+-- wide, in which the view and the segment spine do not exist. Tolerable only while nothing
+-- user-facing read them, which stopped being true when the stock page began drawing business
+-- lines. The header above still records WHY the view carries what it carries; only the DDL moved.
 
-comment on view market.security_segment_current is
-  'Latest annual revenue and operating income per disclosed business line, with each line''s share of its own split. Restricted to partition 1 — the finest split that reconciles to the filing — so the rows on one (security, axis) can safely be summed. operating_margin_pct is a SEGMENT margin: it excludes unallocated corporate cost by design and does not roll up to the company''s operating margin.';
 
 -- ── Grants and RLS ────────────────────────────────────────────────────────────────────────────
+-- `security_segment_current` is granted where it is defined, in migration 157.
 grant select on market.segment_axis, market.security_segment, market.segment_concept,
-                market.segment_alias, market.segment_parser, market.security_segment_current
+                market.segment_alias, market.segment_parser
   to anon, authenticated, service_role;
 grant insert, update, delete on market.segment_axis, market.security_segment,
                                 market.segment_concept, market.segment_alias, market.segment_parser

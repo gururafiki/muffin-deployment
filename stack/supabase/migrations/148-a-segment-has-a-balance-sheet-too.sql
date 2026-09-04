@@ -103,96 +103,16 @@ on conflict (metric_code, source_code) do update
 --
 -- Assets come from a SEPARATE lateral because they are an instant: the latest one at or before the
 -- annual period end, rather than a row in the same pivot.
-drop view if exists market.security_segment_current;
-create view market.security_segment_current as
-with latest as (
-  select distinct on (g.security_id, g.axis, g.member_code, g.metric_code)
-    g.security_id, g.axis, g.member_code, g.metric_code,
-    g.value, g.currency_code, g.period_ending, g.accession_number
-  from market.security_segment g
-  where g.partition_id = 1 and g.period_type = 'annual'
-  order by g.security_id, g.axis, g.member_code, g.metric_code, g.period_ending desc
-),
-pivoted as (
-  select
-    l.security_id, l.axis, l.member_code,
-    max(l.currency_code)                                            as currency_code,
-    max(l.period_ending)                                            as period_ending,
-    max(l.accession_number)                                         as accession_number,
-    max(l.value) filter (where l.metric_code = 'revenue')            as revenue,
-    max(l.value) filter (where l.metric_code = 'operating_income')   as operating_income,
-    max(l.value) filter (where l.metric_code = 'capital_expenditure') as capital_expenditure,
-    max(l.value) filter (where l.metric_code = 'depreciation')       as depreciation,
-    max(l.value) filter (where l.metric_code = 'cost_of_revenue')    as cost_of_revenue
-  from latest l
-  group by l.security_id, l.axis, l.member_code
-)
-select
-  p.security_id,
-  p.axis,
-  a.kind,
-  p.member_code,
-  c.code as concept_code,
-  c.name as concept_name,
-  p.revenue,
-  p.operating_income,
-  p.capital_expenditure,
-  p.depreciation,
-  p.cost_of_revenue,
-  ast.value as total_assets,
-  -- A MARGIN, not a "profitability". Segment operating income excludes unallocated corporate cost
-  -- by design (ASC 280 / IFRS 8), so these do not sum to the company's own operating margin and
-  -- must never be presented as if they did.
-  case when p.revenue is not null and p.revenue <> 0
-       then round(100 * p.operating_income / p.revenue, 2) end as operating_margin_pct,
-  case when p.revenue is not null and p.revenue <> 0 and p.cost_of_revenue is not null
-       then round(100 * (p.revenue - p.cost_of_revenue) / p.revenue, 2) end as gross_margin_pct,
-  -- Above 1 the division is growing its asset base faster than it is consuming it. The single
-  -- clearest read on whether a business line is building or harvesting.
-  case when p.depreciation is not null and p.depreciation <> 0
-       then round(p.capital_expenditure / p.depreciation, 2) end as capex_to_depreciation,
-  case when ast.value is not null and ast.value <> 0
-       then round(100 * p.operating_income / ast.value, 2) end as return_on_segment_assets_pct,
-  round(100 * p.revenue / nullif(sum(p.revenue) over (partition by p.security_id, p.axis), 0), 2)
-    as revenue_share_pct,
-  p.currency_code,
-  p.period_ending,
-  p.accession_number
-from pivoted p
--- A SCALAR SUBQUERY, NOT A JOIN. `segment_axis` is keyed (taxonomy, axis) and the `srt:` axes are
--- shared between us-gaap and ifrs-full filers, so the same axis name legitimately appears twice —
--- a plain join would return every segment row TWICE and double every company's revenue in the view
--- that exists to prevent exactly that.
-cross join lateral (
-  select ax.kind from market.segment_axis ax where ax.axis = p.axis
-  order by ax.priority desc, ax.taxonomy limit 1
-) a
--- The balance-sheet figure AT or before the period end. Separate because an instant is not a flow
--- and cannot share the pivot's period grain.
-left join lateral (
-  select g.value
-  from market.security_segment g
-  where g.security_id = p.security_id and g.axis = p.axis and g.member_code = p.member_code
-    and g.metric_code = 'total_assets' and g.period_type = 'instant' and g.partition_id = 1
-    and g.period_ending <= p.period_ending
-  order by g.period_ending desc
-  limit 1
-) ast on true
--- SAME REASON, AND THE SPECIFIC ALIAS MUST WIN. A member can carry both a company-scoped mapping
--- and a generic one; a plain left join would emit the row once per alias.
-left join lateral (
-  select al.concept_code
-  from market.segment_alias al
-  where al.member_code = p.member_code
-    and (al.security_id = p.security_id or al.security_id is null)
-  order by (al.security_id is not null) desc
-  limit 1
-) al on true
-left join market.segment_concept c on c.code = al.concept_code;
+-- ── `security_segment_current` IS DEFINED ONCE, IN MIGRATION 157 ──────────────────────────────
+-- It used to be defined here too. FIVE migrations (141, 148, 149, 150, 157) each carried a
+-- `create view` for it with a different column list, and `create or replace view` can only APPEND
+-- columns — so the earliest definer could never impose the latest one's shape and had to DROP,
+-- taking its dependents with it. That is a real window on EVERY deploy, roughly sixteen files
+-- wide, in which the view and the segment spine do not exist. Tolerable only while nothing
+-- user-facing read them, which stopped being true when the stock page began drawing business
+-- lines. The header above still records WHY the view carries what it carries; only the DDL moved.
 
-comment on view market.security_segment_current is
-  'Latest annual revenue, operating income, capex, depreciation and cost of revenue per disclosed business line, with segment assets at the matching date and the ratios that follow. Restricted to partition 1 — the finest split that reconciles — so the rows on one (security, axis) can safely be summed. The margins are SEGMENT margins: they exclude unallocated corporate cost by design and do not roll up to the company''s own.';
 
-grant select on market.security_segment_current to anon, authenticated, service_role;
+-- `security_segment_current` is granted where it is defined, in migration 157.
 
 notify pgrst, 'reload schema';
