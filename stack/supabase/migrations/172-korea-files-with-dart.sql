@@ -249,9 +249,10 @@ do $$ begin
   -- cron and did exactly that, and `derive-classifications` still skips 29 days in 30.
   perform cron.schedule('muffin-kr-segments', '4-59/5 * * * *',
     $c$ select market.cron_post('security-kr-segments') $c$);
-  -- Discovery is cheap per call but needs many: 61 list calls took 247 s, so it walks a window per
-  -- run and remembers where it stopped. Quarter-hourly is plenty — it converges in a few hours and
-  -- then only picks up newly filed reports.
+  -- Discovery is cheap per call but needs many, and DART answers in ~3.5 s from the node (measured
+  -- 3.45/3.51/3.45), so a 70 s run affords ~15 calls against a window's ~35: it covers PART of a
+  -- window per run and resumes at the exact (cls, page) it stopped on. Quarter-hourly converges in
+  -- a day or so, after which it only picks up newly filed reports.
   perform cron.schedule('muffin-kr-filings', '11-59/15 * * * *',
     $c$ select market.cron_post('kr-filings') $c$);
 exception when others then

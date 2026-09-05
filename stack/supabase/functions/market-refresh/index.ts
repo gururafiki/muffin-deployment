@@ -2384,7 +2384,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       const { data: pending, error: pErr } = await market
         .from('pending_kr_segments')
         .select('security_id,accession_number,report_type,filing_date')
-        .limit(scopeLimit ?? 1)
+        // FOUR, NOT ONE — because a WARM filing costs ~4 s and a cold one costs the whole budget.
+        // The loop is bounded by the deadline either way, so this cannot overrun: a page of cold
+        // filings still warms exactly one and stops. What it buys is that a run which finds
+        // filings already cached (the previous run's warm-ups, or a re-parse after a
+        // `segment_parser.version` bump, where every instance is already stored) drains them
+        // together instead of one per five minutes.
+        .limit(scopeLimit ?? 4)
       if (pErr) throw new Error(`pending_kr_segments read failed: ${pErr.message}`)
 
       let written = 0
@@ -2393,6 +2399,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       let noSegments = 0
       let tooLarge = 0
       let failed = 0
+      let warmed = 0
       let firstError: string | null = null
       let lastError: string | null = null
 
@@ -2426,7 +2433,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
                 dedupeBy(rows.slice(i, i + 500),
                   (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.parent_member ?? ''}|` +
                     `${r.metric_code}|${r.period_type}|${r.period_ending}`),
-                { onConflict: 'security_id,axis,member_code,metric_code,period_type,period_ending' },
+                // `parent_key` IS PART OF THE KEY, and omitting it does not merely mis-dedupe —
+                // it names a constraint that does not exist, so the upsert fails outright with
+                // `no unique or exclusion constraint matching the ON CONFLICT specification`. It
+                // is a STORED GENERATED column (`coalesce(parent_member, '')`) because a primary
+                // key admits no NULLs and the flat case must keep working. Same target as the SEC
+                // path, deliberately — two writers to one table must not disagree about its key.
+                { onConflict: 'security_id,axis,member_code,parent_key,metric_code,period_type,period_ending' },
               )
               if (error) throw new Error(`security_segment upsert failed: ${error.message}`)
             }
@@ -2442,16 +2455,34 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           }).eq('security_id', item.security_id).eq('accession_number', item.accession_number)
           if (tErr) throw new Error(`segments_parsed_at update failed: ${tErr.message}`)
         } catch (e) {
-          failed++
           const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          if (firstError === null) firstError = msg
-          lastError = msg
+          // A DEADLINE ABORT ON A COLD FILING IS A WARM-UP, NOT A FAILURE — and calling it one
+          // would make this resource report a failure on every other run for ever.
+          //
+          // Measured in production 2026-09-05: a cold filing takes 73.9 s through the cache
+          // (802,368 bytes for Samsung, 982,619 for the queue head) against a fetch budget of
+          // ~66 s, so the FIRST attempt at any filing always aborts. `proxy_ignore_client_abort on`
+          // means nginx keeps reading and stores the response anyway — verified, the next request
+          // for the same filing is a HIT in 1.6 ms — so that run did the useful half of the work
+          // and the next run parses it in ~4 s.
+          //
+          // Counting it as `failed` would put a permanent error on a healthy resource, which is
+          // how an alert becomes one nobody reads. It is reported as `warmed`, and it deliberately
+          // does NOT set lastError: the run succeeded at what it could do in the time.
+          if (e instanceof Error && /aborted|AbortError/i.test(msg)) {
+            warmed++
+          } else {
+            failed++
+            if (firstError === null) firstError = msg
+            lastError = msg
+          }
         }
       }
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
-        resource, written, filings, noInstance, noSegments, tooLarge, failed, firstError, lastError,
+        resource, written, filings, warmed, noInstance, noSegments, tooLarge, failed,
+        firstError, lastError,
         remaining: await backlogSize(market, 'pending_kr_segments'),
       })
     }

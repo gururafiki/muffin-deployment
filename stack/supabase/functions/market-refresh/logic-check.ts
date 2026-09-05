@@ -1361,6 +1361,37 @@ console.log('\nresource registry — the cron and the function agree')
   // in migration 56, which shipped correct, was written correctly, and sat at 0 rows because the
   // backlog that drives it could not reach the population that needed it. The SQL test asserts the
   // row; this asserts the code actually uses it.
+  // ── TWO WRITERS TO ONE TABLE MUST NOT DISAGREE ABOUT ITS KEY ────────────────────────────────
+  //
+  // `security_segment` is written by the SEC path and the DART path. The Korean one shipped with
+  // `security_id,axis,member_code,metric_code,period_type,period_ending` — the SEC target minus
+  // `parent_key` — and that does not merely mis-dedupe: it names a constraint that does not exist,
+  // so every write failed with `no unique or exclusion constraint matching the ON CONFLICT
+  // specification`. Nothing offline could see it. The behaviour tests insert rows directly rather
+  // than through a resource, `deno check` cannot know the table's key, and the migration suite
+  // never runs a resource — it took the first live parse.
+  //
+  // `parent_key` is a STORED GENERATED column (`coalesce(parent_member, '')`) because a primary key
+  // admits no NULLs and the flat case must keep working, which is exactly why it is easy to leave
+  // out of a hand-copied target.
+  {
+    // Anchored on the TARGET's own shape, not on distance from `.from('security_segment')`: the
+    // SEC call site carries a nine-line comment between the two, so a windowed match found one
+    // writer and reported the pair as consistent — a guard that cannot see the second thing it is
+    // comparing.
+    const targets = [...index.matchAll(/onConflict: '(security_id,axis,member_code[^']*)'/g)]
+      .map((m) => m[1])
+    const distinct = [...new Set(targets)]
+    check(targets.length >= 2 && distinct.length === 1,
+      'every security_segment writer uses the SAME conflict target',
+      distinct.length === 1
+        ? `${targets.length} writers, all on ${distinct[0]}`
+        : `writers disagree: ${distinct.join('  vs  ')}`)
+    check(distinct.length === 1 && distinct[0].includes('parent_key'),
+      'and that target names parent_key, which is part of the primary key',
+      distinct[0] ?? '(none found)')
+  }
+
   check(index.includes('figi_field'),
     'the sweep reads figi_field from exchange_sweep_type')
   check(/figiTypeField,/.test(index) || /figiTypeField:/.test(index),
