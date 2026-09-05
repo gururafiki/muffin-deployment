@@ -366,7 +366,26 @@ export function segmentFactsFrom(
   xml: string,
   axes: SegmentAxisSpec[],
   concepts: SegmentConceptSpec[],
+  /**
+   * Members that cannot be a business line, from `market.segment_member_class`. The two roles need
+   * OPPOSITE treatment, which is why this carries a class rather than being a list.
+   *
+   * `subtotal` is dropped outright: a split containing one double-counts by construction — Chevron
+   * publishes an "aggregation before other operating segments" (230,789m) beside `AllOtherSegments`
+   * (581m), the two reconcile exactly, and the result was served as its business breakdown.
+   *
+   * `residual` is KEPT — it is a genuine part of any split that also names real segments, and
+   * Chevron's own `depreciation` partition needs it to reconcile — but may never be the whole of
+   * one. See the residual-only rule at the emit below.
+   */
+  memberRoles: Iterable<{ memberCode: string; class: string }> = [],
 ): SegmentFact[] {
+  const subtotals = new Set(
+    [...memberRoles].filter((m) => m.class === 'subtotal').map((m) => m.memberCode),
+  )
+  const residuals = new Set(
+    [...memberRoles].filter((m) => m.class === 'residual').map((m) => m.memberCode),
+  )
   const units = parseUnits(xml)
   const contexts = parseContexts(xml)
   const facts = parseFacts(xml, concepts)
@@ -476,6 +495,9 @@ export function segmentFactsFrom(
   const totalsByQualifier = new Map<string, { value: number; priority: number }>()
   /** (concept, qualifier context, metric, period) — the most specific match there is. */
   const totalsByConceptQualifier = new Map<string, number>()
+  /** `axis|metric|periodType|start|end` -> (qualifier member -> value), for facts with NO segment
+   *  dimension. Nested so the members of one axis can be summed without parsing a flat key. */
+  const qualifierMemberTotals = new Map<string, Map<string, number>>()
 
   for (const f of facts) {
     const ctx = contexts.get(f.ctxRef)
@@ -495,6 +517,9 @@ export function segmentFactsFrom(
 
     const dims = [...ctx.dims.entries()]
     const segs = dims.filter(([a]) => isSegment(a))
+    // A SUBTOTAL IS NOT A SEGMENT. Dropped here rather than after partitioning, because a
+    // subtotal plus a residual can reconcile perfectly and would then BE the chosen partition.
+    if (segs.some(([, m]) => subtotals.has(m))) continue
     const unknown = dims.filter(([a]) => !kindOf.has(a))
     // A PINNED QUALIFIER REJECTS THE FACT WHEN ITS MEMBER IS WRONG — see `requiredMember`. This is
     // what keeps a Korean filer's parent-only accounts out of its consolidated segment split.
@@ -502,6 +527,20 @@ export function segmentFactsFrom(
       const req = requiredMemberOf.get(a)
       return req !== undefined && req !== null && req !== m
     })
+    // RECORDED BEFORE THE PIN REJECTS IT, because an elimination fact is exactly what a gross
+    // target is derived from — and migration 173 pins this axis to `OperatingSegmentsMember` so
+    // that eliminations can never become segment MEMBERS. Both are wanted: the fact must not be a
+    // member, and it must still be available as arithmetic. Equinor states no operating-segments
+    // total for `Revenue`, only the consolidated 106,462m and this elimination of -42,421m, and
+    // 106,462 - (-42,421) = 148,883m is exactly what its six segments sum to.
+    if (segs.length === 0 && dims.length === 1 && kindOf.get(dims[0][0]) === 'qualifier') {
+      const [ax, mem] = dims[0]
+      const kk = key(f.metricCode, pt, start, end)
+      const bucket = qualifierMemberTotals.get(`${ax}|${kk}`) ?? new Map<string, number>()
+      bucket.set(mem, f.value)
+      qualifierMemberTotals.set(`${ax}|${kk}`, bucket)
+    }
+
     if (wrongMember) continue
 
     // AN UNKNOWN AXIS DISQUALIFIES THE FACT, whatever else is true of it — checked first so a
@@ -528,6 +567,10 @@ export function segmentFactsFrom(
       // split carries a qualifier its total does not — the ordinary SEC shape — so nothing that
       // reconciles today stops reconciling.
       const qual = qualifierKey(dims)
+      // PER QUALIFIER MEMBER, so a total the filing does not state can be DERIVED from the ones it
+      // does. Equinor publishes no operating-segments total for `Revenue`; it publishes the plain
+      // consolidated figure (106,462m) and the elimination (-42,421m) on the same axis, and
+      // 106,462 - (-42,421) = 148,883 is exactly what its six segments sum to.
       const qk = `${qual}|${k}`
       const heldQ = totalsByQualifier.get(qk)
       if (heldQ === undefined || priority > heldQ.priority) {
@@ -686,8 +729,57 @@ export function segmentFactsFrom(
       const qualified = oneQualifier === null
         ? undefined
         : totalsByQualifier.get(`${oneQualifier}|${flatKey}`)?.value
+
+      // DERIVED FROM THE FILING'S OWN RECONCILIATION, when it states no total for this qualifier.
+      //
+      // A gross split needs a gross target. Where the filer publishes one (Samsung, Hyundai Mobis,
+      // Chevron) `qualified` finds it. Equinor publishes only the CONSOLIDATED figure and the
+      // elimination, both on the same qualifier axis and both undimensioned by segment — so the
+      // operating-segments total is the consolidated figure less every OTHER member of that axis:
+      //
+      //   106,462,000,000 - (-42,421,000,000) = 148,883,000,000
+      //
+      // which is exactly what its six segments sum to. That is arithmetic over facts the filing
+      // states, not an inference about what it meant: without it the split is judged against the
+      // consolidated figure it was never meant to equal, and a correct disclosure reads as a defect.
+      const derived = (() => {
+        if (oneQualifier === null) return undefined
+        const plain = totals.get(flatKey)?.value
+        if (plain === undefined) return undefined
+        const eq = oneQualifier.indexOf('=')
+        if (eq < 0 || oneQualifier.includes('|')) return undefined   // exactly one qualifier axis
+        const axis = oneQualifier.slice(0, eq)
+        const member = oneQualifier.slice(eq + 1)
+        const bucket = qualifierMemberTotals.get(`${axis}|${flatKey}`)
+        if (bucket === undefined) return undefined
+        let others = 0
+        let found = false
+        for (const [m, v] of bucket) {
+          if (m === member) continue
+          others += v
+          found = true
+        }
+        return found ? plain - others : undefined
+      })()
+
+      // THE TARGET IS THE STATED FIGURE THE MEMBERS ACTUALLY ADD UP TO.
+      //
+      // Precedence alone picks the most SPECIFIC total, which is usually right and is wrong for a
+      // gross split whose gross total the filer never states. Equinor's six segments sum to
+      // 148,883m; the filing states the consolidated 106,462m and, on the same qualifier axis, the
+      // elimination of -42,421m — and 106,462 - (-42,421) = 148,883 exactly. Precedence took the
+      // consolidated figure and a correct disclosure read as a defect.
+      //
+      // So: if one of the candidate totals is the one the members reconcile to, that is the target.
+      // Otherwise fall back to precedence unchanged — which is what keeps Chevron honest, where NO
+      // candidate reconciles (its business axis carries only cross-tab halves and a residual) and
+      // the partition search is then left to reject it rather than being handed a total to match.
+      const candidateSum = cands.reduce((a, c) => a + c.value, 0)
+      const reconciling = [conceptQualified, sameConcept, qualified, derived, totals.get(flatKey)?.value]
+        .find((t) => t !== undefined && Math.abs(candidateSum - t) <= toleranceFor(t))
+
       const target = g0.parentMember === null
-        ? conceptQualified ?? sameConcept ?? qualified ?? totals.get(flatKey)?.value
+        ? reconciling ?? conceptQualified ?? sameConcept ?? qualified ?? derived ?? totals.get(flatKey)?.value
         : flatValue.get(
           `${g0.parentAxis}|${g0.parentMember}|${g0.metricCode}|${g0.periodType}|` +
           `${g0.periodStart}|${g0.periodEnding}`,
@@ -702,8 +794,37 @@ export function segmentFactsFrom(
       if (placed > bestPlaced) { bestPlaced = placed; bestMap = map }
     }
 
+    // A RESIDUAL ALONE IS NOT A SPLIT.
+    //
+    // `bestMap` is learned from the bucket that places the most members and applied to every metric
+    // on the axis — deliberately, since segment ASSETS and PROFIT never reconcile and could not
+    // otherwise be placed at all. The cost is that a bucket holding only SOME of those members
+    // inherits the partition anyway, and when the ones it holds are all residual the result is the
+    // leftovers wearing the company's name: Chevron served `AllOtherSegments 581m` as its FY2025
+    // revenue breakdown, against a consolidated 231,370,000,000.
+    //
+    // The narrow rule is the only one that survives its own filing. Demanding the inherited
+    // partition be COMPLETE would discard Chevron's `total_assets`, which reconciles exactly on
+    // Upstream + Downstream with no residual; demanding it RECONCILE in its own bucket would reject
+    // segment profit everywhere, which ASC 280 and IFRS 8 guarantee will never sum. So: a partition
+    // must contain at least one member that is not a residual. The residual keeps its place beside
+    // real segments and loses only the ability to be a split by itself.
+    const realMembers = new Set<string>()
     for (const c of group) {
-      const partitionId = bestMap?.get(c.memberCode) ?? 0
+      const p = bestMap?.get(c.memberCode) ?? 0
+      if (p > 0 && !residuals.has(c.memberCode)) {
+        realMembers.add(`${c.metricCode}|${c.periodType}|${c.periodStart}|${c.periodEnding}|${p}`)
+      }
+    }
+
+    for (const c of group) {
+      const inherited = bestMap?.get(c.memberCode) ?? 0
+      const partitionId = inherited > 0 &&
+          !realMembers.has(
+            `${c.metricCode}|${c.periodType}|${c.periodStart}|${c.periodEnding}|${inherited}`,
+          )
+        ? 0
+        : inherited
       // ITS OWN BUCKET'S TARGET, or NOTHING. A bucket whose metric and span the filing never
       // states undimensioned has no consolidated figure to have been reconciled against, and
       // saying so is the honest answer — `check_segments_reconcile` skips a null target rather

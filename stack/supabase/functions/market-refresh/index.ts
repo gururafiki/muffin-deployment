@@ -2367,6 +2367,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       const { data: axisRows, error: aErr } = await market
         .from('segment_axis').select('taxonomy,axis,kind,priority,required_member')
       if (aErr) throw new Error(`segment_axis read failed: ${aErr.message}`)
+      // WHICH MEMBERS CANNOT BE A BUSINESS LINE, and in which of the two ways. Read here rather
+      // than hardcoded: they are standard taxonomy members, more will turn up, and adding one must
+      // not need a deploy. A control table nothing reads is decoration.
+      const { data: exclRows, error: xErr } = await market
+        .from('segment_member_class').select('member_code,class')
+      if (xErr) throw new Error(`segment_member_class read failed: ${xErr.message}`)
+      const memberRoles = (exclRows ?? []).map((r) => ({ memberCode: String(r.member_code), class: String(r.class) }))
       const axes: SegmentAxisSpec[] = (axisRows ?? []).map((r) => ({
         axis: String(r.axis),
         kind: String(r.kind) as SegmentAxisSpec['kind'],
@@ -2416,7 +2423,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
             String(item.accession_number), Math.max(10_000, deadline - Date.now() - 12_000),
           )
           const oversize = xml === dart.TOO_LARGE
-          const facts = typeof xml === 'string' ? segmentFactsFrom(xml, axes, concepts) : []
+          const facts = typeof xml === 'string' ? segmentFactsFrom(xml, axes, concepts, memberRoles) : []
           filings++
           if (oversize) tooLarge++
           else if (xml === null) noInstance++
@@ -2500,6 +2507,11 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         .from('segment_axis')
         .select('taxonomy,axis,kind,priority,required_member')
       if (aErr) throw new Error(`segment_axis read failed: ${aErr.message}`)
+      // The same subtotal list the SEC handler reads — one control table, both regulators.
+      const { data: exclRows2, error: xErr2 } = await market
+        .from('segment_member_class').select('member_code,class')
+      if (xErr2) throw new Error(`segment_member_class read failed: ${xErr2.message}`)
+      const memberRoles = (exclRows2 ?? []).map((r) => ({ memberCode: String(r.member_code), class: String(r.class) }))
       const axes: SegmentAxisSpec[] = (axisRows ?? []).map((r) => ({
         axis: String(r.axis),
         kind: String(r.kind) as SegmentAxisSpec['kind'],
@@ -2574,7 +2586,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           // The second gate, for the HTML-index path where no size was known up front.
           const oversize = refused || fetched === TOO_LARGE
           const xml = typeof fetched === 'string' ? fetched : null
-          const facts = xml === null ? [] : segmentFactsFrom(xml, axes, concepts)
+          const facts = xml === null ? [] : segmentFactsFrom(xml, axes, concepts, memberRoles)
           filings++
           // THREE OUTCOMES, NOT TWO. "no XBRL to read", "too large to read" and "read, no segments"
           // are different facts; counting a refusal as an absence is how this pipeline has twice
