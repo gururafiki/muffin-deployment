@@ -2135,14 +2135,15 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       const budget = () => Math.min(30_000, Math.max(2_000, deadline - Date.now()))
 
       const { data: cursorRows, error: cErr } = await market
-        .from('dart_discovery_cursor').select('window_end,mapped_at').limit(1)
+        .from('dart_discovery_cursor').select('window_end,cls,page,mapped_at').limit(1)
       if (cErr) throw new Error(`dart_discovery_cursor read failed: ${cErr.message}`)
-      const cursor = cursorRows?.[0] ?? { window_end: null, mapped_at: null }
+      const cursor = cursorRows?.[0] ?? { window_end: null, cls: 'Y', page: 1, mapped_at: null }
 
       let mapped = 0
       let filingsWritten = 0
       let walkedCount = 0
       let windows = 0
+      let sweepPosition: string | null = null
       let listCalls = 0
       let firstError: string | null = null
       let lastError: string | null = null
@@ -2172,17 +2173,29 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         const ymd = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '')
         const seen = new Map<string, dart.DartFiling>()
 
+        // RESUMES WHERE THE LAST RUN STOPPED, AND ONLY ADVANCES A WINDOW IT ACTUALLY FINISHED.
+        // A window is ~35 calls and a run affords ~15 (DART answers in ~3.5 s from the node), so
+        // "walk two windows per run" is not achievable and pretending otherwise loses pages: the
+        // old shape advanced `end` when the deadline cut the page loop short, recording a window as
+        // swept with two thirds of it unread. A refused sweep must not read as a finished one.
+        let cls: 'Y' | 'K' = (cursor.cls === 'K' ? 'K' : 'Y')
+        let page = Math.max(1, Number(cursor.page ?? 1))
+        let exhausted = false
+
+        outer:
         while (Date.now() < deadline - 20_000 && windows < 2) {
           const from = new Date(end)
           from.setMonth(from.getMonth() - 3)
           from.setDate(from.getDate() + 1)
-          for (const cls of ['Y', 'K'] as const) {
-            let page = 1
-            let pages = 1
-            while (page <= pages && Date.now() < deadline - 15_000) {
+          // Both share classes for this window, starting wherever the cursor left off.
+          for (const c of (['Y', 'K'] as const).slice(cls === 'K' ? 1 : 0)) {
+            cls = c
+            let pages = page
+            while (page <= pages) {
+              if (Date.now() > deadline - 15_000) break outer
               try {
                 const res = await dart.listFilings(
-                  { from: ymd(from), to: ymd(end), corpCls: cls, page }, budget(),
+                  { from: ymd(from), to: ymd(end), corpCls: c, page }, budget(),
                 )
                 listCalls++
                 pages = Math.max(1, res.totalPages)
@@ -2193,12 +2206,19 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
                 const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
                 if (firstError === null) firstError = msg
                 lastError = msg
-                break
+                // A window we could not read is NOT a window we have read. Stop here and let the
+                // next run resume at this exact page rather than advancing past it.
+                break outer
               }
               page++
             }
+            page = 1
           }
+          // Both classes ran to their last page: this window is genuinely done.
           windows++
+          exhausted = true
+          cls = 'Y'
+          page = 1
           end = new Date(from)
           end.setDate(end.getDate() - 1)
         }
@@ -2237,12 +2257,17 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // Two full years of windows is past every December year-end twice; anything still unmapped
         // does not file a periodic report we can read, and re-walking history for ever would spend
         // a call budget on a settled answer.
-        const done = end < new Date(Date.now() - 2 * 365 * 24 * 3600 * 1000)
+        // `exhausted` gates the completion test: two years of windows is the stopping rule, and a
+        // run that merely ran out of budget inside the current window has not reached it.
+        const done = exhausted && end < new Date(Date.now() - 2 * 365 * 24 * 3600 * 1000)
         const { error: uErr } = await market.from('dart_discovery_cursor').update({
           window_end: end.toISOString().slice(0, 10),
+          cls,
+          page,
           mapped_at: done ? new Date().toISOString() : null,
           updated_at: new Date().toISOString(),
         }).eq('singleton', true)
+        sweepPosition = `${end.toISOString().slice(0, 10)} ${cls} p${page}`
         if (uErr) throw new Error(`dart_discovery_cursor update failed: ${uErr.message}`)
       } else {
         // ── PHASE B: one company's whole history, no window limit ────────────────────────────
@@ -2312,6 +2337,9 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       return json({
         resource, phase: cursor.mapped_at === null ? 'mapping' : 'history',
         mapped, filings: filingsWritten, walked: walkedCount, windows, listCalls,
+        // WHERE THE SWEEP IS, not just how much it did. `windows: 0` is the normal case for a run
+        // that made real progress inside one window, so without the position it reads as a stall.
+        ...(cursor.mapped_at === null ? { at: sweepPosition } : {}),
         firstError, lastError,
         // ITS OWN BACKLOG, not the parse queue's. `remaining` has to mean the same thing in every
         // resource, and reporting `pending_kr_segments` here would describe a different resource's

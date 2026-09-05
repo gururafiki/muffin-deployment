@@ -67,6 +67,33 @@ export interface ListPage {
  * and `'013'` is its "no data" answer, which is an ANSWER rather than a fault. Treating either as a
  * transport failure would make a normal empty window look like an outage.
  */
+/**
+ * TURN THE HANDSHAKE FAILURE INTO A SENTENCE.
+ *
+ * DART serves TLS 1.2 with the static-RSA suite `AES128-GCM-SHA256` and refuses every ECDHE suite
+ * (measured 2026-09-05). Deno's TLS is rustls, which supports forward-secret key exchange only, so
+ * a DIRECT fetch can never succeed — on any platform. All that reaches the caller is
+ * `error sending request ... received fatal alert: HandshakeFailure`, which names neither the cause
+ * nor the fix.
+ *
+ * In production the call goes through http-cache as plain HTTP and OpenResty's OpenSSL does the
+ * TLS, which works. So this failure means one thing in practice: `DART_BASE_URL` is unset or the
+ * cache is disabled. Say so, rather than leaving the next person to re-derive it from an alert
+ * number. See `origins.ts` for the measurement.
+ */
+function fetchFailure(e: unknown): Error {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (dartOrigin().startsWith('https://')) {
+    return new Error(
+      `dart is being called directly over TLS and Deno cannot complete that handshake ` +
+      `(DART offers only the static-RSA AES128-GCM-SHA256; rustls requires ECDHE). ` +
+      `Route it through http-cache by setting DART_BASE_URL — the proxy does the TLS. ` +
+      `Underlying: ${msg}`,
+    )
+  }
+  return e instanceof Error ? e : new Error(msg)
+}
+
 export async function listFilings(opts: ListOptions, timeoutMs: number): Promise<ListPage> {
   const q = new URLSearchParams({
     crtfc_key: key(),
@@ -82,7 +109,12 @@ export async function listFilings(opts: ListOptions, timeoutMs: number): Promise
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {
-    const res = await fetch(`${dartOrigin()}/api/list.json?${q}`, { signal: ctl.signal })
+    let res: Response
+    try {
+      res = await fetch(`${dartOrigin()}/api/list.json?${q}`, { signal: ctl.signal })
+    } catch (e) {
+      throw fetchFailure(e)
+    }
     if (!res.ok) throw new Error(`dart list ${res.status}`)
     const body = await res.json()
     return parseListBody(body)
@@ -132,7 +164,12 @@ export async function fetchInstance(
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {
-    const res = await fetch(`${dartOrigin()}/api/fnlttXbrl.xml?${q}`, { signal: ctl.signal })
+    let res: Response
+    try {
+      res = await fetch(`${dartOrigin()}/api/fnlttXbrl.xml?${q}`, { signal: ctl.signal })
+    } catch (e) {
+      throw fetchFailure(e)
+    }
     if (res.status === 404) return null
     if (!res.ok) throw new Error(`dart xbrl ${res.status} for ${rceptNo}`)
 

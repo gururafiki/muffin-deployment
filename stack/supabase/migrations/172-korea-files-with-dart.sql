@@ -201,11 +201,25 @@ create table if not exists market.dart_discovery_cursor (
   singleton    boolean primary key default true check (singleton),
   -- The window most recently swept, walking backwards from the present.
   window_end   date,
+  -- WHERE INSIDE THAT WINDOW. A window is ~35 calls (Y and K, ~10 pages each at page_count=100) and
+  -- DART answers in ~3.5 s from the node — measured 2026-09-05, three consecutive pages at 3.45,
+  -- 3.51, 3.45 s. A 70 s run therefore affords ~15 calls and CANNOT finish a window. Without these
+  -- two columns the sweep advances `window_end` on the deadline regardless, recording a window as
+  -- swept when two thirds of its pages were never read — a refused sweep reading as a finished one,
+  -- which is the `exchange-listings` 429 defect exactly. The companies on those pages are then
+  -- missed silently, and phase A never returns to that window.
+  cls          text not null default 'Y' check (cls in ('Y','K')),
+  page         int  not null default 1 check (page >= 1),
   -- Set once every listed filer we hold has been mapped, so the sweep stops re-walking history and
   -- the resource moves on to per-company history, which has no window limit at all.
   mapped_at    timestamptz,
   updated_at   timestamptz not null default now()
 );
+-- Re-applied on every deploy, so the columns are added rather than assumed — the table already
+-- exists in production from an earlier apply of this same file.
+alter table market.dart_discovery_cursor
+  add column if not exists cls  text not null default 'Y',
+  add column if not exists page int  not null default 1;
 insert into market.dart_discovery_cursor (singleton) values (true) on conflict do nothing;
 
 grant select, insert, update on market.dart_discovery_cursor to service_role;

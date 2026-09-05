@@ -66,5 +66,23 @@ export const wikidata = () => origin('WIKIDATA_BASE_URL', 'https://query.wikidat
  * is 802 KB and takes 73.5 s from outside Korea, measured, against a 90 s worker. A filed document
  * is immutable, so the entry is good for ever — and with `proxy_ignore_client_abort on` a run that
  * gives up still leaves the next one an instant hit.
+ *
+ * AND THE FALLBACK BELOW CANNOT WORK FROM DENO — THIS IS THE ONE ORIGIN WHERE THE CACHE IS
+ * REQUIRED FOR CORRECTNESS, NOT SPEED.
+ *
+ * Every other default here is the real origin precisely so http-cache stays removable without an
+ * outage. DART breaks that invariant. Measured 2026-09-05: it serves TLS 1.2 ONLY — a forced
+ * TLS 1.3 handshake is refused with `tlsv1 alert protocol version` — and offers only the
+ * static-RSA suite `AES128-GCM-SHA256`, rejecting every ECDHE suite tried. Deno's TLS is rustls,
+ * which implements forward-secret key exchange ONLY and has never supported static RSA, so a
+ * direct `fetch` fails the handshake on every platform, not just locally. It surfaces as
+ * `error sending request ... received fatal alert: HandshakeFailure`, which names nothing.
+ *
+ * The proxy hop is what makes Korea reachable at all: the function speaks PLAIN HTTP to nginx and
+ * OpenResty's OpenSSL does the TLS. Verified from inside the running container — `wget
+ * https://opendart.fss.or.kr/` answers 200 there while Deno cannot complete the handshake.
+ *
+ * So `http_cache_enabled: false` does not degrade Korea, it disables it. `fetchFailure()` in
+ * dart.ts turns the opaque alert into that sentence rather than leaving it to be rediscovered.
  */
 export const dart = () => origin('DART_BASE_URL', 'https://opendart.fss.or.kr')
