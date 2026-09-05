@@ -555,12 +555,23 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // Both surface theories died on measurement — 34 of 40 `-R.BK` NVDR symbols carry performance
   // perfectly well, and the series are nineteen years deep, not young.
   //
-  // So marking is now gated on a CONTROL probe when nothing answered during isolation, exactly as
-  // `fetchWithIsolation` gates its own `dead` set. Deleting either half re-opens it: the counter
-  // that notices nothing answered, or the probe that asks whether that is our fault.
+  // THE FIRST FIX GATED THE PROBE ON `isolatedAnswered === 0`, AND IT RECURRED THE NEXT DAY.
+  // Measured 2026-09-05, one day after the note above: ten MORE Thai securities marked in a single
+  // run — Siam City Cement, Thai Union, Carabao, Central Retail, TMBThanachart — every one holding
+  // recent bars that MOVE, with `market.data_defect.contradicted_negative_cache` sitting at 10-12
+  // throughout. The gate is what let it through: yfinance throttles PROGRESSIVELY, so SOME
+  // isolated calls answer, `isolatedAnswered` is non-zero, and the probe that would have caught
+  // the refusal never runs. Confirmed in one measurement — `SCCC-R.BK` and `CCET-R.BK` answered 25
+  // bars each, and minutes later returned nothing, as did AAPL.
+  //
+  // "Some symbols answered, therefore the provider is up" is the tally-shaped reasoning this file
+  // rejects everywhere else; it survived here because it reads as an optimisation. The probe now
+  // runs on ANY run that would mark — one extra call, against 30 days of wrongly excluding a
+  // security from the backlog that would have corrected its returns.
   check(
-    index.includes('confirmedDead.length > 0 && isolatedAnswered === 0'),
-    'security-performance will not mark when NOTHING answered during isolation',
+    index.includes('confirmedDead.length > 0 && !throttledOut') &&
+      !index.includes('confirmedDead.length > 0 && isolatedAnswered === 0'),
+    'security-performance runs the control probe on ANY run that would mark, not only when nothing answered',
     'confirmedDead.length > 0 && isolatedAnswered === 0',
   )
   check(

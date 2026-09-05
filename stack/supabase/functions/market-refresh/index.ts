@@ -2336,7 +2336,13 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource, phase: cursor.mapped_at === null ? 'mapping' : 'history',
-        mapped, filings: filingsWritten, walked: walkedCount, windows, listCalls,
+        // `written` AS WELL AS `filings`, because `refresh_run.written` is a GENERATED column over
+        // this jsonb and a resource that never names the key contributes NOTHING to the throughput
+        // panel — it draws as a flat line while the resource is doing real work. Measured
+        // 2026-09-05: 42 runs, `written` null throughout, 118 and 92 filings written in the last
+        // two. `filings` is kept as the resource's own noun; `written` is the shared unit.
+        mapped, written: filingsWritten, filings: filingsWritten,
+        walked: walkedCount, windows, listCalls,
         // WHERE THE SWEEP IS, not just how much it did. `windows: 0` is the normal case for a run
         // that made real progress inside one window, so without the position it reads as a stall.
         ...(cursor.mapped_at === null ? { at: sweepPosition } : {}),
@@ -6672,9 +6678,27 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         // stale returns behind it, because a marked security is excluded from the backlog that
         // would have corrected them.
         //
-        // Only when nothing answered: a run where some isolations succeeded has already proved the
-        // provider is up, and paying for an extra call every time would be waste.
-        if (confirmedDead.length > 0 && isolatedAnswered === 0 && !throttledOut) {
+        // IT RUNS WHENEVER ANYTHING WOULD BE MARKED, AND THE OLD GATE IS WHY IT NEVER FIRED.
+        //
+        // This used to require `isolatedAnswered === 0`, reasoning that "a run where some
+        // isolations succeeded has already proved the provider is up". That is the one thing
+        // yfinance does not honour: it throttles PROGRESSIVELY, answering some symbols and
+        // silently omitting others from a 200 — the behaviour that has defeated every tally-based
+        // rule in this file, and which `fetchWithIsolation` exists for one level up. Under it some
+        // isolated calls succeed, the gate stays shut, and the refused symbols are marked as
+        // permanently unanswerable.
+        //
+        // Measured 2026-09-05: TEN Thai securities marked in one run — Siam City Cement, Thai
+        // Union, Carabao, Central Retail, TMBThanachart — every one of them holding recent bars
+        // that MOVE, which `market.data_defect.contradicted_negative_cache` had been reporting at
+        // 10-12 for days. Probing the provider found `SCCC-R.BK` and `CCET-R.BK` answering 25 bars
+        // each; probing again minutes later returned nothing for them AND nothing for AAPL, which
+        // is the throttle, visible in one measurement.
+        //
+        // So the cost is now one control call on any run that would mark, instead of one on a run
+        // where nothing answered. That is ~8 calls a day against 30 days of wrongly excluding a
+        // security from the backlog that would have corrected its returns.
+        if (confirmedDead.length > 0 && !throttledOut) {
           let controlAnswered = false
           try {
             const probe = await loadEquityReturns(
