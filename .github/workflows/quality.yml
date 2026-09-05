@@ -198,6 +198,22 @@ jobs:
               fi
             done
             echo "  ok  $(echo "$files" | wc -l | tr -d ' ') migrations"
+
+            # A RE-PARSE TRIGGER MUST FIRE ONCE, NOT ON EVERY DEPLOY.
+            # `segment_parser.version` re-queues EVERY filing when it changes. Migration 169
+            # bumped it unguarded and therefore re-queued the whole corpus on every deploy:
+            # measured 2026-09-05 the version had reached 15, `pending_segments` stood at 213,500
+            # against a drain of 20 per run, and 94% of the filings behind a SERVED split were
+            # stale — not because the queue was slow, but because each deploy invalidated the work
+            # the last one had done. Migration 154 guards the same bump correctly and its comment
+            # predicted this exactly, one file earlier.
+            # Pass 2 is where it shows: an unguarded bump moves the number a second time.
+            v=$(psql -h localhost -U postgres -tAc "select version from market.segment_parser" 2>/dev/null | tr -d ' ')
+            if [ "$pass" = "1" ]; then v1="$v"; fi
+            if [ "$pass" = "2" ] && [ -n "$v1" ] && [ "$v" != "$v1" ]; then
+              echo "::error::segment_parser.version moved $v1 -> $v on a re-apply. A version bump must be guarded by market.one_shot, or every deploy re-queues the entire corpus."
+              exit 1
+            fi
           done
 
       # Applying cleanly is only half the contract — a view can be valid SQL and still express an
