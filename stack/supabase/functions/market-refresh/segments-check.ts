@@ -636,5 +636,93 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
   }
 }
 
+// N. A TOTAL BELONGS TO A QUALIFIER CONTEXT, AND SEVERAL CAN LOOK UNDIMENSIONED AT ONCE.
+//    A qualifier narrows a fact without sub-dividing it, so it is correctly ignored when deciding
+//    WHETHER something is a segment fact — and must NOT be ignored when deciding what that fact
+//    reconciles TO. Measured on Samsung's FY2024 filing, four Revenue facts carry no segment axis
+//    and so all look like "the consolidated total":
+//
+//        300.87T  Consolidated                              <- geography sums to this
+//        329.39T  Consolidated + OperatingSegments          <- the four divisions sum to this
+//        -28.52T  Consolidated + MaterialReconcilingItems
+//        209.05T  Separate
+//
+//    Collapsed into one slot the winner is arbitrary, and it picked the ELIMINATION: Samsung's
+//    divisions were reconciled against -28.52T and left unplaced.
+//
+//    THE FIXTURE MAKES EVERY WRONG ANSWER AVAILABLE, at the real proportions. Two splits in ONE
+//    filing must reach DIFFERENT targets — that is the property, and a rule that picks a single
+//    "best" total for the period cannot satisfy it however it chooses.
+{
+  const CONS = 'ifrs-full:ConsolidatedAndSeparateFinancialStatementsAxis'
+  const ITEMS = 'ifrs-full:SegmentConsolidationItemsAxis'
+  const SEGS = 'ifrs-full:SegmentsAxis'
+  const GEO = 'ifrs-full:GeographicalAreasAxis'
+  const C = 'ifrs-full:ConsolidatedMember'
+  const OPS = 'ifrs-full:OperatingSegmentsMember'
+  const axes: SegmentAxisSpec[] = [
+    ...AXES,
+    { axis: CONS, kind: 'qualifier', priority: 0, requiredMember: C },
+    { axis: ITEMS, kind: 'qualifier', priority: 0, requiredMember: null },
+    { axis: SEGS, kind: 'business', priority: 90, requiredMember: null },
+    { axis: GEO, kind: 'geography', priority: 80, requiredMember: null },
+  ]
+  const xml = instance([
+    // The four facts that all look undimensioned, at Samsung's real FY2024 proportions (in bn).
+    { concept: 'Revenue', value: 300870, dims: { [CONS]: C } },
+    // DIMS IN THE OPPOSITE ORDER to the divisions below, deliberately: XBRL does not promise a
+    // context lists its dimensions in any particular order, so the qualifier key has to be sorted.
+    // Written in matching order, dropping the sort is undetectable.
+    { concept: 'Revenue', value: 329390, dims: { [ITEMS]: OPS, [CONS]: C } },
+    { concept: 'Revenue', value: -28520, dims: { [CONS]: C, [ITEMS]: 'ifrs-full:MaterialReconcilingItemsMember' } },
+    { concept: 'Revenue', value: 209050, dims: { [CONS]: 'ifrs-full:SeparateMember' } },
+    // The divisions — qualified by OperatingSegments, summing to 329,390.
+    { concept: 'Revenue', value: 174890, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:DxMember' } },
+    { concept: 'Revenue', value: 111070, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:DsMember' } },
+    { concept: 'Revenue', value: 29160, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:SdcMember' } },
+    { concept: 'Revenue', value: 14270, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:HarmanMember' } },
+    // Geography — NOT operating-segment qualified, and sums to the consolidated 300,870 instead.
+    { concept: 'Revenue', value: 46640, dims: { [CONS]: C, [GEO]: 'x:KoreaMember' } },
+    { concept: 'Revenue', value: 133270, dims: { [CONS]: C, [GEO]: 'x:UsMember' } },
+    { concept: 'Revenue', value: 120960, dims: { [CONS]: C, [GEO]: 'x:OtherMember' } },
+  ])
+  const out = segmentFactsFrom(xml, axes, CONCEPTS).filter((f) => f.partitionId > 0)
+  const seg = out.filter((f) => f.axis === SEGS)
+  const geo = out.filter((f) => f.axis === GEO)
+
+  check(seg.length === 4, 'the four divisions are placed', `${seg.length}`)
+  check(
+    seg.every((f) => f.reconciledTo === 329390) &&
+      seg.reduce((a, f) => a + f.value, 0) === 329390,
+    '…and reconcile to the OPERATING-SEGMENTS subtotal, not the consolidated figure',
+    `target ${seg[0]?.reconciledTo} (-28520 was the bug, 300870 the plausible wrong answer)`)
+
+  check(geo.length === 3, 'geography is placed too', `${geo.length}`)
+  check(
+    geo.every((f) => f.reconciledTo === 300870) &&
+      geo.reduce((a, f) => a + f.value, 0) === 300870,
+    '…and reconciles to the CONSOLIDATED figure — a different target in the same filing',
+    `target ${geo[0]?.reconciledTo}`)
+
+  check(out.every((f) => f.reconciledTo !== 209050),
+    'the parent-only (Separate) figure is never a target')
+  check(out.every((f) => f.reconciledTo !== -28520),
+    'nor is the reconciling-items elimination')
+
+  // A SPLIT WHOSE MEMBERS DISAGREE ABOUT THEIR CONTEXT HAS NO CONTEXT OF ITS OWN, and must not
+  // borrow one member's. These two sum to 329,390 exactly, so taking the first member's qualifier
+  // would match the operating-segments total and place a split that was never disclosed together.
+  const mixed = instance([
+    { concept: 'Revenue', value: 300870, dims: { [CONS]: C } },
+    { concept: 'Revenue', value: 329390, dims: { [CONS]: C, [ITEMS]: OPS } },
+    { concept: 'Revenue', value: 200000, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:AMember' } },
+    { concept: 'Revenue', value: 129390, dims: { [CONS]: C, [SEGS]: 'x:BMember' } },
+  ])
+  const m = segmentFactsFrom(mixed, axes, CONCEPTS).filter((f) => f.partitionId > 0)
+  check(m.every((f) => f.reconciledTo !== 329390),
+    'a split whose members disagree about their qualifier borrows no total',
+    `${m.length} placed, targets ${[...new Set(m.map((f) => f.reconciledTo))].join(',')}`)
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

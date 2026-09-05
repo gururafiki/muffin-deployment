@@ -410,6 +410,17 @@ export function segmentFactsFrom(
    * for the opposite reason: its members use a concept that has no undimensioned fact at all.
    */
   const totalsByConcept = new Map<string, number>()
+  /**
+   * (concept, metric, period) keys where MORE THAN ONE distinct value was stated with no segment
+   * axis — so the concept alone cannot identify a target.
+   *
+   * Samsung states Revenue four times under four qualifier contexts. The qualifier-matched lookup
+   * resolves that, but a split whose own members DISAGREE about their context has no context to
+   * match with, and falling back to "the total for this concept" would hand it whichever fact
+   * happened to be parsed last. Refusing is the honest answer: the split is left in partition 0
+   * rather than reconciled against a figure it was never disaggregated from.
+   */
+  const ambiguousConcept = new Set<string>()
   const key = (metric: string, pt: string, start: string, end: string) =>
     `${metric}|${pt}|${start}|${end}`
 
@@ -426,8 +437,45 @@ export function segmentFactsFrom(
     periodEnding: string
     value: number
     currency: string | null
+    /**
+     * The qualifier axes this fact carries, canonicalised — see `qualifierKey`. It is what tells a
+     * split which of several "undimensioned" totals it was actually disaggregated from.
+     */
+    qualifier: string
   }
   const candidates: Candidate[] = []
+
+  /**
+   * The qualifier axes of a fact, sorted and joined — its "which version of the company is this"
+   * context.
+   *
+   * A QUALIFIER NARROWS A FACT WITHOUT SUB-DIVIDING IT, so it is correctly ignored when deciding
+   * WHETHER something is a segment fact. It must NOT be ignored when deciding what that segment
+   * fact reconciles TO. Measured on Samsung's FY2024 filing, four Revenue facts have no segment
+   * axis and therefore all look like "the consolidated total":
+   *
+   *     300.87T  Consolidated
+   *     329.39T  Consolidated + OperatingSegments      <- the divisions sum to exactly this
+   *     -28.52T  Consolidated + MaterialReconcilingItems
+   *     209.05T  Separate
+   *
+   * Keyed on (metric, period) alone they collapse into one slot and the winner is arbitrary — it
+   * picked the ELIMINATION, so Samsung's four divisions were measured against -28.52T. Keyed on the
+   * qualifier context as well, the split's own context ({Consolidated, OperatingSegments}) selects
+   * the only candidate that can be right. Exact, not a heuristic.
+   *
+   * This is not a Korea special case: Alphabet tags every segment figure with
+   * `srt:ConsolidationItemsAxis = OperatingSegmentsMember` too, and has simply never had a second
+   * candidate to be confused by.
+   */
+  const qualifierKey = (dims: [string, string][]): string =>
+    dims.filter(([a]) => kindOf.get(a) === 'qualifier')
+      .map(([a, m]) => `${a}=${m}`).sort().join('|')
+
+  /** (qualifier context, metric, period) -> the figure stated under exactly that context. */
+  const totalsByQualifier = new Map<string, { value: number; priority: number }>()
+  /** (concept, qualifier context, metric, period) — the most specific match there is. */
+  const totalsByConceptQualifier = new Map<string, number>()
 
   for (const f of facts) {
     const ctx = contexts.get(f.ctxRef)
@@ -472,7 +520,20 @@ export function segmentFactsFrom(
       const priority = priorityOf.get(f.concept) ?? 0
       const held = totals.get(k)
       if (held === undefined || priority > held.priority) totals.set(k, { value: f.value, priority })
-      totalsByConcept.set(`${f.concept}|${k}`, f.value)
+      const ck = `${f.concept}|${k}`
+      const prior = totalsByConcept.get(ck)
+      if (prior !== undefined && prior !== f.value) ambiguousConcept.add(ck)
+      totalsByConcept.set(ck, f.value)
+      // KEPT SEPARATELY, NOT INSTEAD. The unqualified map stays the fallback for a filing whose
+      // split carries a qualifier its total does not — the ordinary SEC shape — so nothing that
+      // reconciles today stops reconciling.
+      const qual = qualifierKey(dims)
+      const qk = `${qual}|${k}`
+      const heldQ = totalsByQualifier.get(qk)
+      if (heldQ === undefined || priority > heldQ.priority) {
+        totalsByQualifier.set(qk, { value: f.value, priority })
+      }
+      totalsByConceptQualifier.set(`${f.concept}|${qual}|${k}`, f.value)
       continue
     }
     // BOTH BOUNDS, and the lower one is not dead code. Every `segs.length === 0` fact is taken by
@@ -503,6 +564,7 @@ export function segmentFactsFrom(
       periodEnding: end,
       value: f.value,
       currency,
+      qualifier: qualifierKey(dims),
     })
   }
 
@@ -603,10 +665,29 @@ export function segmentFactsFrom(
       // for a filing whose members use a concept it never states undimensioned.
       const ownConcept = [...new Set(cands.map((c) => c.concept))]
       const sameConcept = ownConcept.length === 1
-        ? totalsByConcept.get(`${ownConcept[0]}|${flatKey}`)
+        ? (ambiguousConcept.has(`${ownConcept[0]}|${flatKey}`)
+          ? undefined
+          : totalsByConcept.get(`${ownConcept[0]}|${flatKey}`))
         : undefined
+      // THE SPLIT'S OWN QUALIFIER CONTEXT FIRST. Several facts can look undimensioned for one
+      // (metric, period) and differ only by qualifier — the consolidated figure, the
+      // operating-segments subtotal the divisions actually sum to, and the reconciling-items
+      // elimination. The split was disaggregated from the one sharing its context, and nothing
+      // else can be right. Falls back to the concept-specific and then the unqualified total, so a
+      // filing whose split carries a qualifier its total does not is unaffected.
+      // FOUR LEVELS, MOST SPECIFIC FIRST. Concept and qualifier are independent narrowings and both
+      // matter: pinning only the qualifier let a same-qualifier total of the WRONG concept beat the
+      // concept-specific one, which regressed an existing fixture the moment it was tried.
+      const ownQualifier = [...new Set(cands.map((c) => c.qualifier))]
+      const oneQualifier = ownQualifier.length === 1 ? ownQualifier[0] : null
+      const conceptQualified = ownConcept.length === 1 && oneQualifier !== null
+        ? totalsByConceptQualifier.get(`${ownConcept[0]}|${oneQualifier}|${flatKey}`)
+        : undefined
+      const qualified = oneQualifier === null
+        ? undefined
+        : totalsByQualifier.get(`${oneQualifier}|${flatKey}`)?.value
       const target = g0.parentMember === null
-        ? sameConcept ?? totals.get(flatKey)?.value
+        ? conceptQualified ?? sameConcept ?? qualified ?? totals.get(flatKey)?.value
         : flatValue.get(
           `${g0.parentAxis}|${g0.parentMember}|${g0.metricCode}|${g0.periodType}|` +
           `${g0.periodStart}|${g0.periodEnding}`,
