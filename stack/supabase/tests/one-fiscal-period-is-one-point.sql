@@ -51,6 +51,15 @@ insert into market.security_metric
   ('00000000-0000-0000-0000-000000126a01','t126_revenue','annual','2023-09-29', 383300000000,'sec-xbrl')
 on conflict do nothing;
 
+-- `security_metric_series` resolves the symbol through `market.symbol_security`, which is
+-- MATERIALIZED — so the security inserted above is invisible to it until the map is rebuilt and
+-- the inner join drops every row, failing every assertion below for a reason unrelated to its
+-- subject. (Migration 174 moved that join off the `security_symbol` VIEW because filtering it by
+-- symbol walked all 27,600 securities and timed out for anon.) NON-concurrently, deliberately:
+-- `refresh ... concurrently` cannot run inside a transaction block, and a test that cannot roll
+-- back is not a test.
+refresh materialized view market.symbol_security;
+
 do $$
 declare
   n2025 integer; n2024 integer; n2023 integer;

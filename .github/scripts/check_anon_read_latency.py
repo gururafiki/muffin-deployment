@@ -80,7 +80,16 @@ QUERIES = [
     # The Sankey's right half. Six metric codes for one security across every annual period it has —
     # an `in.()` over a table of 3.29M rows, which is a different plan from the single-metric reads
     # already timed above.
-    ("stock income flow", "security_metric?select=metric_code,value,as_of,currency_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&period_type=eq.annual&metric_code=in.(revenue,gross_profit,operating_income,pretax_income,income_tax,net_income)&order=as_of.desc&limit=18"),
+    ("stock income flow", "security_metric_series?select=metric_code,value,as_of,currency_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&period_type=eq.annual&metric_code=in.(revenue,gross_profit,operating_income,pretax_income,income_tax,net_income)&order=as_of.desc&limit=18"),
+    # BY SYMBOL, WHICH IS THE FILTER THAT WAS BROKEN AND THE ONE NOBODY TIMED.
+    # `security_metric_series` answered `security_id=eq.<samsung>` in 0.086 s and `symbol=eq.
+    # 005930.KS` with a 57014 statement timeout — because it joined `security_symbol`, a view of
+    # per-security laterals, so filtering by symbol walked all 27,600. Every probe here was by
+    # security_id, so the guard reported the view healthy while the deployed stock page's metric
+    # and statement sections returned 500 for anon. The app sends BOTH filters; both are timed now.
+    ("stock metrics catalogue", "security_metric_series?select=metric_code,metric_name,category,unit,is_derived&symbol=eq.AAPL&period_type=eq.annual"),
+    ("stock statement table", "security_metric_series?select=metric_code,metric_name,unit,as_of,value,currency_code,is_derived&symbol=eq.AAPL&period_type=eq.annual&category=eq.income_statement&order=as_of.desc&limit=600"),
+    ("stock statement table, local listing", "security_metric_series?select=metric_code,as_of,value,currency_code&symbol=eq.005930.KS&period_type=eq.annual&category=eq.income_statement&order=as_of.desc&limit=600"),
 ]
 
 
