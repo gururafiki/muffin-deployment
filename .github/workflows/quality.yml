@@ -242,7 +242,8 @@ jobs:
                      stack/supabase/functions/market-refresh/logic-check.ts \
                      stack/supabase/functions/market-refresh/xbrl-check.ts \
                      stack/supabase/functions/market-refresh/segments-check.ts \
-                     stack/supabase/functions/market-refresh/wikidata-check.ts
+                     stack/supabase/functions/market-refresh/wikidata-check.ts \
+                     stack/supabase/functions/market-refresh/dart-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
@@ -277,6 +278,15 @@ jobs:
           # list read as one blank entry, a duplicate label hitting SQLSTATE 21000 on the node
           # upsert, and an unsanitised ISIN escaping a SPARQL string literal.
           deno run --allow-read stack/supabase/functions/market-refresh/wikidata-check.ts
+          # DART hands back a ZIP, so the Korean path carries a binary reader nothing else here
+          # needs — EOCD scan, central-directory walk, `DecompressionStream("deflate-raw")`. An
+          # 800 KB fixture cannot be committed, so the check BUILDS one with `CompressionStream`
+          # and round-trips it, with the two extra-field lengths deliberately different: local and
+          # central headers disagree about that field in real archives, and reading the offset off
+          # the wrong one yields garbage that still inflates. It also pins that DART's '013' is an
+          # empty ANSWER rather than a failure, which is what stops a company with no annual report
+          # being retried for ever.
+          deno run --allow-read stack/supabase/functions/market-refresh/dart-check.ts
 
       # The quarter-shape check in market-verify rests on one number: that year-to-date stacking
       # gives a last/first quarter ratio near 3 while discrete quarters give near 1. That claim was

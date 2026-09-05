@@ -1204,6 +1204,11 @@ console.log('\nresource registry — the cron and the function agree')
     SEGMENTS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     FILING_HISTORY_RESOURCE: [],
+    // Korea. `security-kr-segments` reports `pending_kr_segments`; `kr-filings` reports
+    // `pending_kr_history`, which is ITS OWN backlog — the companies whose filing history is
+    // unwalked — and deliberately not the parse queue, which belongs to the other resource.
+    KR_SEGMENTS_RESOURCE: [],
+    KR_FILINGS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     WIKIDATA_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.

@@ -53,6 +53,13 @@ begin
   -- 2. WITH NO NON-SEC SOURCE ENABLED, the Korean company and the shell are both unreachable, and
   --    that is correct: an enabled source with no resource behind it would report an addressable
   --    backlog nothing can address.
+  --
+  --    THE PRECONDITION IS SET HERE RATHER THAN INHERITED. This assertion used to rely on `dart`
+  --    being disabled by the seed, which was true until migration 172 turned it on for real — at
+  --    which point the test failed against correct data, reporting `resolvable` as a defect. A test
+  --    that depends on a global default is asserting the default, not its own subject; step 3 below
+  --    is what actually proves the enabled case, and it flips the flag explicitly for that reason.
+  update market.disclosure_source set enabled = false where code <> 'sec';
   select capability into cap_kr from market.security_disclosure where security_id = '00000000-0000-0000-0000-000000016302';
   select capability into cap_ky from market.security_disclosure where security_id = '00000000-0000-0000-0000-000000016303';
   if cap_kr <> 'none' or cap_ky <> 'none' then
