@@ -21,7 +21,27 @@
 -- Bumping the version re-queues every filing through `pending_segments`, which is the mechanism
 -- migration 158 records for exactly this. The parse is idempotent and the upsert overwrites, so the
 -- corrected target replaces the borrowed one as each filing comes round.
-update market.segment_parser set version = version + 1;
+-- GUARDED BY `one_shot`, BECAUSE MIGRATIONS RE-RUN ON EVERY DEPLOY.
+--
+-- This bump shipped unguarded and re-queued the ENTIRE corpus every time anyone deployed anything.
+-- Measured 2026-09-05: `segment_parser.version` had reached 15 — one per deploy since this file
+-- landed — `pending_segments` stood at 213,500 filings against a drain of 20 per five-minute run,
+-- and **94% of the filings backing a SERVED split had been parsed by an older parser**. Not because
+-- the queue was slow: because every deploy invalidated the work it had just done. The served data
+-- could never become current, and no amount of reordering the queue would have fixed it.
+--
+-- Migration 154 does the same bump correctly and its comment predicted this exactly: "an
+-- unconditional bump would re-queue all 30,000 filings every time anyone deployed anything." The
+-- guard was written down one file earlier and not applied here.
+--
+-- The key records that THIS migration's re-parse has been requested once. Bumping the version by
+-- hand in Studio remains the supported way to force a fresh re-parse.
+do $$ begin
+  if not exists (select 1 from market.one_shot where key = 'segment-parser-target-per-bucket') then
+    update market.segment_parser set version = version + 1;
+    insert into market.one_shot (key) values ('segment-parser-target-per-bucket');
+  end if;
+end $$;
 
 comment on column market.security_segment.reconciled_to is
   'The consolidated figure THIS split was accepted against — for its own metric, period type and span. NOT shared across the group: the partition MAP is one fact per (axis, period end) and is applied across metrics and period types deliberately, but the target is not, and stamping the winning bucket''s target on the whole group gave a quarter the year''s revenue for 3,021 of 11,211 splits. Null where the filing never states that metric undimensioned for that span, which is the honest answer — a consumer must skip a null target rather than assert against a borrowed one.';
