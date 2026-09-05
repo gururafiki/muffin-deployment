@@ -45,6 +45,26 @@ begin
   end if;
 end $$;
 
+-- BUILT WITHOUT PARALLEL WORKERS, AND THAT IS NOT A TUNING CHOICE — IT IS WHAT MAKES THE DEPLOY
+-- SURVIVE. A parallel worker allocates its shared memory in the container's `/dev/shm`, which is
+-- Docker's default **64 MB** here and is not set anywhere in the stack. This build fitted inside it
+-- until the segment backlog grew, and then on 2026-09-05 it did not:
+--
+--   ERROR: could not resize shared memory segment "/PostgreSQL.xxx" to 2097152 bytes:
+--          No space left on device        CONTEXT: parallel worker
+--
+-- The failure is not survivable, because this migration DROPS the matview before recreating it:
+-- the drop succeeded, the create died, and production was left with no `security_segment_spine` at
+-- all — which migration 179 had just made `derive_segment_classification` depend on. Five later
+-- migrations then failed with `relation ... does not exist`, and the deploy failed as a whole.
+-- Every subsequent deploy would have failed the same way, because the drop happens every time.
+--
+-- Single-threaded the build needs no DSM segment at all, so it cannot fail this way regardless of
+-- how large the segment table grows. Raising `/dev/shm` is the general fix and belongs in the
+-- stack; this makes the migration independent of it either way.
+set local max_parallel_workers_per_gather = 0;
+set local max_parallel_maintenance_workers = 0;
+
 create materialized view market.security_segment_spine as
   select * from market.security_segment_current;
 
@@ -105,6 +125,13 @@ returns table (rows_refreshed bigint, duration_ms integer)
 language plpgsql
 security definer
 set search_path = market, pg_catalog
+-- SAME REASON AS THE BUILD ABOVE. A concurrent refresh runs the view's query, so it takes parallel
+-- workers and their `/dev/shm` segments too — it measured 3,054 ms and succeeded, and would have
+-- started failing on exactly the growth that broke the build. A silent failure here is worse than
+-- the build's: `facets-refresh` records it and still returns ok, so the spine would simply stop
+-- being rebuilt while every run reported success.
+set max_parallel_workers_per_gather = 0
+set max_parallel_maintenance_workers = 0
 as $$
 declare t0 timestamptz := clock_timestamp();
 begin
