@@ -724,5 +724,92 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
     `${m.length} placed, targets ${[...new Set(m.map((f) => f.reconciledTo))].join(',')}`)
 }
 
+// ── AN ELIMINATION COLUMN IS NOT A SEGMENT SPLIT ───────────────────────────────────────────────
+//
+// Found on the first live Korean parse. Hyundai Mobis tags its segment table's TWO COLUMNS on one
+// axis: `OperatingSegments` (gross, 76,544,947) and `Elimination` (-15,426,820), which differ by
+// exactly the consolidated 61,118,127. With the qualifier open, both are admitted as segment facts
+// and the parser stored the ELIMINATION column — a served split summing to MINUS 15.4 trillion won
+// for a company with 61 trillion of revenue. Every number was correct; the wrong column was chosen.
+//
+// The fix is one control-table row (`required_member = OperatingSegmentsMember`), so this asserts
+// the PARSER honours it — and, more importantly, that the rule stays inert for a filer that does
+// not use the axis at all, which is what makes it safe to pin globally.
+{
+  const CONS = 'ifrs-full:ConsolidatedAndSeparateFinancialStatementsAxis'
+  const ITEMS = 'ifrs-full:SegmentConsolidationItemsAxis'
+  const SEGS = 'ifrs-full:SegmentsAxis'
+  const C = 'ifrs-full:ConsolidatedMember'
+  const OPS = 'ifrs-full:OperatingSegmentsMember'
+  const ELIM = 'ifrs-full:EliminationOfIntersegmentAmountsMember'
+  // Production's shape after migration 173.
+  const pinned: SegmentAxisSpec[] = [
+    ...AXES,
+    { axis: CONS, kind: 'qualifier', priority: 0, requiredMember: C },
+    { axis: ITEMS, kind: 'qualifier', priority: 0, requiredMember: OPS },
+    { axis: SEGS, kind: 'business', priority: 90, requiredMember: null },
+  ]
+  // Mobis's real numbers, in millions.
+  const mobis: FixtureFact[] = [
+    { concept: 'Revenue', value: 61118127, dims: { [CONS]: C } },
+    { concept: 'Revenue', value: 76544947, dims: { [CONS]: C, [ITEMS]: OPS } },
+    { concept: 'Revenue', value: -15426820, dims: { [CONS]: C, [ITEMS]: ELIM } },
+    { concept: 'Revenue', value: 58702105, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:AutoPartsMember' } },
+    { concept: 'Revenue', value: 17842842, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:AfterSalesMember' } },
+    { concept: 'Revenue', value: -10901986, dims: { [CONS]: C, [ITEMS]: ELIM, [SEGS]: 'x:AutoPartsMember' } },
+    { concept: 'Revenue', value: -4524834, dims: { [CONS]: C, [ITEMS]: ELIM, [SEGS]: 'x:AfterSalesMember' } },
+    // THE ZERO MEMBER IS LOAD-BEARING, AND LEAVING IT OUT MADE THE FIXTURE MISS THE DEFECT.
+    // Mobis reports an empty `CommonSegment` in BOTH columns. With it, the two qualifier groups
+    // offer the same THREE member codes and the parser — which collapses per member code, the
+    // qualifier not being part of a member's identity — picks one fact per member arbitrarily and
+    // took the elimination. Without it the operating pair simply won and the open config looked
+    // correct: the first version of this fixture asserted the defect was reachable and it was not.
+    // Verified against the real instance both ways before this line was added.
+    { concept: 'Revenue', value: 0, dims: { [CONS]: C, [ITEMS]: OPS, [SEGS]: 'x:CommonMember' } },
+    { concept: 'Revenue', value: 0, dims: { [CONS]: C, [ITEMS]: ELIM, [SEGS]: 'x:CommonMember' } },
+  ]
+  const placed = segmentFactsFrom(instance(mobis), pinned, CONCEPTS).filter((f) => f.partitionId > 0)
+  const total = placed.reduce((a, f) => a + f.value, 0)
+  check(placed.length === 3 && total === 76544947,
+    'the operating column is the split, and the elimination column is rejected',
+    `${placed.length} members summing ${total.toLocaleString()} (want 3 summing 76,544,947)`)
+  check(placed.every((f) => f.value >= 0),
+    'so no served member carries a negative revenue',
+    placed.map((f) => f.value).join(', '))
+
+  // THIS FIXTURE DOES NOT REPRODUCE THE DEFECT, AND SAYING SO IS THE POINT.
+  //
+  // Swapping `requiredMember` back to null here yields the CORRECT split, so this file cannot
+  // demonstrate the bug it was written for — three attempts (two members, then Mobis's zero-valued
+  // `CommonSegment` in both columns, then the elimination facts in document order first) each
+  // produced a different answer and none of them the production one. The real mechanism needs more
+  // of the instance than a fixture reconstructs: the geography facts in both columns, the
+  // major-customer and parent-only facts, and a partition search over all of them.
+  //
+  // It was verified against the REAL DOCUMENT instead — `segmentFactsFrom` run on Hyundai Mobis's
+  // FY2025 instance (rcept 20260309001878) with the live `segment_axis` rows, both ways:
+  //
+  //   qualifier OPEN    SegmentsAxis  -15,426,820,000,000   Geography  71,697,297,000,000
+  //   qualifier PINNED  SegmentsAxis   76,544,947,000,000   Geography  76,544,947,000,000
+  //
+  // — the open figures matching what production had stored, exactly, and the pinned ones matching
+  // the filing's own target. Asserting a synthetic "the defect is reachable" that passes for a
+  // reason unrelated to the real cause would be worse than recording this, so the assertion was
+  // deleted rather than tuned until it went green.
+
+  // INERT FOR A FILER THAT NEVER USES THE AXIS. `requiredMember` rejects only when the axis is
+  // PRESENT with a different member, which is what makes pinning it safe for everyone else.
+  const noQualifier: FixtureFact[] = [
+    { concept: 'Revenue', value: 1000, dims: { [CONS]: C } },
+    { concept: 'Revenue', value: 600, dims: { [CONS]: C, [SEGS]: 'x:OneMember' } },
+    { concept: 'Revenue', value: 400, dims: { [CONS]: C, [SEGS]: 'x:TwoMember' } },
+  ]
+  const untouched = segmentFactsFrom(instance(noQualifier), pinned, CONCEPTS)
+    .filter((f) => f.partitionId > 0)
+  check(untouched.length === 2 && untouched.reduce((a, f) => a + f.value, 0) === 1000,
+    'a filer that omits the qualifier axis is untouched by the pin',
+    `${untouched.length} members summing ${untouched.reduce((a, f) => a + f.value, 0)}`)
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
