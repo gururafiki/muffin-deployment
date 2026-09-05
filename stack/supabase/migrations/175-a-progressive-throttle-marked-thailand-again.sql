@@ -1,3 +1,18 @@
+-- SUPERSEDED BY MEASUREMENT — READ THIS FIRST.
+--
+-- The diagnosis below is WRONG and the repair it performed was unnecessary. Verified 2026-09-05
+-- by driving the real code against a captured provider payload: `SCCC-R.BK` returns 272 bars with
+-- ONE distinct close, `loadEquityReturns` produces zero rows, and the ten Thai marks this file
+-- cleared were HONEST. A forced run after the "fix" re-marked all ten within a minute.
+--
+-- The clear was harmless — the marks were simply re-applied by the next run — and the file is kept
+-- rather than deleted because `one_shot` has already recorded it in production and removing it
+-- would change nothing except this record. `data_defect.contradicted_negative_cache` is now a
+-- GAUGE: it compares stored bars against a mark that records a fresh fetch, which is two sources
+-- that can legitimately disagree.
+--
+-- The original (incorrect) reasoning follows.
+--
 -- A PROGRESSIVE THROTTLE MARKED THAILAND AGAIN, ONE DAY AFTER THE FIRST REPAIR.
 --
 -- Migration 171 cleared exactly this on 2026-09-04 and the resource was gated so it could not

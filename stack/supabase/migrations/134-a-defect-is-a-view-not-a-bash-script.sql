@@ -100,6 +100,22 @@ union all
 -- **15 had exactly ONE distinct close in 30 days** — Cementir, OUE REIT, RHI Magnesita, China
 -- Galaxy — and every one of those marks is correct. Holding BARS is not evidence; holding bars
 -- that MOVE is, because a return can then be computed and the mark says it cannot.
+--
+-- AND IT IS A GAUGE, NOT AN INVARIANT — established 2026-09-05 after a THIRD false-positive round.
+-- It reported 10-12 for days and every one was innocent. The reason is structural and no threshold
+-- fixes it: this predicate reads OUR STORED BARS, while the mark records what the provider returned
+-- on a FRESH fetch. Those are two sources and they can legitimately disagree.
+--
+-- Measured on Thailand's NVDR lines. `SCCC-R.BK` on the exact request the resource makes — 400
+-- days, interval=1d — returns 272 bars and ONE distinct close, 146.5 throughout;
+-- `loadEquityReturns` driven against that captured payload produces ZERO rows, so the mark is
+-- honest. Our own `security_price` for the same security holds bars that DO move, written when the
+-- provider was still serving them. Both records are correct and they disagree.
+--
+-- Excluding the newest bar was tried, to catch "a frozen line with one fresh tick": it did not
+-- work (all ten still qualified) and excluding two sessions DISABLED the check outright, which the
+-- guard's own moving fixture caught. The number stays useful as a pointer at marks worth reading;
+-- it is not evidence of a defect, so market-verify records it and does not assert on it.
 select 'contradicted_negative_cache', count(*),
        'securities marked as having no returns while holding recent bars that MOVE'
   from market.security s

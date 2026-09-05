@@ -555,6 +555,16 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // Both surface theories died on measurement — 34 of 40 `-R.BK` NVDR symbols carry performance
   // perfectly well, and the series are nineteen years deep, not young.
   //
+  // CORRECTION, 2026-09-05: THE THROTTLE STORY BELOW WAS WRONG, AND THE PROBE IS KEPT ANYWAY.
+  // The ten Thai marks it was written for were HONEST. Driven against a captured payload,
+  // `SCCC-R.BK` returns 272 bars with ONE distinct close and `loadEquityReturns` yields zero rows,
+  // so the resource was right to mark. Widening the probe did NOT stop it — a forced run re-marked
+  // all ten. What was actually wrong was the GUARD reading stored bars against a mark that records
+  // a fresh fetch; it is a gauge now.
+  // The widened probe stays because progressive throttling IS real in this pipeline and a control
+  // call on any marking run is cheap insurance — but it is insurance, not the fix for that
+  // incident, and the reasoning below should be read with that correction in front of it.
+  //
   // THE FIRST FIX GATED THE PROBE ON `isolatedAnswered === 0`, AND IT RECURRED THE NEXT DAY.
   // Measured 2026-09-05, one day after the note above: ten MORE Thai securities marked in a single
   // run — Siam City Cement, Thai Union, Carabao, Central Retail, TMBThanachart — every one holding
