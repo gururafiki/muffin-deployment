@@ -75,6 +75,12 @@ insert into market.security_segment
   ('00000000-0000-0000-0000-000000014301','srt:StatementGeographicalAxis','x:EuropeMember','revenue','annual',date '2025-12-31',100,'USD',1,'sec-segments')
 on conflict do nothing;
 
+-- THE SPINE IS A MATERIALIZED VIEW, SO EVERY FIXTURE-BASED TEST IS A SNAPSHOT TEST. Rows inserted
+-- above are invisible to `derive_segment_classification` until it is rebuilt — the NON-concurrent
+-- form deliberately, because `refresh ... concurrently` cannot run inside a transaction block and a
+-- test that cannot roll back is not a test.
+refresh materialized view market.security_segment_spine;
+
 do $$
 declare n integer; w numeric; wr numeric; wp numeric;
 begin
@@ -162,6 +168,12 @@ insert into market.segment_alias (member_code, concept_code, security_id) values
   ('x:RestMember','t143-retail',null)
 on conflict do nothing;
 
+-- THE SPINE IS A MATERIALIZED VIEW, SO EVERY FIXTURE-BASED TEST IS A SNAPSHOT TEST. Rows inserted
+-- above are invisible to `derive_segment_classification` until it is rebuilt — the NON-concurrent
+-- form deliberately, because `refresh ... concurrently` cannot run inside a transaction block and a
+-- test that cannot roll back is not a test.
+refresh materialized view market.security_segment_spine;
+
 do $$
 declare w numeric; tot numeric;
 begin
@@ -215,6 +227,12 @@ insert into market.segment_alias (member_code, concept_code, security_id) values
   ('x:AmericasMember','t143-euro',null)
 on conflict do nothing;
 
+-- THE SPINE IS A MATERIALIZED VIEW, SO EVERY FIXTURE-BASED TEST IS A SNAPSHOT TEST. Rows inserted
+-- above are invisible to `derive_segment_classification` until it is rebuilt — the NON-concurrent
+-- form deliberately, because `refresh ... concurrently` cannot run inside a transaction block and a
+-- test that cannot roll back is not a test.
+refresh materialized view market.security_segment_spine;
+
 do $$
 declare n integer;
 begin
@@ -228,14 +246,25 @@ begin
   raise notice '  ok  a purely geographic split classifies nothing';
 end $$;
 
+-- THE SPINE IS A MATERIALIZED VIEW, SO EVERY FIXTURE-BASED TEST IS A SNAPSHOT TEST. Rows inserted
+-- above are invisible to `derive_segment_classification` until it is rebuilt — the NON-concurrent
+-- form deliberately, because `refresh ... concurrently` cannot run inside a transaction block and a
+-- test that cannot roll back is not a test.
+-- 6. THE DERIVATION RETRACTS. An upsert cannot; a segment that stops mapping would otherwise keep
+--    its weight for ever, looking freshly derived — the same defect the performance cache had when
+--    a period the refresh stopped producing outlived the fix.
+--
+-- THE UNMAPPING HAPPENS AT TOP LEVEL AND THE SPINE IS REBUILT AFTER IT. An alias decides a member's
+-- `concept_code`, which the spine SNAPSHOTS — so deleting the alias changes the view and not the
+-- snapshot, and a refresh placed before the delete (as the other five blocks have it) would leave
+-- the derivation still seeing the mapping it is being asked to forget.
+delete from market.segment_alias where member_code = 'x:AwsMember';
+delete from market.segment_alias where member_code = 'x:AdsMember';
+refresh materialized view market.security_segment_spine;
+
 do $$
 declare n integer;
 begin
-  -- 6. THE DERIVATION RETRACTS. An upsert cannot; a segment that stops mapping would otherwise
-  --    keep its weight for ever, looking freshly derived — the same defect the performance cache
-  --    had when a period the refresh stopped producing outlived the fix.
-  delete from market.segment_alias where member_code = 'x:AwsMember';
-  delete from market.segment_alias where member_code = 'x:AdsMember';
   perform market.derive_segment_classification();
   select count(*) into n from market.security_taxonomy
    where security_id = '00000000-0000-0000-0000-000000014301'
