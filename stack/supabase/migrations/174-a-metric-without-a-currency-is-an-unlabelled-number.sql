@@ -93,15 +93,23 @@ select distinct on (c.security_id, c.metric_code, c.period_type, c.period_group)
   coalesce(c.currency_code, s.reporting_currency) as currency_code,
   c.source_code
 from clustered c
-join market.metric m            on m.code = c.metric_code
-join market.security s          on s.security_id = c.security_id
-join market.security_symbol sym on sym.security_id = c.security_id
+join market.metric m             on m.code = c.metric_code
+join market.security s           on s.security_id = c.security_id
+-- THE MATERIALISED SYMBOL MAP, NOT `security_symbol`, AND THAT IS A LATENCY FIX NOT A TIDY-UP.
+-- `security_symbol` is a view over two LATERAL subqueries evaluated PER SECURITY, so a query
+-- filtered to one symbol still walks all 27,600 — the cost migration 102 removed from
+-- `price_series` the same way. Measured as anon 2026-09-05, before this change:
+--   ?security_id=eq.<samsung>  0.086 s        ?symbol=eq.005930.KS  57014 statement timeout
+-- The app filters by SYMBOL, so the stock page's metric sections were failing while every probe
+-- by security_id said the view was healthy — the fourth occurrence of that shape here, and the
+-- reason `check_anon_read_latency` times the conjunction the app actually sends.
+join market.symbol_security sym  on sym.security_id = c.security_id
 order by c.security_id, c.metric_code, c.period_type, c.period_group,
          -- The filing wins over the provider, and with it the true fiscal period end.
          c.priority desc, c.as_of desc;
 
 comment on view market.security_metric_series is
-  'One point per fiscal period per metric, the filing preferred over the provider. `currency_code` is EFFECTIVE — the metric''s own currency where the source stated one, else the company''s `reporting_currency` — because the yfinance statement endpoints carry no currency field and 990,847 metrics were therefore null, which `money.ts` correctly renders as an unlabelled number. It is the REPORTING currency and never `security.currency_code`: BHP quotes AUD and reports USD, Shell quotes GBP and reports USD.';
+  'One point per fiscal period per metric, the filing preferred over the provider. `currency_code` is EFFECTIVE — the metric''s own currency where the source stated one, else the company''s `reporting_currency` — because the yfinance statement endpoints carry no currency field and 990,847 metrics were therefore null, which `money.ts` correctly renders as an unlabelled number. It is the REPORTING currency and never `security.currency_code`: BHP quotes AUD and reports USD, Shell quotes GBP and reports USD. Joins the MATERIALISED `symbol_security`, not `security_symbol`: the latter is a per-security lateral, so filtering by symbol walked the whole universe and timed out for anon.';
 
 grant select on market.security_metric_series to anon, authenticated, service_role;
 
