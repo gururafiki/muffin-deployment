@@ -83,7 +83,10 @@ def main() -> int:
         return 1
 
     try:
-        heavy = fetch_ids(base, anon, f"sector_constituents?select=security_id&weight=gte.{MIN_WEIGHT}")
+        # ORDERED, because `fetch_ids` pages by offset and an unordered paged read can SKIP rows
+        # entirely — silently shrinking the population this check is asserting over. Duplicates are
+        # harmless here (the ids become a set); the skips are not, and they are invisible.
+        heavy = fetch_ids(base, anon, f"sector_constituents?select=security_id&weight=gte.{MIN_WEIGHT}&order=security_id")
     except (urllib.error.URLError, RuntimeError, ValueError) as exc:
         print(f"::error::significant-holding check — could not read the weighted set: {exc}")
         return 1
@@ -98,7 +101,7 @@ def main() -> int:
     failed = False
     for col in COLUMNS:
         try:
-            marked = fetch_ids(base, anon, f"security?select=security_id&{col}=not.is.null")
+            marked = fetch_ids(base, anon, f"security?select=security_id&{col}=not.is.null&order=security_id")
         except (urllib.error.URLError, RuntimeError, ValueError) as exc:
             print(f"::error::significant-holding check ({col}) — could not read a count: {exc}")
             failed = True

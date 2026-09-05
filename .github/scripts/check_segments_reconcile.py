@@ -129,7 +129,10 @@ def recent_securities(limit: int) -> list[str]:
     while len(seen) < limit and offset < 20_000:
         page = get(
             "security_segment_latest?select=security_id,as_of"
-            "&parent_member=is.null&order=as_of.desc",
+            # Tie-broken for the same reason as the row fetch below. Here a duplicate is harmless
+            # (the ids go into a set) but a SKIPPED row silently biases which securities are
+            # sampled, which is worse — it is invisible.
+            "&parent_member=is.null&order=as_of.desc,security_id",
             offset,
         )
         if not page:
@@ -175,7 +178,19 @@ def main() -> int:
         # `DiabetesAndObesityCareMember` appears once per parent, and summing all of them reported
         # a ratio of 2.97 for six consecutive years. The nested level has its own assertion below.
             "&parent_member=is.null"
-            "&order=security_id,axis,period_ending"
+            # A TOTAL ORDER, BECAUSE OFFSET PAGING OVER TIED KEYS DUPLICATES AND DROPS ROWS.
+            # `security_id,axis,period_ending` leaves every member of a split tied, so PostgreSQL
+            # is free to return them in any order within the tie — and across a page boundary that
+            # means some rows come back twice while others are never seen at all. Measured on the
+            # live 80-security sample, 21,059 rows over 22 pages:
+            #   order=security_id,axis,period_ending          40 duplicated, 21,019 distinct
+            #   + metric_code,period_type,member_code,accession    0 duplicated, 21,059 distinct
+            # Both directions corrupt a reconciliation: a duplicated member inflates its split and
+            # the row it displaced is missing from another. That is why the failures had no single
+            # signature — ten over and ten under, changing between runs — and why Costco's
+            # geography split was reported at exactly 2.00x while fetching the security ALONE
+            # reconciled it to the cent.
+            "&order=security_id,axis,period_ending,metric_code,period_type,member_code,accession_number"
         )
     if not rows:
         print("::notice::no segment rows yet — nothing to reconcile")
