@@ -811,5 +811,70 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
     `${untouched.length} members summing ${untouched.reduce((a, f) => a + f.value, 0)}`)
 }
 
+// ── a residual alone is not a split (Chevron FY2025) ───────────────────────────────────────────
+//
+// EVERY CANDIDATE RULE MUST DISAGREE ON THIS FIXTURE, because three plausible repairs each look
+// right in isolation and each destroys correct data on Chevron's own filing:
+//
+//   drop residuals outright      -> breaks `depreciation`,  which needs AllOther to reconcile
+//   require the inherited split
+//     to be COMPLETE             -> breaks `total_assets`,  which reconciles WITHOUT the residual
+//   require it to RECONCILE      -> breaks `operating_income`, which never sums (ASC 280 / IFRS 8)
+//   the shipped rule             -> drops only `revenue`, whose sole member is the residual
+//
+// `bestMap` is learned from `depreciation` (3 members placed, the most of any bucket) and applied
+// to all four, which is what puts the residual alone into revenue's bucket in the first place.
+{
+  const SEG = 'us-gaap:StatementBusinessSegmentsAxis'
+  const UP = 'cvx:UpstreamSegmentMember'
+  const DOWN = 'cvx:DownstreamSegmentMember'
+  const OTHER = 'us-gaap:AllOtherSegmentsMember'
+  const Y = { start: '2025-01-01', end: '2025-12-31' }
+  const AT = { instant: '2025-12-31' }
+  const ROLES = [{ memberCode: OTHER, class: 'residual' }]
+  const CVX_CONCEPTS: SegmentConceptSpec[] = [
+    ...CONCEPTS,
+    { metricCode: 'depreciation', concept: 'DepreciationDepletionAndAmortization', priority: 100 },
+    { metricCode: 'total_assets', concept: 'Assets', priority: 100 },
+  ]
+  const D = 'DepreciationDepletionAndAmortization'
+  const R = 'RevenueFromContractWithCustomerExcludingAssessedTax'
+  const chevron: FixtureFact[] = [
+    // depreciation — three members, reconciles exactly. This is where `bestMap` comes from.
+    { concept: D, value: 20132, ...Y },
+    { concept: D, value: 18445, dims: { [SEG]: UP }, ...Y },
+    { concept: D, value: 1404, dims: { [SEG]: DOWN }, ...Y },
+    { concept: D, value: 283, dims: { [SEG]: OTHER }, ...Y },
+    // revenue — the residual and nothing else, against a consolidated 231,370. THE DEFECT.
+    { concept: R, value: 231370, ...Y },
+    { concept: R, value: 581, dims: { [SEG]: OTHER }, ...Y },
+    // total_assets — reconciles exactly with NO residual, so it is incomplete against `bestMap`.
+    { concept: 'Assets', value: 312218, ...AT },
+    { concept: 'Assets', value: 256975, dims: { [SEG]: UP }, ...AT },
+    { concept: 'Assets', value: 55243, dims: { [SEG]: DOWN }, ...AT },
+    // operating_income — real members that deliberately do NOT sum to the consolidated figure.
+    { concept: 'OperatingIncomeLoss', value: 120, ...Y },
+    { concept: 'OperatingIncomeLoss', value: 100, dims: { [SEG]: UP }, ...Y },
+    { concept: 'OperatingIncomeLoss', value: 50, dims: { [SEG]: DOWN }, ...Y },
+  ]
+  const served = segmentFactsFrom(instance(chevron), AXES, CVX_CONCEPTS, ROLES)
+    .filter((f) => f.partitionId > 0)
+  const of = (m: string) => served.filter((f) => f.metricCode === m)
+  const sum = (m: string) => of(m).reduce((a, f) => a + f.value, 0)
+
+  check(of('revenue').length === 0,
+    'a split whose only member is a residual is not served',
+    `${of('revenue').length} member(s) summing ${sum('revenue')} against a consolidated 231370`)
+  check(of('depreciation').length === 3 && sum('depreciation') === 20132,
+    'a residual IS served beside real segments, and is needed to reconcile',
+    `${of('depreciation').length} members summing ${sum('depreciation')}`)
+  check(of('total_assets').length === 2 && sum('total_assets') === 312218,
+    'a bucket missing the residual is still served — completeness is not the rule',
+    `${of('total_assets').length} members summing ${sum('total_assets')}`)
+  check(of('operating_income').length === 2 && sum('operating_income') === 150,
+    'segment profit is served though it never reconciles — reconciliation is not the rule',
+    `${of('operating_income').length} members summing ${sum('operating_income')} against 120`)
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

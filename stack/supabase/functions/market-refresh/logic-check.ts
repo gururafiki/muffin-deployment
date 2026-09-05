@@ -2198,6 +2198,22 @@ console.log('\nrefresh_run — every invocation is recorded')
   check(/skipped/.test(insert), 'a skipped run is recorded as such, not as a failure')
 }
 
+// ── the member-role table is READ, not merely created ──────────────────────────────────────────
+// A CONTROL TABLE NOTHING READS IS DECORATION, and this repo has shipped that twice: migration 163
+// created `filing_form` and left the hardcoded form list in place, and `exchange-listings` was
+// deployed, reachable and absent from the cron. `segment_member_class` decides which members are a
+// subtotal (dropped) and which are a residual (kept, but never a split on their own) — wired up it
+// is the fix for Chevron's 581m "breakdown", and unwired it is a table with six rows in it.
+{
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  check(/from\('segment_member_class'\)/.test(src),
+    'the resource reads market.segment_member_class')
+  const calls = [...src.matchAll(/segmentFactsFrom\(([^)]*)\)/g)].map((m) => m[1])
+  check(calls.length > 0 && calls.every((a) => a.split(',').length === 4),
+    'every segmentFactsFrom call passes the member roles',
+    `${calls.length} call(s): ${calls.map((c) => c.split(',').length).join(', ')} args`)
+}
+
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
