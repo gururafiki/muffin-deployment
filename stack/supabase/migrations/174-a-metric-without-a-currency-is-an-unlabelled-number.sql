@@ -86,7 +86,22 @@ clustered as (
     ) as period_group
   from gapped g
 )
-select distinct on (c.security_id, c.metric_code, c.period_type, c.period_group)
+-- `symbol` LEADS THE DISTINCT ON, AND THAT IS THE WHOLE LATENCY FIX.
+--
+-- Putting it in the window PARTITION BY was necessary and NOT sufficient: a caller filters this
+-- VIEW from outside, so the predicate must also cross the DISTINCT ON — and PostgreSQL will not
+-- push a qual below one unless the column is part of its key. Measured on the node in the shape
+-- PostgREST actually sends (filter applied outside the view):
+--
+--   distinct on WITHOUT symbol   Rows Removed by Filter 1,260,808   5,955 ms
+--   distinct on WITH symbol      pushed to the index                   11.4 ms
+--
+-- `symbol_security` is UNIQUE on security_id, so symbol is functionally dependent on it and the
+-- distinct groups are byte-identical either way. This changes no row and no value.
+--
+-- I measured the earlier version with the filter INSIDE the query and it looked fixed; it was not,
+-- because that is not how a view is read. Time the shape the caller sends.
+select distinct on (c.symbol, c.security_id, c.metric_code, c.period_type, c.period_group)
   c.symbol,
   c.security_id,
   c.metric_code,
@@ -105,7 +120,7 @@ select distinct on (c.security_id, c.metric_code, c.period_type, c.period_group)
 from clustered c
 join market.metric m             on m.code = c.metric_code
 join market.security s           on s.security_id = c.security_id
-order by c.security_id, c.metric_code, c.period_type, c.period_group,
+order by c.symbol, c.security_id, c.metric_code, c.period_type, c.period_group,
          -- The filing wins over the provider, and with it the true fiscal period end.
          c.priority desc, c.as_of desc;
 
