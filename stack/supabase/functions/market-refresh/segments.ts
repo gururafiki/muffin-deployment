@@ -742,6 +742,83 @@ export function segmentFactsFrom(
       // which is exactly what its six segments sum to. That is arithmetic over facts the filing
       // states, not an inference about what it meant: without it the split is judged against the
       // consolidated figure it was never meant to equal, and a correct disclosure reads as a defect.
+      // THE SEGMENT COLUMN'S TOTAL, DERIVED FROM THE OTHER COLUMNS.
+      //
+      // A filer often states no total for the operating-segments column at all: Southern Copper's
+      // FY2018 10-K publishes consolidated revenue 7,096,700,000 and an intersegment elimination of
+      // -79,300,000, and nothing in between. The segments themselves sum to 7,176,000,000 — which
+      // is CORRECT, because segment revenue includes intersegment sales that consolidation removes.
+      // Reconciling them against the consolidated figure reports a 1.01x over-count on data that is
+      // right, and an over-count is the half this pipeline treats as a defect.
+      //
+      // TWO VARIANTS, BECAUSE A FILER CAN TAG ONE ADJUSTMENT UNDER TWO MEMBER NAMES. Southern
+      // Copper states the same -79,300,000 as BOTH `us-gaap:IntersegmentEliminationMember` and
+      // `scco:CorporateAndEliminationsMember` — the same line, once in the segment table and once
+      // in the geography table — so summing every other member double-counts it and derives
+      // 7,255,300,000, which matches nothing. Deduplicating by VALUE derives 7,176,000,000.
+      //
+      // Both are offered rather than one replacing the other, and that is what makes the guess
+      // safe: `reconciling` below accepts a candidate ONLY if the members' own sum already matches
+      // it, so an extra candidate can never select a wrong target — it can only rescue a split that
+      // would otherwise fall back to one. Neither is fitted to the answer: both are arithmetic over
+      // figures the filing states.
+      // THE SEGMENT COLUMN'S TOTAL, DERIVED FROM THE OTHER COLUMNS.
+      //
+      // A filer often states no total for the operating-segments column at all. Southern Copper's
+      // FY2018 10-K publishes consolidated revenue 7,096,700,000 and an intersegment elimination of
+      // -79,300,000, and nothing in between; its three segments sum to 7,176,000,000, which is
+      // CORRECT, because segment revenue includes intersegment sales that consolidation removes.
+      // Reconciled against the consolidated figure that is a 1.01x OVER-count — the half this
+      // pipeline treats as a defect — on data that is right.
+      //
+      // TWO REASONS THE NARROW FORM COULD NOT REACH IT. Its candidates carry NO qualifier axis (the
+      // filer tags the plain `StatementBusinessSegmentsAxis` facts as well as the qualified ones),
+      // so a derivation keyed on the candidates' own qualifier never ran. And the same
+      // -79,300,000 is tagged under BOTH `us-gaap:IntersegmentEliminationMember` and
+      // `scco:CorporateAndEliminationsMember` — one line, stated once in the segment table and once
+      // in the geography table — so summing every member of the axis double-counts it and derives
+      // 7,255,300,000, which matches nothing.
+      //
+      // So: walk every qualifier axis that has totals for this metric and period, and offer both
+      // the every-member and the distinct-VALUE sum. Offering rather than choosing is what makes
+      // this safe — `reconciling` below accepts a candidate ONLY if the members' own sum already
+      // matches it, so an extra candidate can never select a wrong target, it can only rescue a
+      // split that would otherwise fall back to one. Neither figure is fitted to the answer: both
+      // are arithmetic over totals the filing itself states.
+      const derivedTargets = (() => {
+        const plain = totals.get(flatKey)?.value
+        if (plain === undefined) return []
+        let ownAxis: string | null = null
+        let ownMember: string | null = null
+        if (oneQualifier !== null && oneQualifier !== '' && !oneQualifier.includes('|')) {
+          const eq = oneQualifier.indexOf('=')
+          if (eq >= 0) {
+            ownAxis = oneQualifier.slice(0, eq)
+            ownMember = oneQualifier.slice(eq + 1)
+          }
+        }
+        const out: number[] = []
+        const suffix = `|${flatKey}`
+        for (const [k, bucket] of qualifierMemberTotals) {
+          if (!k.endsWith(suffix)) continue
+          const axis = k.slice(0, k.length - suffix.length)
+          const others: number[] = []
+          for (const [m, v] of bucket) {
+            if (axis === ownAxis && m === ownMember) continue
+            others.push(v)
+          }
+          if (others.length === 0) continue
+          const all = others.reduce((a, v) => a + v, 0)
+          const distinct = [...new Set(others)].reduce((a, v) => a + v, 0)
+          out.push(plain - all)
+          if (distinct !== all) out.push(plain - distinct)
+        }
+        return out
+      })()
+
+      // THE FALLBACK IS DELIBERATELY THE OLD, NARROWER FORM. A split that reconciles to nothing
+      // must be described exactly as it was before these candidates existed, or widening the search
+      // would quietly change the target of every split it fails to rescue.
       const derived = (() => {
         if (oneQualifier === null) return undefined
         const plain = totals.get(flatKey)?.value
@@ -775,7 +852,8 @@ export function segmentFactsFrom(
       // candidate reconciles (its business axis carries only cross-tab halves and a residual) and
       // the partition search is then left to reject it rather than being handed a total to match.
       const candidateSum = cands.reduce((a, c) => a + c.value, 0)
-      const reconciling = [conceptQualified, sameConcept, qualified, derived, totals.get(flatKey)?.value]
+      const reconciling = [conceptQualified, sameConcept, qualified, ...derivedTargets,
+        totals.get(flatKey)?.value]
         .find((t) => t !== undefined && Math.abs(candidateSum - t) <= toleranceFor(t))
 
       const target = g0.parentMember === null

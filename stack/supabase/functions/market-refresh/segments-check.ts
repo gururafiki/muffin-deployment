@@ -876,5 +876,56 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
     `${of('operating_income').length} members summing ${sum('operating_income')} against 120`)
 }
 
+// ── a segment column's total, derived from the other columns (Southern Copper FY2018) ──────────
+//
+// Segment revenue INCLUDES intersegment sales that consolidation removes, so a split legitimately
+// exceeds the consolidated figure by the elimination — an OVER-count, which this pipeline treats as
+// a defect. Southern Copper states consolidated 7,096,700,000 and an elimination of -79,300,000 and
+// no segment-column total at all, so the honest target is their difference.
+//
+// THE FIXTURE MAKES THE CANDIDATE RULES DISAGREE, and both halves are load-bearing:
+//   segments carry NO qualifier axis  -> a derivation keyed on the candidates' own qualifier is
+//                                        never reached, and the target falls back to consolidated
+//   one elimination, TWO member names -> summing every member double-counts it (7,200 not 7,100),
+//                                        so only the distinct-VALUE sum matches
+// The control asserts the opposite direction: a split that already reconciles to the consolidated
+// figure must NOT be moved onto a derived target just because one is now offered.
+{
+  const CONS = 'srt:ConsolidationItemsAxis'
+  const SEG = 'us-gaap:StatementBusinessSegmentsAxis'
+  const R = 'RevenueFromContractWithCustomerExcludingAssessedTax'
+  const Y = { start: '2025-01-01', end: '2025-12-31' }
+
+  const scco: FixtureFact[] = [
+    { concept: R, value: 7000, ...Y },                                        // consolidated
+    // ONE elimination, stated under TWO member names — once in the segment table, once in the
+    // geography table. Summing both derives 7,200 and matches nothing.
+    { concept: R, value: -100, dims: { [CONS]: 'us-gaap:IntersegmentEliminationMember' }, ...Y },
+    { concept: R, value: -100, dims: { [CONS]: 'x:CorporateAndEliminationsMember' }, ...Y },
+    // The segments themselves, with NO qualifier axis, summing to 7,100 = 7,000 - (-100).
+    { concept: R, value: 4000, dims: { [SEG]: 'x:NorthMember' }, ...Y },
+    { concept: R, value: 3100, dims: { [SEG]: 'x:SouthMember' }, ...Y },
+  ]
+  const out = segmentFactsFrom(instance(scco), AXES, CONCEPTS).filter((f) => f.partitionId > 0)
+  const sum = out.reduce((a, f) => a + f.value, 0)
+  check(out.length === 2 && sum === 7100,
+    'a split including intersegment sales is served whole', `${out.length} members summing ${sum}`)
+  check(out[0]?.reconciledTo === 7100,
+    'its target is the consolidated figure less the elimination, counted ONCE',
+    `target ${out[0]?.reconciledTo} (7000 would be the consolidated figure, 7200 double-counts)`)
+
+  // THE CONTROL. An offered candidate must never move a split that already reconciles.
+  const plain: FixtureFact[] = [
+    { concept: R, value: 1000, ...Y },
+    { concept: R, value: -50, dims: { [CONS]: 'us-gaap:IntersegmentEliminationMember' }, ...Y },
+    { concept: R, value: 600, dims: { [SEG]: 'x:NorthMember' }, ...Y },
+    { concept: R, value: 400, dims: { [SEG]: 'x:SouthMember' }, ...Y },
+  ]
+  const kept = segmentFactsFrom(instance(plain), AXES, CONCEPTS).filter((f) => f.partitionId > 0)
+  check(kept.length === 2 && kept[0]?.reconciledTo === 1000,
+    'a split that already reconciles keeps the consolidated figure as its target',
+    `${kept.length} members, target ${kept[0]?.reconciledTo}`)
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
