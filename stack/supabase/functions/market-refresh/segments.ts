@@ -622,6 +622,69 @@ export function segmentFactsFrom(
     return true
   })
 
+  // ── A CROSS-TAB IS ALSO A FLAT SPLIT, SUMMED THE OTHER WAY ────────────────────────────────────
+  //
+  // A cross-tab cell reconciles to its PARENT's value, so a filer that publishes the grid without
+  // stating the parent's own total leaves every cell unplaceable: Chevron FY2025 discloses
+  // US/non-US x upstream/downstream revenue and no flat regional revenue at all, so all four cells
+  // sat at partition 0 and its business-line revenue — a complete, exactly-reconciling split — was
+  // in the database and on no page. Measured 2026-09-05: 19,990 such cells across 153 securities,
+  // 93 of them with nothing served on that axis.
+  //
+  // Summing the grid over the parent axis recovers the split the filer did publish, just not
+  // flatly. It is arithmetic on the filer's own facts, and the EXISTING partition search is what
+  // keeps it honest: the marginal is offered as an ordinary flat candidate and survives only if it
+  // reconciles to the filing's own undimensioned total, exactly like a filed member.
+  //
+  // WHY THAT TEST IS THE WHOLE DESIGN, measured on the two poles:
+  //   Chevron   Upstream 88,379 + Downstream 142,410 (marginal) + AllOther 581 (FILED)
+  //             = 231,370 = the filing's own revenue total          -> served
+  //   Novo      its members are a NESTED HIERARCHY — Ozempic inside TotalGLP1 inside
+  //             TotalDiabetesCare — and its regions likewise (EUCAN, CN, APAC and Emerging
+  //             Markets all sit inside International Operations). Summed flat the cells reach
+  //             DKK 1,307,626m against revenue of 309,064m, 4.2x.                -> not served
+  // No rule about grids or completeness separates those two; reconciliation does, and it is the
+  // rule already relied on everywhere else here.
+  //
+  // A MEMBER THE FILER STATES FLATLY IS NEVER OVERWRITTEN. Chevron's `AllOther` has a filed flat
+  // value and keeps it; only members with no flat fact of their own are synthesised. Otherwise a
+  // sum of ours would silently replace a number the filing states.
+  const marginals: Candidate[] = (() => {
+    const flatSeen = new Set<string>()
+    for (const c of unique) {
+      if (c.parentMember === null) {
+        flatSeen.add(`${c.axis}|${c.memberCode}|${c.metricCode}|${c.periodType}|${c.periodEnding}`)
+      }
+    }
+    const rolled = new Map<string, Candidate>()
+    for (const c of unique) {
+      if (c.parentMember === null) continue
+      const flatKey = `${c.axis}|${c.memberCode}|${c.metricCode}|${c.periodType}|${c.periodEnding}`
+      if (flatSeen.has(flatKey)) continue
+      const existing = rolled.get(flatKey)
+      if (existing) existing.value += c.value
+      else {
+        rolled.set(flatKey, {
+          ...c,
+          parentAxis: null,
+          parentMember: null,
+          // THE QUALIFIER IS KEPT, and dropping it was wrong. A qualifier says which of several
+          // "undimensioned" totals a fact was disaggregated from, and the cells carry the filer's
+          // — Chevron tags its grid `ConsolidationItemsAxis = OperatingSegmentsMember`, whose
+          // total is 231,370m, while the bare undimensioned revenue is 184,432m. Blanking it put
+          // the marginal in the unqualified bucket, where it summed to 231,370 against a target of
+          // 184,432 and reconciled to nothing. It also has to match the FILED members it will be
+          // partitioned beside — Chevron's `AllOther` carries the same qualifier.
+          value: c.value,
+        })
+      }
+    }
+    return [...rolled.values()]
+  })()
+  const synthetic = new Set(marginals)
+  for (const m of marginals) unique.push(m)
+
+
   // THE SPLIT IS A PROPERTY OF (AXIS, PERIOD END), AND IS APPLIED MORE WIDELY THAN IT IS LEARNED.
   //
   // Which members a filing disclosed together is one fact per axis per reporting date. It is
@@ -910,6 +973,16 @@ export function segmentFactsFrom(
       const own = targetByBucket.get(
         `${c.metricCode}|${c.periodType}|${c.periodStart}|${c.periodEnding}`,
       )
+      // A MARGINAL THAT EARNS NO PARTITION IS DELETED, NOT STORED AT 0.
+      //
+      // A filed member at partition 0 is a fact the filing states and we could not place — worth
+      // keeping, and the raw table's job. A marginal is OURS: it exists only to be reconciled, and
+      // unplaced it is a duplicate of the cells it was summed from. Alphabet shows why it matters —
+      // its product cells sum to Google Services (342,721,000,000), not to the company, so the
+      // marginal correctly places nothing, and storing it anyway would add five rows that say
+      // exactly what the five cells already say while looking like a flat split the filer never
+      // made.
+      if (synthetic.has(c) && partitionId === 0) continue
       out.push({ ...c, partitionId, reconciledTo: partitionId > 0 ? own ?? null : null })
     }
   }

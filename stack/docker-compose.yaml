@@ -308,6 +308,31 @@ services:
       - /home/ubuntu/supabase/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql
       - supabase-db-data:/var/lib/postgresql/data
       - supabase-db-config:/etc/postgresql-custom
+      # POSTGRES PUTS PARALLEL-QUERY SHARED MEMORY IN /dev/shm, AND DOCKER'S DEFAULT IS 64 MB.
+      #
+      # `dynamic_shared_memory_type` is `posix`, so every parallel worker allocates its DSM segment
+      # here. 64 MB held until the segment tables grew, and on 2026-09-05 it stopped holding:
+      #
+      #   ERROR: could not resize shared memory segment "/PostgreSQL.xxx" to 2097152 bytes:
+      #          No space left on device        CONTEXT: parallel worker
+      #
+      # That failed the build of `security_segment_spine` inside migration 158 — which DROPS before
+      # it creates — so the deploy left production with no spine at all, five later migrations
+      # failed on the missing relation, and every subsequent deploy would have failed identically.
+      # It also hit two ordinary scans of `security_segment_detail`, so this is not a migration
+      # problem: any parallel query over a large `market` relation can hit it.
+      #
+      # `shm_size:` DOES NOT WORK HERE. `docker service create` has no `--shm-size` at all
+      # (measured: 0 occurrences in its --help against 1 for `docker run`), so Swarm would ignore
+      # it silently — the failure mode this file is full of. A tmpfs mount IS honoured: verified on
+      # the node with a throwaway service, which reported 256 MB on /dev/shm.
+      #
+      # 256 MB, not 1 GB: tmpfs pages count against the container's memory cgroup, and this service
+      # is capped at 1.5 GiB with ~290 MiB in use. Four times the old ceiling, ~950 MiB still spare.
+      - type: tmpfs
+        target: /dev/shm
+        tmpfs:
+          size: 268435456
     networks:
       - muffin-net
     healthcheck:

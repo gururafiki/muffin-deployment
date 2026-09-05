@@ -927,5 +927,117 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
     `${kept.length} members, target ${kept[0]?.reconciledTo}`)
 }
 
+// ── a cross-tab is also a flat split, summed the other way (Chevron / Novo) ────────────────────
+//
+// A cross-tab cell reconciles to its PARENT's value, so a filer who publishes the grid without
+// stating the parent's own total leaves every cell unplaceable. Chevron FY2025 does exactly that:
+// US/non-US x upstream/downstream revenue, no flat regional revenue, so its complete and exactly
+// reconciling business-line split sat in the database at partition 0 and appeared on no page.
+// Measured 2026-09-05: 19,990 such cells across 153 securities, 93 with nothing served.
+//
+// EVERY CANDIDATE RULE MUST DISAGREE HERE, and each shape below kills a different shortcut:
+//   Chevron    marginal + a FILED residual reconciles to the filing's own total   -> served
+//   Novo       members NEST (a parent and its children both tagged), so the flat
+//              sum is a multiple of revenue; only the disjoint level reconciles    -> that level
+//   Alphabet   the marginal reconciles to its PARENT, not the company              -> dropped
+//   filed      a member the filer states flatly is never replaced by our sum       -> filed wins
+{
+  // The CELL axis is the higher-priority one (product, 100) and the PARENT the business axis (90),
+  // which is how `ordered[0]` picks the primary — the same shape as the Alphabet fixture above.
+  const GEO = BIZ    // stands in for the parent dimension (Chevron's is geography)
+  const SEG = PROD   // stands in for the dimension being split
+  const R = 'RevenueFromContractWithCustomerExcludingAssessedTax'
+  const QUAL = 'srt:ConsolidationItemsAxis'
+  const Y = { start: '2025-01-01', end: '2025-12-31' }
+
+  // ── CHEVRON: the grid is the only place the split exists ─────────────────────────────────────
+  {
+    // THE GRID CARRIES A QUALIFIER, AND THE FIXTURE MAKES IT MATTER. Chevron tags its segment
+    // facts `ConsolidationItemsAxis = OperatingSegmentsMember`, whose total is 231,370m, while the
+    // BARE undimensioned revenue is a different figure entirely. A marginal that dropped the
+    // qualifier would be reconciled against the bare total and match nothing — which is exactly
+    // what happened on the first run against the real filing. Both totals are present here so the
+    // two rules disagree.
+    const OPSEG = { [QUAL]: 'us-gaap:ReportableSegmentsMember' }
+    const cvx: FixtureFact[] = [
+      { concept: R, value: 184432, ...Y },                              // the BARE total
+      { concept: R, value: 231370, dims: OPSEG, ...Y },                 // the QUALIFIED total
+      { concept: R, value: 581, dims: { ...OPSEG, [SEG]: 'us-gaap:AllOtherSegmentsMember' }, ...Y },
+      { concept: R, value: 45518, dims: { ...OPSEG, [GEO]: 'country:US', [SEG]: 'x:UpstreamMember' }, ...Y },
+      { concept: R, value: 72485, dims: { ...OPSEG, [GEO]: 'country:US', [SEG]: 'x:DownstreamMember' }, ...Y },
+      { concept: R, value: 42861, dims: { ...OPSEG, [GEO]: 'srt:NonUsMember', [SEG]: 'x:UpstreamMember' }, ...Y },
+      { concept: R, value: 69925, dims: { ...OPSEG, [GEO]: 'srt:NonUsMember', [SEG]: 'x:DownstreamMember' }, ...Y },
+    ]
+    const out = segmentFactsFrom(instance(cvx), AXES, CONCEPTS)
+    const flat = out.filter((f) => f.parentMember === null && f.partitionId > 0)
+    const sum = flat.reduce((a, f) => a + f.value, 0)
+    check(flat.length === 3 && sum === 231370,
+      'a grid with no stated parent total is summed into a flat split that reconciles',
+      `${flat.length} members summing ${sum}`)
+    const up = flat.find((f) => f.memberCode === 'x:UpstreamMember')
+    check(up?.value === 88379, 'the marginal is the cell sum across parents (45,518 + 42,861)',
+      `got ${up?.value}`)
+    check(out.some((f) => f.parentMember !== null),
+      'the cells themselves are still kept — the marginal is added, never a replacement')
+  }
+
+  // ── NOVO: members nest, so the flat sum is a multiple of revenue ─────────────────────────────
+  // International Operations CONTAINS the regions beneath it. Summed flat they reach 620; the only
+  // subset that reconciles is {US, InternationalOperations}. A rule that marginalises without
+  // reconciling would serve 620 against a revenue of 310 — Novo's real ratio is 4.2x.
+  {
+    const nvo: FixtureFact[] = [
+      { concept: R, value: 310, ...Y },
+      { concept: R, value: 180, dims: { [GEO]: 'x:USMember', [SEG]: 'x:CareMember' }, ...Y },
+      { concept: R, value: 130, dims: { [GEO]: 'x:IntlMember', [SEG]: 'x:CareMember' }, ...Y },
+      { concept: R, value: 80, dims: { [GEO]: 'x:EucanMember', [SEG]: 'x:CareMember' }, ...Y },
+      { concept: R, value: 50, dims: { [GEO]: 'x:ApacMember', [SEG]: 'x:CareMember' }, ...Y },
+    ]
+    const out = segmentFactsFrom(instance(nvo), AXES, CONCEPTS)
+    const flat = out.filter((f) => f.parentMember === null && f.partitionId > 0)
+    const sum = flat.reduce((a, f) => a + f.value, 0)
+    check(sum !== 620, 'a nested hierarchy is never served at its inflated flat sum', `got ${sum}`)
+    check(sum === 0 || sum === 310,
+      'either nothing is served or exactly the disjoint level that reconciles', `got ${sum}`)
+  }
+
+  // ── ALPHABET: the marginal reconciles to its PARENT, so it is dropped rather than stored at 0 ─
+  {
+    const goog: FixtureFact[] = [
+      { concept: R, value: 402836, ...Y },
+      { concept: R, value: 342721, dims: { [SEG]: 'x:ServicesMember' }, ...Y },
+      { concept: R, value: 58578, dims: { [SEG]: 'x:CloudMember' }, ...Y },
+      { concept: R, value: 1537, dims: { [SEG]: 'x:BetsMember' }, ...Y },
+      { concept: R, value: 224532, dims: { [SEG]: 'x:ServicesMember', [GEO]: 'x:SearchMember' }, ...Y },
+      { concept: R, value: 118189, dims: { [SEG]: 'x:ServicesMember', [GEO]: 'x:YouTubeMember' }, ...Y },
+    ]
+    const out = segmentFactsFrom(instance(goog), AXES, CONCEPTS)
+    const flat = out.filter((f) => f.parentMember === null)
+    check(flat.length === 3,
+      'a marginal that reconciles only to its parent is dropped, not stored at partition 0',
+      `${flat.length} flat rows (3 filed segments, no synthesised leftovers)`)
+    check(out.filter((f) => f.parentMember !== null).length === 2,
+      'and the cells it was summed from are untouched')
+  }
+
+  // ── A FILED FLAT MEMBER IS NEVER REPLACED BY OUR SUM ─────────────────────────────────────────
+  // The filer states Upstream flatly as 100 while its cells sum to 90 — a real disclosure gap.
+  // Overwriting it with the sum would silently correct the filing to what we can add up.
+  {
+    const filed: FixtureFact[] = [
+      { concept: R, value: 150, ...Y },
+      { concept: R, value: 100, dims: { [SEG]: 'x:UpstreamMember' }, ...Y },
+      { concept: R, value: 50, dims: { [SEG]: 'x:DownstreamMember' }, ...Y },
+      { concept: R, value: 40, dims: { [GEO]: 'country:US', [SEG]: 'x:UpstreamMember' }, ...Y },
+      { concept: R, value: 50, dims: { [GEO]: 'srt:NonUsMember', [SEG]: 'x:UpstreamMember' }, ...Y },
+    ]
+    const out = segmentFactsFrom(instance(filed), AXES, CONCEPTS)
+    const up = out.filter((f) => f.parentMember === null && f.memberCode === 'x:UpstreamMember')
+    check(up.length === 1 && up[0].value === 100,
+      'a filed flat member keeps its FILED value, never the cell sum',
+      `${up.length} row(s), value ${up[0]?.value} (the cells sum to 90)`)
+  }
+}
+
 console.log(failures === 0 ? '\nALL SEGMENT CHECKS PASSED' : `\n${failures} SEGMENT CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
