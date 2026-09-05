@@ -2443,12 +2443,25 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           // statement of itself, so a re-read replaces them wholesale. It is not keyed on the
           // upsert's conflict target, which omits the accession deliberately — a newer filing
           // restating a period takes ownership of the row, and deleting by accession then correctly
-          // leaves it alone. Runs even when the parse yielded nothing: a filing that now discloses
-          // no segments must retract what it used to disclose. A fetch that THREW never reaches
-          // here, so an outage retracts nothing.
-          const { error: rtErr } = await market.from('security_segment').delete()
-            .eq('security_id', item.security_id).eq('accession_number', item.accession_number)
-          if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+          // leaves it alone.
+          //
+          // ONLY WHEN THE DOCUMENT WAS ACTUALLY READ. `facts` is empty for FOUR different reasons
+          // and only one of them is "this filing discloses no segments": the index lookup can
+          // return nothing, the fetch can return null, and the size gate can refuse the document —
+          // none of which is evidence about what the filing says. The first version of this
+          // retraction ran unconditionally and its comment claimed "a fetch that THREW never
+          // reaches here, so an outage retracts nothing", which is true of a THROW and false of a
+          // null: 281 filings took this path in the three hours it was live (275 noInstance, 6
+          // tooLarge) and `security_segment` fell by 91 rows while the drain was actively adding.
+          // A REQUEST THAT FAILED AND A REQUEST THAT ANSWERED NOTHING ARE DIFFERENT FACTS — the
+          // seventh instance of that shape in this pipeline, introduced by me while fixing a
+          // different one. A parsed document with no segments still retracts, because that IS the
+          // filing speaking.
+          if (typeof xml === 'string' && !oversize) {
+            const { error: rtErr } = await market.from('security_segment').delete()
+              .eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+            if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+          }
 
           if (facts.length > 0) {
             const rows = facts.map((f) => ({
@@ -2630,12 +2643,25 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           // statement of itself, so a re-read replaces them wholesale. It is not keyed on the
           // upsert's conflict target, which omits the accession deliberately — a newer filing
           // restating a period takes ownership of the row, and deleting by accession then correctly
-          // leaves it alone. Runs even when the parse yielded nothing: a filing that now discloses
-          // no segments must retract what it used to disclose. A fetch that THREW never reaches
-          // here, so an outage retracts nothing.
-          const { error: rtErr } = await market.from('security_segment').delete()
-            .eq('security_id', item.securityId).eq('accession_number', item.accession)
-          if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+          // leaves it alone.
+          //
+          // ONLY WHEN THE DOCUMENT WAS ACTUALLY READ. `facts` is empty for FOUR different reasons
+          // and only one of them is "this filing discloses no segments": the index lookup can
+          // return nothing, the fetch can return null, and the size gate can refuse the document —
+          // none of which is evidence about what the filing says. The first version of this
+          // retraction ran unconditionally and its comment claimed "a fetch that THREW never
+          // reaches here, so an outage retracts nothing", which is true of a THROW and false of a
+          // null: 281 filings took this path in the three hours it was live (275 noInstance, 6
+          // tooLarge) and `security_segment` fell by 91 rows while the drain was actively adding.
+          // A REQUEST THAT FAILED AND A REQUEST THAT ANSWERED NOTHING ARE DIFFERENT FACTS — the
+          // seventh instance of that shape in this pipeline, introduced by me while fixing a
+          // different one. A parsed document with no segments still retracts, because that IS the
+          // filing speaking.
+          if (xml !== null && !oversize) {
+            const { error: rtErr } = await market.from('security_segment').delete()
+              .eq('security_id', item.securityId).eq('accession_number', item.accession)
+            if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+          }
 
           if (facts.length > 0) {
             const rows = facts.map((f) => ({

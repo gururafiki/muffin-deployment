@@ -558,6 +558,19 @@ jobs:
             fail=1
           fi
 
+          #  A MATVIEW THAT STOPS REFRESHING SERVES STALE DATA AND REPORTS SUCCESS. `facets-refresh`
+          #  records a failed `refresh_segment_spine` and returns ok anyway — correctly, since the
+          #  filter spine the screener reads has already rebuilt by then and failing the resource
+          #  would trade a stale segment dashboard for a stale universe. Nothing asserted it, which
+          #  was fine while that spine only fed dashboards. Migration 179 moved
+          #  `derive_segment_classification` onto it (2,586 ms -> 2.8 ms, and the function from
+          #  > 45,000 ms to 102 ms), so it is now on a CORRECTNESS path: a silent refresh failure
+          #  freezes the weighted sector classification while every run still reports success —
+          #  the same shape as the four days of silent daily failure 179 exists to fix.
+          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_spine_refresh_succeeds.py; then
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::market reference data failed verification — see the failures above"
             exit 1
