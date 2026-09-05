@@ -134,7 +134,12 @@ declare
 latest as (
   select distinct on (g.security_id, g.axis, g.member_code, g.metric_code)
     g.security_id, g.axis, g.member_code, g.metric_code,
-    g.value, g.currency_code, g.period_ending, g.accession_number
+    g.value, g.currency_code, g.period_ending, g.accession_number,
+    -- THE FIGURE THE SPLIT WAS ACCEPTED AGAINST, carried through so a CONSUMER can tell a split
+    -- that adds up to a filed total from one that adds up to nothing. Same for every member of a
+    -- split by construction (it is per security/axis/period), so `max()` in the pivot below is a
+    -- passthrough, not an aggregate choice.
+    g.reconciled_to
   from market.security_segment_latest g
   join newest n
     on n.security_id = g.security_id and n.axis = g.axis and n.period_ending = g.period_ending
@@ -147,6 +152,7 @@ pivoted as (
     max(l.currency_code)                                             as currency_code,
     max(l.period_ending)                                             as period_ending,
     max(l.accession_number)                                          as accession_number,
+    max(l.reconciled_to)                                             as reconciled_to,
     max(l.value) filter (where l.metric_code = 'revenue')             as revenue,
     max(l.value) filter (where l.metric_code = 'operating_income')    as operating_income,
     max(l.value) filter (where l.metric_code = 'capital_expenditure') as capital_expenditure,
@@ -173,7 +179,7 @@ select
        then round(100 * p.operating_income / ast.value, 2) end as return_on_segment_assets_pct,
   round(100 * p.revenue / nullif(sum(p.revenue) over (partition by p.security_id, p.axis), 0), 2)
     as revenue_share_pct,
-  p.currency_code, p.period_ending, p.accession_number,
+  p.currency_code, p.period_ending, p.accession_number, p.reconciled_to,
   -- Appended: what the member is called and where it is, when that is knowable without curation.
   sm.country_iso2,
   sm.label as member_label
