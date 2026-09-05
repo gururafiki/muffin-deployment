@@ -60,3 +60,11 @@ export const tiingo = () => origin('TIINGO_BASE_URL', 'https://api.tiingo.com')
  * fails on a hardcoded provider URL in the functions, which is the direction that was blind.
  */
 export const wikidata = () => origin('WIKIDATA_BASE_URL', 'https://query.wikidata.org')
+
+/**
+ * DART (Korea). The cache in front of this is load-bearing rather than an optimisation: one filing
+ * is 802 KB and takes 73.5 s from outside Korea, measured, against a 90 s worker. A filed document
+ * is immutable, so the entry is good for ever — and with `proxy_ignore_client_abort on` a run that
+ * gives up still leaves the next one an instant hit.
+ */
+export const dart = () => origin('DART_BASE_URL', 'https://opendart.fss.or.kr')

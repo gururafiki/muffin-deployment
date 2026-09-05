@@ -15,6 +15,11 @@ was missing -- never by CI, a deploy, or a query returning an error.
   * Those same four rendered as plain numbers in both `x facet` tables, because the gauge colouring
     is a `byRegexp` override that listed facet names and did not know about them.
 
+  * `Segment facts written per run` hardcodes the resources it plots. When Korea/DART was added,
+    the panel would have kept drawing a healthy SEC line while the two new resources did nothing --
+    a throughput chart that silently omits a regulator is worse than one that is missing, because
+    the line that IS drawn reads as the whole story.
+
 Each is the same shape: a piece of config that ENUMERATES something, silently going stale when the
 thing it enumerates grows. The fix in the dashboard is to stop enumerating; the fix here is to fail
 when an enumeration falls behind.
@@ -35,6 +40,14 @@ EXHAUSTIVE = {
 # Columns that are labels or denominators rather than facets, so they need no gauge.
 NOT_A_FACET = {'country', 'sector name', 'securities', 'segment capable', 'facet', 'have',
                'missing', 'sector', 'industry name', 'bucket'}
+
+# Panels that plot a HARDCODED list of resources, and the tables whose writers they must cover.
+# Keyed on the dashboard, like EXHAUSTIVE, so renaming a panel elsewhere cannot exempt this one.
+THROUGHPUT = {
+    ('Muffin — Business lines', 'Segment facts written per run'):
+        ('security_segment', 'security_filing'),
+}
+INDEX_TS = pathlib.Path('stack/supabase/functions/market-refresh/index.ts')
 
 
 def facet_columns() -> list[str]:
@@ -57,6 +70,28 @@ def facet_columns() -> list[str]:
               f'would pass vacuously')
         sys.exit(1)
     return cols
+
+
+def segment_writing_resources(tables: tuple[str, ...]) -> dict[str, str]:
+    """Resources whose handler writes one of `tables`, READ FROM index.ts rather than listed here.
+
+    A hardcoded list in this file would be the very thing it guards against. The handlers are
+    delimited exactly as `logic-check.ts` delimits them -- `resource === X_RESOURCE` -- and the
+    constant is resolved to its string literal, because the panel plots the name and the code
+    carries the identifier."""
+    src = INDEX_TS.read_text()
+    names = dict(re.findall(r"const\s+([A-Z_]+_RESOURCE)\s*=\s*'([a-z][a-z0-9-]*)'", src))
+    marks = [(m.start(), m.group(1)) for m in re.finditer(r'resource === ([A-Z_]+_RESOURCE)', src)]
+    found: dict[str, str] = {}
+    for i, (pos, const) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(src)
+        body = src[pos:end]
+        for table in tables:
+            if f".from('{table}')" in body and '.upsert(' in body:
+                if const in names:
+                    found[names[const]] = const
+                break
+    return found
 
 
 def safe_match(rx: str, value: str) -> bool:
@@ -83,6 +118,8 @@ def panels(dash: dict):
         for sub in p.get('panels', []):   # collapsed rows nest their children
             yield sub
 
+
+checked_throughput: set[tuple[str, str]] = set()
 
 for path in sorted(DASH.glob('*.json')):
     dash = json.loads(path.read_text())
@@ -115,7 +152,25 @@ for path in sorted(DASH.glob('*.json')):
                     f"{', '.join(missing)}. A panel titled 'every facet' showing a subset is read "
                     f"as complete.")
 
-        # ── 3. every percentage column must be coloured ────────────────────────────────────────
+        # ── 3. a hardcoded throughput list must cover every resource that does the work ────────
+        #
+        # `written > 0` filters were removed from these panels because a run that wrote nothing is
+        # the only way a stalled resource shows up. A resource MISSING from the list is the same
+        # defect one level out: the panel keeps drawing a healthy line for the resources it does
+        # know about, so the gap reads as "everything is fine" rather than as no data.
+        if (title, name) in THROUGHPUT:
+            checked_throughput.add((title, name))
+            blob = ' '.join(sqls)
+            expected = segment_writing_resources(THROUGHPUT[(title, name)])
+            absent = sorted(r for r in expected if f"'{r}'" not in blob)
+            if absent:
+                failures.append(
+                    f"{path.name}: panel {name!r} plots a hardcoded resource list that omits "
+                    f"{', '.join(absent)}. Those handlers write "
+                    f"{'/'.join(THROUGHPUT[(title, name)])}, so their throughput would be invisible "
+                    f"while the panel kept drawing a healthy line for the others.")
+
+        # ── 4. every percentage column must be coloured ────────────────────────────────────────
         if p.get('type') != 'table':
             continue
         matchers = [o.get('matcher', {}) for o in p.get('fieldConfig', {}).get('overrides', [])]
@@ -138,11 +193,22 @@ for path in sorted(DASH.glob('*.json')):
                             f"enumerates names and has gone stale.")
 
 
+# A KEY THAT MATCHES NO PANEL IS A CHECK THAT CAN NEVER FIRE, and it reads exactly like a passing
+# one. The first version of this named the dashboard 'Muffin — Segments'; it is 'Muffin — Business
+# lines', so every assertion above would have been skipped silently.
+for key in THROUGHPUT:
+    if key not in checked_throughput:
+        failures.append(
+            f"THROUGHPUT names {key!r}, which matches no panel — the check would never run. "
+            f"Fix the dashboard title or the panel name.")
+
 if failures:
     for f in failures:
         print(f"::error::{f}")
     sys.exit(1)
 
 n = sum(1 for path in DASH.glob('*.json') for _ in panels(json.loads(path.read_text())))
+segment_resources = segment_writing_resources(('security_segment', 'security_filing'))
 print(f"checked {n} panels across {len(list(DASH.glob('*.json')))} dashboards; "
-      f"no duplicate aliases, no stale facet enumeration, no uncoloured percentage")
+      f"no duplicate aliases, no stale facet enumeration, no uncoloured percentage, "
+      f"throughput covers {len(segment_resources)} segment/filing resources")

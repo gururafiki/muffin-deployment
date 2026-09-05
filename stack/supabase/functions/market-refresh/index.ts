@@ -35,6 +35,7 @@ import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts
 import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
+import * as dart from './dart.ts'
 import { TOO_LARGE, fetchInstance, findInstanceUrl, instanceIsTooLarge, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { fetchIndustries, slug } from './wikidata.ts'
 import { candidateSymbols } from './symbol-repair.ts'
@@ -319,6 +320,10 @@ const SHARE_STATS_RESOURCE = 'security-share-stats'
 const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
 const SEGMENTS_RESOURCE = 'security-segments'
+const KR_FILINGS_RESOURCE = 'kr-filings'
+const KR_SEGMENTS_RESOURCE = 'security-kr-segments'
+/** DART's own name for the Korean annual report, and the `filing_form` row seeded by migration 172. */
+const KR_ANNUAL_FORM = '사업보고서'
 const FILING_HISTORY_RESOURCE = 'security-filing-history'
 const WIKIDATA_RESOURCE = 'security-wikidata-industries'
 /**
@@ -438,6 +443,11 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // ten-minute TTL made every other firing a no-op — measured in production, half the runs came
     // back `skipped: fresh or in flight` while reporting ok.
     [SEGMENTS_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
+    // FOUR MINUTES ON A FIVE-MINUTE CRON. A TTL at or above the interval makes the resource
+    // self-skip half its firings — which `security-segments` shipped with and
+    // `derive-classifications` still does, 29 days in 30.
+    [KR_SEGMENTS_RESOURCE]: 4,
+    [KR_FILINGS_RESOURCE]: 14,
     [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -2112,6 +2122,312 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // FY2025) with no iPhone in it. The filing's own instance keeps them, and is small — 778 KB for
     // a 10-Q, 2.07 MB for a 10-K — so this is an ordinary backlog over filings `security_filing`
     // already holds rather than a bulk import that would need a second executor.
+    // ── KOREA: DISCOVERY ────────────────────────────────────────────────────────────────────────
+    //
+    // Two phases, because DART caps `list.json` at a THREE-MONTH window whenever `corp_code` is
+    // absent (measured: a 9-month request answers `status 100`). Phase A sweeps windows to learn
+    // which listed filers we hold; phase B then asks each one for its own history, where no window
+    // limit applies at all.
+    //
+    // CURSORED, NOT A SINGLE SWEEP: 61 list calls took 247 s, far more than one 90 s worker.
+    if (resource === KR_FILINGS_RESOURCE) {
+      const deadline = Date.now() + 70_000
+      const budget = () => Math.min(30_000, Math.max(2_000, deadline - Date.now()))
+
+      const { data: cursorRows, error: cErr } = await market
+        .from('dart_discovery_cursor').select('window_end,mapped_at').limit(1)
+      if (cErr) throw new Error(`dart_discovery_cursor read failed: ${cErr.message}`)
+      const cursor = cursorRows?.[0] ?? { window_end: null, mapped_at: null }
+
+      let mapped = 0
+      let filingsWritten = 0
+      let walkedCount = 0
+      let windows = 0
+      let listCalls = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      // The six-digit code in front of every Korean symbol is DART's own `stock_code`, so the
+      // mapping needs no separate download — `corpCode.xml` is 3.6 MB and timed out twice at 240 s
+      // in an earlier spike, and is deliberately not used.
+      const { data: krRows, error: kErr } = await market
+        .from('security_facets')
+        .select('security_id,symbol')
+        .eq('country_iso2', 'KR')
+        .eq('security_type_code', 'equity')
+        .limit(2000)
+      if (kErr) throw new Error(`security_facets read failed: ${kErr.message}`)
+      const byStockCode = new Map<string, string>()
+      for (const r of krRows ?? []) {
+        const code = dart.stockCodeFromSymbol(r.symbol as string | null)
+        if (code) byStockCode.set(code, r.security_id as string)
+      }
+
+      if (cursor.mapped_at === null) {
+        // ── PHASE A: which of our securities file with DART ──────────────────────────────────
+        // Walks backwards in 3-month windows. Korean annual reports are filed within 90 days of a
+        // December year-end, so the March window carries almost all of them — but walking rather
+        // than assuming means a company with a non-calendar year is picked up too.
+        let end = cursor.window_end ? new Date(cursor.window_end) : new Date()
+        const ymd = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '')
+        const seen = new Map<string, dart.DartFiling>()
+
+        while (Date.now() < deadline - 20_000 && windows < 2) {
+          const from = new Date(end)
+          from.setMonth(from.getMonth() - 3)
+          from.setDate(from.getDate() + 1)
+          for (const cls of ['Y', 'K'] as const) {
+            let page = 1
+            let pages = 1
+            while (page <= pages && Date.now() < deadline - 15_000) {
+              try {
+                const res = await dart.listFilings(
+                  { from: ymd(from), to: ymd(end), corpCls: cls, page }, budget(),
+                )
+                listCalls++
+                pages = Math.max(1, res.totalPages)
+                for (const f of res.filings) {
+                  if (f.stockCode && byStockCode.has(f.stockCode)) seen.set(f.rceptNo, f)
+                }
+              } catch (e) {
+                const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+                if (firstError === null) firstError = msg
+                lastError = msg
+                break
+              }
+              page++
+            }
+          }
+          windows++
+          end = new Date(from)
+          end.setDate(end.getDate() - 1)
+        }
+
+        // `security_filer` is the mapping; `security_filing` is the queue. Both are written here so
+        // the parse resource costs ONE fetch per run rather than a lookup plus a fetch.
+        const filers = new Map<string, { security_id: string; source_code: string; filer_id: string }>()
+        const filings: Record<string, unknown>[] = []
+        for (const f of seen.values()) {
+          const securityId = byStockCode.get(f.stockCode)!
+          filers.set(securityId, { security_id: securityId, source_code: 'dart', filer_id: f.corpCode })
+          if (!f.reportName.includes(KR_ANNUAL_FORM)) continue
+          filings.push({
+            security_id: securityId,
+            accession_number: f.rceptNo,
+            report_type: KR_ANNUAL_FORM,
+            filing_date: `${f.receiptDate.slice(0, 4)}-${f.receiptDate.slice(4, 6)}-${f.receiptDate.slice(6, 8)}`,
+            source_code: 'dart',
+            is_xbrl: true,
+          })
+        }
+        if (filers.size > 0) {
+          const { error } = await market.from('security_filer')
+            .upsert([...filers.values()], { onConflict: 'security_id,source_code' })
+          if (error) throw new Error(`security_filer upsert failed: ${error.message}`)
+          mapped = filers.size
+        }
+        if (filings.length > 0) {
+          const { error } = await market.from('security_filing')
+            .upsert(dedupeBy(filings, (r) => `${r.security_id}|${r.accession_number}`),
+              { onConflict: 'security_id,accession_number', ignoreDuplicates: true })
+          if (error) throw new Error(`security_filing upsert failed: ${error.message}`)
+          filingsWritten = filings.length
+        }
+
+        // Two full years of windows is past every December year-end twice; anything still unmapped
+        // does not file a periodic report we can read, and re-walking history for ever would spend
+        // a call budget on a settled answer.
+        const done = end < new Date(Date.now() - 2 * 365 * 24 * 3600 * 1000)
+        const { error: uErr } = await market.from('dart_discovery_cursor').update({
+          window_end: end.toISOString().slice(0, 10),
+          mapped_at: done ? new Date().toISOString() : null,
+          updated_at: new Date().toISOString(),
+        }).eq('singleton', true)
+        if (uErr) throw new Error(`dart_discovery_cursor update failed: ${uErr.message}`)
+      } else {
+        // ── PHASE B: one company's whole history, no window limit ────────────────────────────
+        // AN ANTI-JOIN, NOT AN ORDERING. Read straight from `security_filer` with a `limit`, this
+        // returns the same eight companies on every run for ever — `written` reads as throughput
+        // and the ninth company is never reached. `pending_kr_history` excludes what has been
+        // walked in the last 90 days, so the page advances and the re-walks still happen.
+        const { data: needy, error: nErr } = await market
+          .from('pending_kr_history')
+          .select('security_id,filer_id')
+          .limit(scopeLimit ?? 8)
+        if (nErr) throw new Error(`pending_kr_history read failed: ${nErr.message}`)
+
+        const filings: Record<string, unknown>[] = []
+        // Stamped only for a company the provider actually ANSWERED for. `parseListBody` already
+        // separates DART's '013' — "no matching data", an empty answer — from a real failure, so a
+        // company with no annual report in range is settled and a company we could not reach comes
+        // back next run. Advancing on a transport error would make a thirty-second DART outage
+        // cost that company a 90-day wait.
+        const walked: string[] = []
+        for (const r of needy ?? []) {
+          if (Date.now() > deadline - 15_000) break
+          try {
+            const res = await dart.listFilings(
+              { corpCode: String(r.filer_id), from: '20150101', to: new Date().toISOString().slice(0, 10).replace(/-/g, '') },
+              budget(),
+            )
+            listCalls++
+            walked.push(String(r.security_id))
+            for (const f of res.filings) {
+              if (!f.reportName.includes(KR_ANNUAL_FORM)) continue
+              filings.push({
+                security_id: r.security_id,
+                accession_number: f.rceptNo,
+                report_type: KR_ANNUAL_FORM,
+                filing_date: `${f.receiptDate.slice(0, 4)}-${f.receiptDate.slice(4, 6)}-${f.receiptDate.slice(6, 8)}`,
+                source_code: 'dart',
+                is_xbrl: true,
+              })
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+            if (firstError === null) firstError = msg
+            lastError = msg
+          }
+        }
+        if (filings.length > 0) {
+          const { error } = await market.from('security_filing')
+            .upsert(dedupeBy(filings, (r) => `${r.security_id}|${r.accession_number}`),
+              { onConflict: 'security_id,accession_number', ignoreDuplicates: true })
+          if (error) throw new Error(`security_filing upsert failed: ${error.message}`)
+          filingsWritten = filings.length
+        }
+        // AFTER the filings are safely written, never before: stamping first and failing the upsert
+        // would advance the cursor past work that was never stored.
+        if (walked.length > 0) {
+          const { error } = await market.from('security_filer')
+            .update({ history_walked_at: new Date().toISOString() })
+            .eq('source_code', 'dart')
+            .in('security_id', walked)
+          if (error) throw new Error(`security_filer cursor update failed: ${error.message}`)
+          walkedCount = walked.length
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, phase: cursor.mapped_at === null ? 'mapping' : 'history',
+        mapped, filings: filingsWritten, walked: walkedCount, windows, listCalls,
+        firstError, lastError,
+        // ITS OWN BACKLOG, not the parse queue's. `remaining` has to mean the same thing in every
+        // resource, and reporting `pending_kr_segments` here would describe a different resource's
+        // work — a number that moves when this one does nothing.
+        remaining: await backlogSize(market, 'pending_kr_history'),
+      })
+    }
+
+    // ── KOREA: PARSE ────────────────────────────────────────────────────────────────────────────
+    //
+    // ONE FILING PER RUN, and that is a measurement rather than caution: 802 KB takes 73.5 s from
+    // outside Korea against a 90 s worker. A killed worker does not throw, it DIES — holding the
+    // in-flight lock and stamping nothing — which is the 127 MB AEP filing that blocked the SEC
+    // queue for two days. So the fetch takes the REMAINING budget, and anything it cannot finish is
+    // left for the next run with the cache warm behind it.
+    if (resource === KR_SEGMENTS_RESOURCE) {
+      const deadline = Date.now() + 78_000
+
+      const { data: axisRows, error: aErr } = await market
+        .from('segment_axis').select('taxonomy,axis,kind,priority,required_member')
+      if (aErr) throw new Error(`segment_axis read failed: ${aErr.message}`)
+      const axes: SegmentAxisSpec[] = (axisRows ?? []).map((r) => ({
+        axis: String(r.axis),
+        kind: String(r.kind) as SegmentAxisSpec['kind'],
+        priority: Number(r.priority),
+        requiredMember: r.required_member === null || r.required_member === undefined
+          ? null : String(r.required_member),
+      }))
+      const { data: conceptRows, error: cErr } = await market
+        .from('xbrl_concept').select('metric_code,concept,priority').in('metric_code', SEGMENT_METRICS)
+      if (cErr) throw new Error(`xbrl_concept read failed: ${cErr.message}`)
+      const concepts: SegmentConceptSpec[] = (conceptRows ?? []).map((r) => ({
+        metricCode: String(r.metric_code), concept: String(r.concept), priority: Number(r.priority),
+      }))
+      if (concepts.length === 0) throw new Error('no segment concepts — xbrl_concept has no revenue rows')
+
+      const { data: verRows, error: vErr } = await market
+        .from('segment_parser').select('version').limit(1)
+      if (vErr) throw new Error(`segment_parser read failed: ${vErr.message}`)
+      const parserVersion = Number(verRows?.[0]?.version ?? 1)
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_kr_segments')
+        .select('security_id,accession_number,report_type,filing_date')
+        .limit(scopeLimit ?? 1)
+      if (pErr) throw new Error(`pending_kr_segments read failed: ${pErr.message}`)
+
+      let written = 0
+      let filings = 0
+      let noInstance = 0
+      let noSegments = 0
+      let tooLarge = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of pending ?? []) {
+        if (Date.now() > deadline - 20_000) break
+        try {
+          const xml = await dart.fetchInstance(
+            String(item.accession_number), Math.max(10_000, deadline - Date.now() - 12_000),
+          )
+          const oversize = xml === dart.TOO_LARGE
+          const facts = typeof xml === 'string' ? segmentFactsFrom(xml, axes, concepts) : []
+          filings++
+          if (oversize) tooLarge++
+          else if (xml === null) noInstance++
+          else if (facts.length === 0) noSegments++
+
+          if (facts.length > 0) {
+            const rows = facts.map((f) => ({
+              security_id: item.security_id,
+              accession_number: item.accession_number,
+              axis: f.axis, member_code: f.memberCode,
+              parent_axis: f.parentAxis, parent_member: f.parentMember,
+              metric_code: f.metricCode, period_type: f.periodType,
+              period_start: f.periodStart, period_ending: f.periodEnding,
+              value: f.value, currency_code: f.currency,
+              partition_id: f.partitionId, reconciled_to: f.reconciledTo,
+              source_code: 'dart',
+            }))
+            for (let i = 0; i < rows.length; i += 500) {
+              const { error } = await market.from('security_segment').upsert(
+                dedupeBy(rows.slice(i, i + 500),
+                  (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.parent_member ?? ''}|` +
+                    `${r.metric_code}|${r.period_type}|${r.period_ending}`),
+                { onConflict: 'security_id,axis,member_code,metric_code,period_type,period_ending' },
+              )
+              if (error) throw new Error(`security_segment upsert failed: ${error.message}`)
+            }
+            written += rows.length
+          }
+
+          // Stamped whether or not it had segments — "this filing discloses none" is a permanent
+          // fact about an immutable document. A fetch that THREW never reaches here, so an outage
+          // or a timeout re-queues the filing rather than marking it read.
+          const { error: tErr } = await market.from('security_filing').update({
+            segments_parsed_at: new Date().toISOString(),
+            segments_parser_version: parserVersion,
+          }).eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+          if (tErr) throw new Error(`segments_parsed_at update failed: ${tErr.message}`)
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, written, filings, noInstance, noSegments, tooLarge, failed, firstError, lastError,
+        remaining: await backlogSize(market, 'pending_kr_segments'),
+      })
+    }
+
     if (resource === SEGMENTS_RESOURCE) {
       const deadline = Date.now() + 60_000
 
