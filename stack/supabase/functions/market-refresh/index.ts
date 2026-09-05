@@ -2429,6 +2429,27 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           else if (xml === null) noInstance++
           else if (facts.length === 0) noSegments++
 
+
+          // A PARSER RULE THAT STOPS EMITTING A FACT CAN NEVER RETRACT IT — an upsert only ever
+          // writes. `partition_id` demotions self-heal (the member is still emitted, at 0, and
+          // overwrites its own row), but a member the parser now DROPS is never seen again, so its
+          // last row survives for ever, in a served partition, looking freshly written. Measured
+          // 2026-09-05 the moment the subtotal rule shipped: 33 rows of
+          // `ReportableSegmentAggregationBeforeOtherOperatingSegmentMember` and 8 of
+          // `OperatingSegmentsMember` sat in partition 1 — a subtotal counted beside its own
+          // children, which is the double count the rule exists to prevent.
+          //
+          // Retracting per ACCESSION is what makes it exact: these rows are this filing's own
+          // statement of itself, so a re-read replaces them wholesale. It is not keyed on the
+          // upsert's conflict target, which omits the accession deliberately — a newer filing
+          // restating a period takes ownership of the row, and deleting by accession then correctly
+          // leaves it alone. Runs even when the parse yielded nothing: a filing that now discloses
+          // no segments must retract what it used to disclose. A fetch that THREW never reaches
+          // here, so an outage retracts nothing.
+          const { error: rtErr } = await market.from('security_segment').delete()
+            .eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+          if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+
           if (facts.length > 0) {
             const rows = facts.map((f) => ({
               security_id: item.security_id,
@@ -2594,6 +2615,27 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           if (oversize) tooLarge++
           else if (ref === null || xml === null) noInstance++
           else if (facts.length === 0) noSegments++
+
+
+          // A PARSER RULE THAT STOPS EMITTING A FACT CAN NEVER RETRACT IT — an upsert only ever
+          // writes. `partition_id` demotions self-heal (the member is still emitted, at 0, and
+          // overwrites its own row), but a member the parser now DROPS is never seen again, so its
+          // last row survives for ever, in a served partition, looking freshly written. Measured
+          // 2026-09-05 the moment the subtotal rule shipped: 33 rows of
+          // `ReportableSegmentAggregationBeforeOtherOperatingSegmentMember` and 8 of
+          // `OperatingSegmentsMember` sat in partition 1 — a subtotal counted beside its own
+          // children, which is the double count the rule exists to prevent.
+          //
+          // Retracting per ACCESSION is what makes it exact: these rows are this filing's own
+          // statement of itself, so a re-read replaces them wholesale. It is not keyed on the
+          // upsert's conflict target, which omits the accession deliberately — a newer filing
+          // restating a period takes ownership of the row, and deleting by accession then correctly
+          // leaves it alone. Runs even when the parse yielded nothing: a filing that now discloses
+          // no segments must retract what it used to disclose. A fetch that THREW never reaches
+          // here, so an outage retracts nothing.
+          const { error: rtErr } = await market.from('security_segment').delete()
+            .eq('security_id', item.securityId).eq('accession_number', item.accession)
+          if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
 
           if (facts.length > 0) {
             const rows = facts.map((f) => ({
