@@ -54,11 +54,13 @@ update market.disclosure_source set enabled = true where code = 'dart';
 drop view if exists market.pending_segments;
 create view market.pending_segments as
 select security_id, accession_number, report_type, filing_date, filing_detail_url, cik,
-       best_weight, round
+       best_weight, round, already_read
 from (
   select
     f.security_id, f.accession_number, f.report_type, f.filing_date, f.filing_detail_url,
     s.cik,
+    -- A FILING WE HAVE ALREADY READ IS ONE WE ARE ALREADY SERVING FROM.
+    (f.segments_parsed_at is not null) as already_read,
     coalesce(max(h.weight), 0) as best_weight,
     row_number() over (
       partition by f.security_id
@@ -95,9 +97,23 @@ from (
       f.segments_parsed_at is null
       or coalesce(f.segments_parser_version, 0) < (select p.version from market.segment_parser p)
     )
-  group by f.security_id, f.accession_number, f.report_type, f.filing_date, f.filing_detail_url, s.cik
+  group by f.security_id, f.accession_number, f.report_type, f.filing_date, f.filing_detail_url,
+           s.cik, f.segments_parsed_at
 ) ranked
-order by round, best_weight desc, accession_number;
+-- CORRECT WHAT WE ALREADY SERVE BEFORE READING SOMETHING NEW.
+--
+-- `segment_parser.version` re-queues every filing when it is bumped, so after a bump the queue
+-- holds both filings we have never read and filings whose stored rows are now known to be wrong.
+-- Measured 2026-09-05: of the 352 filings backing a SERVED split, **329 (93%) had been parsed by
+-- an older parser** — so almost everything a reader sees was produced by code since fixed, while
+-- the queue worked through 213,500 filings at 20 a run.
+--
+-- Breadth-first still comes first: `round` keeps migration 156's property that every company gets
+-- its latest annual before any gets a second year. WITHIN a round, a filing we have already read
+-- goes first, because re-reading it corrects data on a page today, where reading a new one only
+-- adds data nobody is being shown yet. Bounded by construction — 19,849 filings have ever been
+-- parsed against 213,500 queued — so this reorders a head, it does not starve new work.
+order by round, already_read desc, best_weight desc, accession_number;
 
 comment on view market.pending_segments is
   'SEC filings whose XBRL instance has not been read for segment facts. Ordered BREADTH-FIRST: `round` is the filing''s depth into its own company''s history (annuals before quarterlies), so one pass covers every filer''s latest annual before any company''s second filing. Requires a CIK — that is the SEC path''s actual precondition, and without it enabling DART puts Korean filings in this queue, where `findInstanceUrl` cannot address them.';
