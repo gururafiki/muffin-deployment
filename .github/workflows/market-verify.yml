@@ -142,6 +142,13 @@ jobs:
           #
           # `extreme_1y_returns` is a GAUGE, not an invariant: of 40 securities returning >= +300%,
           # 34 were real. It is recorded and deliberately not asserted on.
+          #
+          # `contradicted_negative_cache` joined it 2026-09-05, after a third false-positive round.
+          # It compares OUR STORED BARS against a mark recording what the provider returned on a
+          # FRESH fetch — two sources that legitimately disagree. Measured: Thailand's NVDR lines
+          # return 272 bars with ONE distinct close from yfinance and produce no computable return,
+          # so the marks are honest, while our stored history for the same securities moves. No
+          # threshold reconciles that, so the count is recorded as a pointer and not asserted.
           defects=$(curl -sS --max-time 60 "$BASE/rest/v1/data_defect?select=defect,n,detail" \
             -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' 2>/dev/null)
           if ! printf '%s' "$defects" | grep -q '"defect"'; then
@@ -150,7 +157,7 @@ jobs:
           else
             python3 - "$defects" <<'PYCHK' || fail=1
           import json, sys
-          GAUGES = {'extreme_1y_returns'}
+          GAUGES = {'extreme_1y_returns', 'contradicted_negative_cache'}
           rows = json.loads(sys.argv[1])
           bad = 0
           for r in sorted(rows, key=lambda x: x['defect']):

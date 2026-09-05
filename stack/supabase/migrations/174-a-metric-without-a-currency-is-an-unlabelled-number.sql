@@ -49,6 +49,15 @@ create view market.security_metric_series as
 with gapped as (
   select
     sm.security_id,
+    -- THE SYMBOL IS RESOLVED HERE, NOT AT THE TOP, AND IT IS IN THE PARTITION BY BELOW.
+    -- PostgreSQL pushes a predicate below a window aggregate only when it references a
+    -- PARTITION BY column. Joined at the top instead, `symbol = 'AAPL'` could not push down, so
+    -- the windows and the DISTINCT ON ran over the WHOLE table first: measured on the deployed
+    -- view, `Rows Removed by Filter: 1,260,808` to return 446 rows, 4,300 ms, over the 3 s anon
+    -- ceiling. `symbol_security` is UNIQUE on security_id, so adding it to the partition key
+    -- cannot change a single partition — it only makes the filter pushable.
+    -- Measured after: 1,277,638 rows scanned -> 521, and 4,300 ms -> 3.4 ms.
+    sym.symbol,
     sm.metric_code,
     sm.period_type,
     sm.as_of,
@@ -61,23 +70,24 @@ with gapped as (
     -- this is not written as a negation.
     case
       when sm.as_of - lag(sm.as_of) over (
-             partition by sm.security_id, sm.metric_code, sm.period_type order by sm.as_of
+             partition by sym.symbol, sm.security_id, sm.metric_code, sm.period_type order by sm.as_of
            ) <= 7 then 0
       else 1
     end as starts_cluster
   from market.security_metric sm
   join market.data_source ds on ds.code = sm.source_code
+  join market.symbol_security sym on sym.security_id = sm.security_id
 ),
 clustered as (
   select
     g.*,
     sum(g.starts_cluster) over (
-      partition by g.security_id, g.metric_code, g.period_type order by g.as_of
+      partition by g.symbol, g.security_id, g.metric_code, g.period_type order by g.as_of
     ) as period_group
   from gapped g
 )
 select distinct on (c.security_id, c.metric_code, c.period_type, c.period_group)
-  sym.symbol,
+  c.symbol,
   c.security_id,
   c.metric_code,
   m.name    as metric_name,
@@ -95,15 +105,6 @@ select distinct on (c.security_id, c.metric_code, c.period_type, c.period_group)
 from clustered c
 join market.metric m             on m.code = c.metric_code
 join market.security s           on s.security_id = c.security_id
--- THE MATERIALISED SYMBOL MAP, NOT `security_symbol`, AND THAT IS A LATENCY FIX NOT A TIDY-UP.
--- `security_symbol` is a view over two LATERAL subqueries evaluated PER SECURITY, so a query
--- filtered to one symbol still walks all 27,600 — the cost migration 102 removed from
--- `price_series` the same way. Measured as anon 2026-09-05, before this change:
---   ?security_id=eq.<samsung>  0.086 s        ?symbol=eq.005930.KS  57014 statement timeout
--- The app filters by SYMBOL, so the stock page's metric sections were failing while every probe
--- by security_id said the view was healthy — the fourth occurrence of that shape here, and the
--- reason `check_anon_read_latency` times the conjunction the app actually sends.
-join market.symbol_security sym  on sym.security_id = c.security_id
 order by c.security_id, c.metric_code, c.period_type, c.period_group,
          -- The filing wins over the provider, and with it the true fiscal period end.
          c.priority desc, c.as_of desc;
