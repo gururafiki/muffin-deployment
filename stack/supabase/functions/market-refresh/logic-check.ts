@@ -2214,6 +2214,26 @@ console.log('\nrefresh_run — every invocation is recorded')
     `${calls.length} call(s): ${calls.map((c) => c.split(',').length).join(', ')} args`)
 }
 
+// ── a retraction fires only on a document that was READ ────────────────────────────────────────
+// A DELETE keyed on a filing is the one operation here that destroys data, and `facts.length === 0`
+// has FOUR causes: no index entry, a null fetch, a size refusal, and a filing that genuinely
+// discloses no segments. Only the last is evidence. The first version of this retraction ran
+// unconditionally behind a comment asserting "a fetch that THREW never reaches here" — true of a
+// throw, false of a null — and 281 filings took that path in three hours while `security_segment`
+// fell by 91 rows during an active re-parse. Seventh instance of throw-vs-empty in this pipeline.
+//
+// The guard is on the GATE, not on the delete: a delete with no condition in front of it is the
+// defect, so the assertion is that each retraction sits inside a test of the parsed document.
+{
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const retractions = [...src.matchAll(/([^\n]*\n[^\n]*\n)[ ]*const \{ error: rtErr \}/g)]
+  check(retractions.length === 2,
+    'both segment writers retract per accession', `found ${retractions.length}`)
+  check(retractions.every((m) => /if \((typeof )?xml (!==|===) /.test(m[1]) && /!oversize/.test(m[1])),
+    'every retraction is gated on the document having been read AND not refused for size',
+    retractions.map((m) => m[1].trim().split('\n')[0].slice(0, 46)).join(' | '))
+}
+
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
