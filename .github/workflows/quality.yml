@@ -476,6 +476,15 @@ jobs:
       - name: Offline check — the quarter-shape threshold separates the two cases
         run: python3 .github/scripts/check_quarter_is_a_quarter.py --self-test
 
+      # A GATE THAT IS RED FOR A DAY AFTER EVERY DEPLOY IS ONE NOBODY READS, and this repo has
+      # already paid for that: market-verify sat red for six days on a check CLAUDE.md had
+      # reclassified as a gauge, and a four-day `derive-classifications` outage went unseen behind
+      # it. The spine check was relaxed from "any failure in the window" to "failing now, or twice"
+      # — safe only if the cases it must still catch are demonstrated. This runs them, with no
+      # database, so an edit that lets a broken spine pass goes red on the PR that makes it.
+      - name: Offline check — a spine blip is not a broken spine
+        run: python3 .github/scripts/check_spine_refresh_succeeds.py --self-test
+
   terraform:
     runs-on: ubuntu-latest
     steps:
