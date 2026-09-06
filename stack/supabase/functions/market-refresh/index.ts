@@ -4696,6 +4696,10 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           // one, and only both together justify recording that SEC has nothing for it.
           let secAsked = true
           let secRows = 0
+          // Set when SEC states, per symbol, that it cannot resolve this security at all. That is
+          // evidence about the SYMBOL, so it justifies the mark on its own — unlike an empty
+          // answer, which needs the run-level `secOk` to rule out an outage.
+          let secNoSuchSymbol = false
           for (const kind of ['income', 'balance', 'cash'] as const) {
             const remaining = deadline - Date.now()
             if (remaining < 5_000) break
@@ -4730,10 +4734,27 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
             } catch (e) {
               // A SEC failure is NOT a statement failure — yfinance below is the fallback, and a
               // foreign filer with a US line legitimately has nothing here. Counted, not marked.
+              const msg = e instanceof Error ? e.message : String(e)
+              if (throttled(msg)) { secFailed++; secAsked = false; throttledOut = true; break }
+              // …BUT A 404 THAT NAMES THE SYMBOL IS THE ANSWER, NOT A FAILURE TO GET ONE.
+              //
+              // openbb's SEC provider resolves symbol -> CIK through SEC's own ticker map, so a US
+              // OTC foreign-ordinary line absent from that map can never be served — `AIBRF`
+              // (AIB Group, 16.08% fund weight) and `BWAGF` return `ContentTypeError -> 404` for
+              // every statement kind while AAPL answers in the same seconds.
+              //
+              // Treating that as a failure set `secAsked = false`, so the "SEC has nothing for
+              // this company" branch below could never run and the security stayed in the
+              // `no_currency` half of the backlog for ever. Measured 2026-09-06:
+              // `written: 240, secFailed: 180, fromSec: 0, remaining: 5972` BYTE-IDENTICAL on six
+              // consecutive runs, the head of a weight-ordered queue held by the heaviest holdings
+              // in the universe, and 2,922 securities with NO statements at all starved behind
+              // 3,050 that could never be fixed. Same shape as the Form 4 `BBVXF` 400 and today's
+              // dividends 400: three outcomes, not two — answered, answered-with-nothing, and did
+              // not answer.
+              if (noDataForSymbol(msg)) { secNoSuchSymbol = true; continue }
               secFailed++
               secAsked = false
-              const msg = e instanceof Error ? e.message : String(e)
-              if (throttled(msg)) { throttledOut = true; break }
             }
           }
           // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the `no_currency` half of the backlog
@@ -4742,7 +4763,18 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           // periods, the view re-admits it, forever. Marked ONLY when this security was asked to
           // completion AND the endpoint answered for someone in this run — a failure or a deadline
           // is not evidence.
-          if (secAsked && secRows === 0 && secOk && item.want === 'no_currency') {
+          //
+          // THE RUN-LEVEL GATE APPLIES TO AN EMPTY ANSWER, NOT TO A NAMED REFUSAL. `secOk` says
+          // the endpoint produced rows for SOMEONE this run, which is the right guard against an
+          // outage being recorded as a page of dead securities — and it is exactly wrong once a
+          // weight-ordered backlog's answerable head has drained, because then NO security in the
+          // page answers, the tally never becomes true, and the page can never be marked. That is
+          // the `security-profile-detail` stall, and this resource had it too: `fromSec: 0` made
+          // `secOk` false for the whole run, so even a security we finished asking about could not
+          // be recorded. A per-symbol 404 carries its own evidence and needs no tally in front of
+          // it.
+          if (item.want === 'no_currency' &&
+              (secNoSuchSymbol || (secAsked && secRows === 0 && secOk))) {
             secNone++
             const { error } = await market
               .from('security')
