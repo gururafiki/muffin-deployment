@@ -94,5 +94,23 @@ export const dart = () => origin('DART_BASE_URL', 'https://opendart.fss.or.kr')
  */
 export const nse = () => origin('NSE_BASE_URL', 'https://www.nseindia.com')
 
+/**
+ * `www.cninfo.com.cn` — China's CSRC-designated disclosure platform. Its filings are PDFs, so this
+ * fetches filing LINKS rather than data; see `cn.ts`.
+ */
+export const cninfo = () => origin('CNINFO_BASE_URL', 'https://www.cninfo.com.cn')
+
+/**
+ * Where CNINFO's PDFs live — and deliberately NOT an `origin()`.
+ *
+ * This host is never fetched. It is used to build the absolute `report_url` we store, which a
+ * reader's browser opens, so it must stay the real public host: routed through http-cache the
+ * stored link would point at an address only the swarm can reach and every Chinese filing link
+ * would be dead. It lives here rather than in `cn.ts` because a provider host spelled in a handler
+ * is what `http-cache-covers-every-provider` fails a PR for, and it is right to — this is the
+ * documented exception, not an oversight.
+ */
+export const CNINFO_STATIC = 'https://static.cninfo.com.cn'
+
 /** `nsearchives.nseindia.com` — where the `INDAS_*` XBRL instances themselves live. */
 export const nseArchives = () => origin('NSE_ARCHIVES_BASE_URL', 'https://nsearchives.nseindia.com')

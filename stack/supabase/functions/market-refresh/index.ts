@@ -37,6 +37,7 @@ import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
 import * as dart from './dart.ts'
 import * as nse from './in.ts'
+import * as cninfo from './cn.ts'
 import { TOO_LARGE, fetchInstance, findInstanceUrl, instanceIsTooLarge, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { fetchIndustries, slug } from './wikidata.ts'
 import { candidateSymbols } from './symbol-repair.ts'
@@ -329,6 +330,9 @@ const IN_FILINGS_RESOURCE = 'in-filings'
 const IN_SEGMENTS_RESOURCE = 'security-in-segments'
 /** NSE labels every annual results filing `Annual`; it is the `filing_form` code seeded for `nse`. */
 const IN_ANNUAL_FORM = 'Annual'
+const CN_FILINGS_RESOURCE = 'cn-filings'
+/** CNINFO's annual-report category, and the `filing_form` code seeded for `cninfo`. */
+const CN_ANNUAL_FORM = '年度报告'
 const FILING_HISTORY_RESOURCE = 'security-filing-history'
 const WIKIDATA_RESOURCE = 'security-wikidata-industries'
 /**
@@ -457,6 +461,9 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // discovery walks one company per call and is bounded by the shared provider budget.
     [IN_SEGMENTS_RESOURCE]: 4,
     [IN_FILINGS_RESOURCE]: 14,
+    // Links only, and a company's annual reports change once a year — this is the least urgent
+    // thing on the cron and is paced accordingly.
+    [CN_FILINGS_RESOURCE]: 29,
     [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -2370,6 +2377,100 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // in-flight lock and stamping nothing — which is the 127 MB AEP filing that blocked the SEC
     // queue for two days. So the fetch takes the REMAINING budget, and anything it cannot finish is
     // left for the next run with the cache warm behind it.
+    // ── China: filing LINKS, because every filing is a PDF ──────────────────────────────────────
+    //
+    // China is the largest coverage gap at 2,311 equities and was spiked NOT VIABLE for segments
+    // (migration 183): CNINFO's route works and is reachable, but every filing is a PDF. A PDF
+    // cannot give a segment split; it can give a reader the annual report, which is better than the
+    // nothing those securities have today — and it costs no schema and no UI, because
+    // `security_filing.report_url` exists and the Filings section already renders it as a link.
+    if (resource === CN_FILINGS_RESOURCE) {
+      const deadline = Date.now() + 70_000
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_cn_filings')
+        .select('security_id,symbol')
+        .limit(scopeLimit ?? 8)
+      if (pErr) throw new Error(`pending_cn_filings read failed: ${pErr.message}`)
+
+      let walked = 0
+      let written = 0
+      let noOrgId = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of pending ?? []) {
+        if (Date.now() > deadline - 12_000) break
+        const code = String(item.symbol)
+        try {
+          const orgId = await cninfo.orgIdFor(code, Math.min(20_000, deadline - Date.now()))
+          walked++
+          if (orgId === null) {
+            // A CODE CNINFO DOES NOT KNOW IS AN ANSWER, not a failure — a delisted or
+            // Hong-Kong-listed line will never resolve, and counting it as an error would make a
+            // healthy run look broken.
+            noOrgId++
+          } else {
+            const filings = await cninfo.annualReports(
+              code, orgId, Math.min(25_000, deadline - Date.now()),
+            )
+            if (filings.length > 0) {
+              const rows = filings.map((f) => ({
+                security_id: item.security_id,
+                // The PDF's own URL is the document's identity here; there is no accession number
+                // in this system. `(source_code, accession_number)` is already the key, so only the
+                // NAME is SEC-specific.
+                accession_number: f.url,
+                report_type: CN_ANNUAL_FORM,
+                report_date: f.date,
+                report_url: f.url,
+                source_code: 'cninfo',
+                // LOAD-BEARING. `pending_segments` and its siblings select filings to PARSE; a PDF
+                // that looked parseable would send the segment resources to spend their budget
+                // fetching documents they cannot read.
+                is_xbrl: false,
+              }))
+              const { error } = await market.from('security_filing').upsert(
+                dedupeBy(rows, (r) => `${r.security_id}|${r.accession_number}`),
+                { onConflict: 'security_id,accession_number', ignoreDuplicates: true },
+              )
+              if (error) throw new Error(`security_filing upsert failed: ${error.message}`)
+              written += rows.length
+            }
+          }
+
+          const { error: fErr } = await market.from('security_filer').upsert(
+            [{
+              security_id: item.security_id,
+              source_code: 'cninfo',
+              filer_id: orgId ?? code,
+              history_walked_at: new Date().toISOString(),
+            }],
+            { onConflict: 'security_id,source_code' },
+          )
+          if (fErr) throw new Error(`security_filer upsert failed: ${fErr.message}`)
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        walked,
+        written,
+        noOrgId,
+        failed,
+        remaining: await backlogSize(market, 'pending_cn_filings'),
+        first_error: firstError,
+        last_error: lastError,
+      })
+    }
+
     // ── India: parse ────────────────────────────────────────────────────────────────────────────
     //
     // The same shape as the Korean parser, with ONE addition: `nse.normalise` rewrites the instance

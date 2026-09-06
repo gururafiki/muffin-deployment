@@ -189,7 +189,7 @@
   {
    "type": "timeseries",
    "title": "Segment facts written per run",
-   "description": "Throughput for every resource that reads a filing or writes a segment row \u2014 SEC (`security-segments`, `security-filing-history`, `security-filings`) Korea/DART (`security-kr-segments`, `kr-filings`) and India/NSE (`security-in-segments`, `in-filings`).\n\nDELIBERATELY DRAWS ZEROS. A run that wrote nothing is the single most informative point on this chart \u2014 it is what a stalled resource looks like, and `written > 0` would hide exactly that.\n\nTHE RESOURCE LIST IS HARDCODED AND GUARDED. `check_dashboards_can_render.py` fails CI when a resource that upserts `security_segment` in `market-refresh/index.ts` is missing here, because a throughput panel that silently omits a regulator keeps drawing a healthy line for the other one \u2014 which is worse than not drawing it at all.",
+   "description": "Throughput for every resource that reads a filing or writes a segment row \u2014 SEC (`security-segments`, `security-filing-history`, `security-filings`) Korea/DART (`security-kr-segments`, `kr-filings`) India/NSE (`security-in-segments`, `in-filings`) and China/CNINFO (`cn-filings`, which writes filing LINKS only — every CNINFO filing is a PDF, so it contributes no segment rows and its line shows filings indexed rather than facts parsed).\n\nDELIBERATELY DRAWS ZEROS. A run that wrote nothing is the single most informative point on this chart \u2014 it is what a stalled resource looks like, and `written > 0` would hide exactly that.\n\nTHE RESOURCE LIST IS HARDCODED AND GUARDED. `check_dashboards_can_render.py` fails CI when a resource that upserts `security_segment` in `market-refresh/index.ts` is missing here, because a throughput panel that silently omits a regulator keeps drawing a healthy line for the other one \u2014 which is worse than not drawing it at all.",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -209,7 +209,7 @@
      },
      "format": "time_series",
      "rawQuery": true,
-     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history','security-filings',\n                    'security-kr-segments','kr-filings',\n                    'security-in-segments','in-filings')\n group by 1, 2 order by 1"
+     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history','security-filings',\n                    'security-kr-segments','kr-filings',\n                    'security-in-segments','in-filings',\n                    'cn-filings')\n group by 1, 2 order by 1"
     }
    ]
   },
