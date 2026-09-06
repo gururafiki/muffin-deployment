@@ -1230,6 +1230,10 @@ console.log('\nresource registry — the cron and the function agree')
     // unwalked — and deliberately not the parse queue, which belongs to the other resource.
     KR_SEGMENTS_RESOURCE: [],
     KR_FILINGS_RESOURCE: [],
+    // India, the same split: `security-in-segments` reports `pending_in_segments` and `in-filings`
+    // reports `pending_in_history`, its own backlog of companies whose filing history is unwalked.
+    IN_SEGMENTS_RESOURCE: [],
+    IN_FILINGS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     WIKIDATA_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
@@ -2226,12 +2230,40 @@ console.log('\nrefresh_run — every invocation is recorded')
 // defect, so the assertion is that each retraction sits inside a test of the parsed document.
 {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const retractions = [...src.matchAll(/([^\n]*\n[^\n]*\n)[ ]*const \{ error: rtErr \}/g)]
-  check(retractions.length === 2,
-    'both segment writers retract per accession', `found ${retractions.length}`)
-  check(retractions.every((m) => /if \((typeof )?xml (!==|===) /.test(m[1]) && /!oversize/.test(m[1])),
-    'every retraction is gated on the document having been read AND not refused for size',
-    retractions.map((m) => m[1].trim().split('\n')[0].slice(0, 46)).join(' | '))
+  // FIFTEEN LINES OF LOOKBACK, not two. The gate is not always the line directly above the delete —
+  // the NSE writer has an explanatory comment between them, and a two-line window reported a
+  // correctly-gated retraction as ungated. A window that is too NARROW fails safe (it cries wolf)
+  // while one that is too wide fails open, so this is deliberately generous and the gate
+  // expressions below stay specific.
+  const retractions = [...src.matchAll(/((?:[^\n]*\n){15})[ ]*const \{ error: rtErr \}/g)]
+  // THREE writers now — SEC, DART and NSE. The number is asserted rather than counted loosely so
+  // that adding a fourth is a deliberate act that comes here and reads this comment.
+  check(retractions.length === 3,
+    'every segment writer retracts per accession', `found ${retractions.length}`)
+  // TWO LEGAL SHAPES, because the sources fail differently. SEC and DART can return an oversize
+  // document, so they gate on `xml !== null && !oversize`. NSE cannot — its instances are 77-109 KB
+  // and there is no size gate — but it CAN return the standalone filing rather than the
+  // consolidated one, so its retraction sits inside the branch where `normalise` returned a
+  // document. Both are a test of the parsed document, which is what this guard is really asserting;
+  // what it must never accept is a delete with nothing in front of it.
+  const gated = (before: string) =>
+    (/if \((typeof )?xml (!==|===) /.test(before) && /!oversize/.test(before)) ||
+    /NOT_CONSOLIDATED/.test(before) || /segmentFactsFrom\(norm\.xml/.test(before)
+  check(retractions.every((m) => gated(m[1])),
+    'every retraction is gated on the document having been read',
+    retractions.map((m) => m[1].trim().split('\n')[0].slice(0, 40)).join(' | '))
+
+  // AND KEYED ON THE ACCESSION. Found by mutation: dropping `.eq('accession_number', …)` passed
+  // every check above, and it is the worst defect available here — the delete would take a
+  // company's ENTIRE segment history instead of one filing's, on every re-parse, silently. The
+  // accession is what makes the retraction the filing's own statement of itself; without it this
+  // is not a retraction, it is a purge.
+  const keyed = [...src.matchAll(
+    /const \{ error: rtErr \}[\s\S]{0,220}?security_segment'\)\.delete\(\)([\s\S]{0,200}?)(?:\n\s*if|\n\s*\n)/g,
+  )]
+  check(keyed.length === retractions.length && keyed.every((m) => /accession_number/.test(m[1])),
+    'and every retraction is keyed on the ACCESSION, not just the security',
+    `${keyed.filter((m) => /accession_number/.test(m[1])).length} of ${keyed.length}`)
 }
 
 

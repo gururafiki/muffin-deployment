@@ -36,6 +36,7 @@ import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHi
 import { pickHomeListing, searchByIsin } from './yahoo.ts'
 import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
 import * as dart from './dart.ts'
+import * as nse from './in.ts'
 import { TOO_LARGE, fetchInstance, findInstanceUrl, instanceIsTooLarge, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { fetchIndustries, slug } from './wikidata.ts'
 import { candidateSymbols } from './symbol-repair.ts'
@@ -324,6 +325,10 @@ const KR_FILINGS_RESOURCE = 'kr-filings'
 const KR_SEGMENTS_RESOURCE = 'security-kr-segments'
 /** DART's own name for the Korean annual report, and the `filing_form` row seeded by migration 172. */
 const KR_ANNUAL_FORM = '사업보고서'
+const IN_FILINGS_RESOURCE = 'in-filings'
+const IN_SEGMENTS_RESOURCE = 'security-in-segments'
+/** NSE labels every annual results filing `Annual`; it is the `filing_form` code seeded for `nse`. */
+const IN_ANNUAL_FORM = 'Annual'
 const FILING_HISTORY_RESOURCE = 'security-filing-history'
 const WIKIDATA_RESOURCE = 'security-wikidata-industries'
 /**
@@ -448,6 +453,10 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // `derive-classifications` still does, 29 days in 30.
     [KR_SEGMENTS_RESOURCE]: 4,
     [KR_FILINGS_RESOURCE]: 14,
+    // India's instances are 77-109 KB and need no warm-up, so the parse resource can run often;
+    // discovery walks one company per call and is bounded by the shared provider budget.
+    [IN_SEGMENTS_RESOURCE]: 4,
+    [IN_FILINGS_RESOURCE]: 14,
     [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -2361,6 +2370,232 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // in-flight lock and stamping nothing — which is the 127 MB AEP filing that blocked the SEC
     // queue for two days. So the fetch takes the REMAINING budget, and anything it cannot finish is
     // left for the next run with the cache warm behind it.
+    // ── India: parse ────────────────────────────────────────────────────────────────────────────
+    //
+    // The same shape as the Korean parser, with ONE addition: `nse.normalise` rewrites the instance
+    // before `segmentFactsFrom` sees it. India's members are anonymous positional slots whose names
+    // live in a sibling fact, and its period is not in the context dates at all — see `in.ts`.
+    // Everything after the normalise call is deliberately identical to the SEC and DART paths,
+    // including the per-accession retraction, because three writers to one table must not disagree
+    // about how it is written.
+    if (resource === IN_SEGMENTS_RESOURCE) {
+      const deadline = Date.now() + 78_000
+
+      const { data: axisRows, error: aErr } = await market
+        .from('segment_axis').select('taxonomy,axis,kind,priority,required_member')
+      if (aErr) throw new Error(`segment_axis read failed: ${aErr.message}`)
+      const { data: exclRows, error: xErr } = await market
+        .from('segment_member_class').select('member_code,class')
+      if (xErr) throw new Error(`segment_member_class read failed: ${xErr.message}`)
+      const memberRoles = (exclRows ?? []).map((r) => ({
+        memberCode: String(r.member_code), class: String(r.class),
+      }))
+      const axes: SegmentAxisSpec[] = (axisRows ?? []).map((r) => ({
+        axis: String(r.axis),
+        kind: String(r.kind) as SegmentAxisSpec['kind'],
+        priority: Number(r.priority),
+        requiredMember: r.required_member === null || r.required_member === undefined
+          ? null : String(r.required_member),
+      }))
+      const { data: conceptRows, error: cErr } = await market
+        .from('xbrl_concept').select('metric_code,concept,priority').in('metric_code', SEGMENT_METRICS)
+      if (cErr) throw new Error(`xbrl_concept read failed: ${cErr.message}`)
+      const concepts: SegmentConceptSpec[] = (conceptRows ?? []).map((r) => ({
+        metricCode: String(r.metric_code), concept: String(r.concept), priority: Number(r.priority),
+      }))
+      if (concepts.length === 0) throw new Error('no segment concepts — xbrl_concept has no revenue rows')
+
+      const { data: verRows, error: vErr } = await market
+        .from('segment_parser').select('version').limit(1)
+      if (vErr) throw new Error(`segment_parser read failed: ${vErr.message}`)
+      const parserVersion = Number(verRows?.[0]?.version ?? 1)
+
+      const { data: pending, error: pErr } = await market
+        .from('pending_in_segments')
+        .select('security_id,accession_number,report_type,filing_date')
+        .limit(scopeLimit ?? 8)
+      if (pErr) throw new Error(`pending_in_segments read failed: ${pErr.message}`)
+
+      let written = 0
+      let filings = 0
+      let noInstance = 0
+      let noSegments = 0
+      let standalone = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of pending ?? []) {
+        if (Date.now() > deadline - 15_000) break
+        try {
+          const raw = await nse.fetchInstance(
+            String(item.accession_number), Math.max(10_000, deadline - Date.now() - 10_000),
+          )
+          filings++
+          if (raw === null) { noInstance++ } else {
+            const norm = nse.normalise(raw)
+            if (norm === nse.NOT_CONSOLIDATED) {
+              // NOT A FAILURE. Every company files twice and we want one of them; counting the
+              // standalone as an error would make this resource look broken on a healthy run.
+              standalone++
+            } else {
+              const facts = segmentFactsFrom(norm.xml, axes, concepts, memberRoles)
+              if (facts.length === 0) noSegments++
+
+              // Only when the document was actually READ — the same rule as the SEC and DART
+              // paths, for the same reason: a fetch that answered nothing is not the filing
+              // saying it discloses nothing.
+              const { error: rtErr } = await market.from('security_segment').delete()
+                .eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+              if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+
+              if (facts.length > 0) {
+                const rows = facts.map((f) => ({
+                  security_id: item.security_id,
+                  accession_number: item.accession_number,
+                  axis: f.axis, member_code: f.memberCode,
+                  parent_axis: f.parentAxis, parent_member: f.parentMember,
+                  metric_code: f.metricCode, period_type: f.periodType,
+                  period_start: f.periodStart, period_ending: f.periodEnding,
+                  value: f.value, currency_code: f.currency,
+                  partition_id: f.partitionId, reconciled_to: f.reconciledTo,
+                  source_code: 'nse',
+                }))
+                for (let i = 0; i < rows.length; i += 500) {
+                  const { error } = await market.from('security_segment').upsert(
+                    dedupeBy(rows.slice(i, i + 500),
+                      (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.parent_member ?? ''}|` +
+                        `${r.metric_code}|${r.period_type}|${r.period_ending}`),
+                    { onConflict: 'security_id,axis,member_code,parent_key,metric_code,period_type,period_ending' },
+                  )
+                  if (error) throw new Error(`security_segment upsert failed: ${error.message}`)
+                }
+                written += rows.length
+              }
+            }
+          }
+
+          // Stamped whether or not it yielded segments — a filed document is immutable, so "this
+          // one discloses none" is permanent. A throw never reaches here, so an outage re-queues.
+          const { error: tErr } = await market.from('security_filing').update({
+            segments_parsed_at: new Date().toISOString(),
+            segments_parser_version: parserVersion,
+          }).eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+          if (tErr) throw new Error(`segments_parsed_at update failed: ${tErr.message}`)
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        filings,
+        written,
+        noInstance,
+        noSegments,
+        standalone,
+        failed,
+        remaining: await backlogSize(market, 'pending_in_segments'),
+        first_error: firstError,
+        last_error: lastError,
+      })
+    }
+
+    // ── India: discovery ────────────────────────────────────────────────────────────────────────
+    //
+    // A CURSOR, NOT A NEGATIVE CACHE, for the reason `security_filer.history_walked_at` exists for
+    // Korea: Indian companies keep filing, so "we have walked this company" is true for a season
+    // and never permanently. And an ANTI-JOIN, not an ordering — read straight from the security
+    // list with a `limit`, this would return the same companies for ever, which is the defect
+    // `pending_industry` ran with for months.
+    if (resource === IN_FILINGS_RESOURCE) {
+      const deadline = Date.now() + 70_000
+
+      // Indian equities whose NSE symbol we hold and whose history has not been walked recently.
+      // The symbol is `market.listing.symbol` (RELIANCE, HDFCBANK), which is already populated —
+      // NOT the `security_identifier` ticker, which is OpenFIGI's US lookup and for a foreign
+      // company is a thin OTC line.
+      const { data: pending, error: pErr } = await market
+        .from('pending_in_history')
+        .select('security_id,symbol')
+        .limit(scopeLimit ?? 6)
+      if (pErr) throw new Error(`pending_in_history read failed: ${pErr.message}`)
+
+      let mapped = 0
+      let filingsWritten = 0
+      let walked = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of pending ?? []) {
+        if (Date.now() > deadline - 15_000) break
+        const symbol = String(item.symbol)
+        try {
+          const listed = await nse.listFilings(symbol, Math.min(25_000, deadline - Date.now()))
+          walked++
+          if (listed.length > 0) {
+            const { error: fErr } = await market.from('security_filer').upsert(
+              [{ security_id: item.security_id, source_code: 'nse', filer_id: symbol }],
+              { onConflict: 'security_id,source_code' },
+            )
+            if (fErr) throw new Error(`security_filer upsert failed: ${fErr.message}`)
+            mapped++
+
+            // The accession is NSE's own document URL — it is what `fetchInstance` needs, and
+            // `(source_code, accession_number)` is already the key, so only the NAME is
+            // SEC-specific. Carried in `report_url` too, so a reader can open the filing.
+            const rows = listed.map((f) => ({
+              security_id: item.security_id,
+              accession_number: f.xbrlUrl,
+              report_type: IN_ANNUAL_FORM,
+              report_date: nse.isoFromNseDate(f.toDate),
+              report_url: f.xbrlUrl,
+              source_code: 'nse',
+              is_xbrl: true,
+            }))
+            const { error: gErr } = await market.from('security_filing').upsert(
+              dedupeBy(rows, (r) => `${r.security_id}|${r.accession_number}`),
+              { onConflict: 'security_id,accession_number', ignoreDuplicates: true },
+            )
+            if (gErr) throw new Error(`security_filing upsert failed: ${gErr.message}`)
+            filingsWritten += rows.length
+          }
+
+          // Stamped whether or not it listed anything: a company that files nothing NSE indexes is
+          // a fact for this season. A throw never reaches here, so an outage re-queues rather than
+          // marking the company walked — the same rule `insider_fetched_at` follows.
+          const { error: tErr } = await market.from('security_filer')
+            .update({ history_walked_at: new Date().toISOString() })
+            .eq('security_id', item.security_id).eq('source_code', 'nse')
+          if (tErr) throw new Error(`history_walked_at update failed: ${tErr.message}`)
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        walked,
+        mapped,
+        written: filingsWritten,
+        failed,
+        // THE BACKLOG'S OWN SIZE, not page arithmetic. Nine resources once reported `remaining: 0`
+        // against a queue of 9,013 because they subtracted what the page covered.
+        remaining: await backlogSize(market, 'pending_in_history'),
+        first_error: firstError,
+        last_error: lastError,
+      })
+    }
+
     if (resource === KR_SEGMENTS_RESOURCE) {
       const deadline = Date.now() + 78_000
 
