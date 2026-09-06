@@ -1234,6 +1234,9 @@ console.log('\nresource registry — the cron and the function agree')
     // reports `pending_in_history`, its own backlog of companies whose filing history is unwalked.
     IN_SEGMENTS_RESOURCE: [],
     IN_FILINGS_RESOURCE: [],
+    // China. Filing LINKS only — every CNINFO filing is a PDF (migration 183) — so it writes
+    // `security_filing` and never `security_segment`, and reports its own `pending_cn_filings`.
+    CN_FILINGS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     WIKIDATA_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
