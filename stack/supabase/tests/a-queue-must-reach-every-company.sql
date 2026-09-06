@@ -56,6 +56,10 @@ declare
   companies int;
   first_form text;
   first_acc text;
+  i int;
+  pick_sid uuid;
+  pick_acc text;
+  seen uuid[] := '{}';
 begin
   -- A page of three must span three companies. Under the shipped-then-fixed ordering it spans one.
   select count(distinct security_id) into companies
@@ -102,6 +106,40 @@ begin
                          '00000000-0000-0000-0000-000000009603');
   if companies <> 3 then
     raise exception '% of 3 companies have a round-1 filing — the row_number is not partitioned by security', companies;
+  end if;
+
+  -- ── ACROSS SUCCESSIVE PAGES, NOT JUST ONE ────────────────────────────────────────────────────
+  -- Everything above inspects the queue at t=0, with nothing parsed — and the depth-first defect
+  -- that has now reached production TWICE does not exist in that state. It appears as the queue
+  -- DRAINS: if `round` is computed over only the OUTSTANDING filings, parsing a company's round 1
+  -- renumbers its old round 2 to round 1, putting it back at the head where `best_weight` hands it
+  -- the page again. Measured in production 2026-09-06 at parser version 20: **106 securities of
+  -- 3,967** had had any filing re-read, median 15.5 each, one at **131 of its 164** — while every
+  -- page-shaped assertion above passed.
+  --
+  -- This drives the loop the resource actually runs: a page of ONE, three times, marking each
+  -- filing parsed exactly as the handler does. Three pages must touch three companies.
+  --
+  -- It runs LAST because it mutates the parse state the assertions above read.
+  for i in 1..3 loop
+    select security_id, accession_number into pick_sid, pick_acc
+      from market.pending_segments
+     where security_id in ('00000000-0000-0000-0000-000000009601',
+                           '00000000-0000-0000-0000-000000009602',
+                           '00000000-0000-0000-0000-000000009603')
+     limit 1;
+    exit when pick_sid is null;
+    seen := seen || pick_sid;
+    update market.security_filing
+       set segments_parsed_at      = now(),
+           segments_parser_version = (select version from market.segment_parser)
+     where accession_number = pick_acc;
+  end loop;
+
+  select count(distinct x) into companies from unnest(seen) x;
+  if companies <> 3 then
+    raise exception 'three successive pages of one covered % companies rather than 3 (%) — `round` is being computed over the OUTSTANDING filings, so it renumbers as the queue drains and the heaviest company returns to the head after every parse', companies,
+      (select string_agg(sec.name, ', ') from unnest(seen) x join market.security sec on sec.security_id = x);
   end if;
 end $$;
 
