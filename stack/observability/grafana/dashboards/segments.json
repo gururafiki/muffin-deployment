@@ -137,7 +137,7 @@
      },
      "format": "table",
      "rawQuery": true,
-     "rawSql": "select 'SEC' as metric, count(*) as value from market.pending_segments\nunion all\nselect 'DART (Korea)', count(*) from market.pending_kr_segments"
+     "rawSql": "select 'SEC' as metric, count(*) as value from market.pending_segments\nunion all\nselect 'DART (Korea)', count(*) from market.pending_kr_segments\nunion all\nselect 'NSE (India)', count(*) from market.pending_in_segments"
     }
    ],
    "options": {
@@ -189,7 +189,7 @@
   {
    "type": "timeseries",
    "title": "Segment facts written per run",
-   "description": "Throughput for every resource that reads a filing or writes a segment row \u2014 SEC (`security-segments`, `security-filing-history`, `security-filings`) and Korea/DART (`security-kr-segments`, `kr-filings`).\n\nDELIBERATELY DRAWS ZEROS. A run that wrote nothing is the single most informative point on this chart \u2014 it is what a stalled resource looks like, and `written > 0` would hide exactly that.\n\nTHE RESOURCE LIST IS HARDCODED AND GUARDED. `check_dashboards_can_render.py` fails CI when a resource that upserts `security_segment` in `market-refresh/index.ts` is missing here, because a throughput panel that silently omits a regulator keeps drawing a healthy line for the other one \u2014 which is worse than not drawing it at all.",
+   "description": "Throughput for every resource that reads a filing or writes a segment row \u2014 SEC (`security-segments`, `security-filing-history`, `security-filings`) Korea/DART (`security-kr-segments`, `kr-filings`) and India/NSE (`security-in-segments`, `in-filings`).\n\nDELIBERATELY DRAWS ZEROS. A run that wrote nothing is the single most informative point on this chart \u2014 it is what a stalled resource looks like, and `written > 0` would hide exactly that.\n\nTHE RESOURCE LIST IS HARDCODED AND GUARDED. `check_dashboards_can_render.py` fails CI when a resource that upserts `security_segment` in `market-refresh/index.ts` is missing here, because a throughput panel that silently omits a regulator keeps drawing a healthy line for the other one \u2014 which is worse than not drawing it at all.",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -209,7 +209,7 @@
      },
      "format": "time_series",
      "rawQuery": true,
-     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history','security-filings',\n                    'security-kr-segments','kr-filings')\n group by 1, 2 order by 1"
+     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history','security-filings',\n                    'security-kr-segments','kr-filings',\n                    'security-in-segments','in-filings')\n group by 1, 2 order by 1"
     }
    ]
   },
@@ -381,7 +381,7 @@
      },
      "format": "table",
      "rawQuery": true,
-     "rawSql": "with q as (\n  select 'SEC' as regulator, security_id, round from market.pending_segments\n  union all\n  select 'DART (Korea)', security_id, round from market.pending_kr_segments\n)\nselect\n  q.regulator,\n  b.depth,\n  count(*) as filings,\n  count(distinct q.security_id) as companies\nfrom q\ncross join lateral (\n  -- The bucket AND its sort key together: labelled buckets ordered by their own text put '21+'\n  -- above '6-20', which reads as a queue that has skipped ahead.\n  select case when q.round = 1 then 1 when q.round <= 5 then 2 when q.round <= 20 then 3 else 4 end as ord,\n         case when q.round = 1 then '1 - latest annual, every filer'\n              when q.round <= 5 then '2-5'\n              when q.round <= 20 then '6-20'\n              else '21+' end as depth\n) b\ngroup by q.regulator, b.ord, b.depth\norder by q.regulator, b.ord"
+     "rawSql": "with q as (\n  select 'SEC' as regulator, security_id, round from market.pending_segments\n  union all\n  select 'DART (Korea)', security_id, round from market.pending_kr_segments\n  union all\n  select 'NSE (India)', security_id, round from market.pending_in_segments\n)\nselect\n  q.regulator,\n  b.depth,\n  count(*) as filings,\n  count(distinct q.security_id) as companies\nfrom q\ncross join lateral (\n  -- The bucket AND its sort key together: labelled buckets ordered by their own text put '21+'\n  -- above '6-20', which reads as a queue that has skipped ahead.\n  select case when q.round = 1 then 1 when q.round <= 5 then 2 when q.round <= 20 then 3 else 4 end as ord,\n         case when q.round = 1 then '1 - latest annual, every filer'\n              when q.round <= 5 then '2-5'\n              when q.round <= 20 then '6-20'\n              else '21+' end as depth\n) b\ngroup by q.regulator, b.ord, b.depth\norder by q.regulator, b.ord"
     }
    ]
   },

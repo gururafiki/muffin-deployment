@@ -48,6 +48,7 @@ THROUGHPUT = {
         ('security_segment', 'security_filing'),
 }
 INDEX_TS = pathlib.Path('stack/supabase/functions/market-refresh/index.ts')
+MIGRATIONS = pathlib.Path('stack/supabase/migrations')
 
 
 def facet_columns() -> list[str]:
@@ -70,6 +71,21 @@ def facet_columns() -> list[str]:
               f'would pass vacuously')
         sys.exit(1)
     return cols
+
+
+def segment_backlog_views() -> list[str]:
+    """Every per-regulator segment backlog, READ FROM the migrations rather than listed here.
+
+    A hardcoded list would be the defect this file exists to catch. When India landed,
+    `pending_in_segments` was missing from two panels that enumerate regulators — the depth chart
+    and the queue count — and each would have kept drawing SEC and Korea while silently omitting a
+    third. That is the same family as the `limit 60` that hid the United States: a panel claiming to
+    summarise a bounded set must contain all of it."""
+    found = set()
+    for sql in MIGRATIONS.glob('*.sql'):
+        for m in re.finditer(r'create view market\.(pending_[a-z_]*segments)\b', sql.read_text()):
+            found.add(m.group(1))
+    return sorted(found)
 
 
 def segment_writing_resources(tables: tuple[str, ...]) -> dict[str, str]:
@@ -202,7 +218,29 @@ for key in THROUGHPUT:
             f"THROUGHPUT names {key!r}, which matches no panel — the check would never run. "
             f"Fix the dashboard title or the panel name.")
 
+# EVERY PER-REGULATOR BACKLOG MUST APPEAR IN EVERY PANEL THAT ENUMERATES REGULATORS. When India
+# landed, `pending_in_segments` was missing from the queue count AND the depth chart, each of which
+# would have kept drawing SEC and Korea while silently omitting a third regulator. Same family as
+# the `limit 60` that hid the United States: a panel summarising a bounded set must contain all of
+# it.
+#
+# PER PANEL, NOT ACROSS ALL OF THEM. The first version concatenated every enumerating panel and
+# asked whether the name appeared anywhere — so removing a regulator from ONE panel passed clean
+# while the other still mentioned it, which is precisely the defect. Proven by that mutation.
+_backlogs = segment_backlog_views()
+for _path in DASH.glob('*.json'):
+    for _p in panels(json.loads(_path.read_text())):
+        _sql = json.dumps(_p.get("targets", ""))
+        if "pending_segments" not in _sql:
+            continue
+        for _b in _backlogs:
+            if _b not in _sql:
+                failures.append(
+                    f"{_path.name}: panel {_p.get('title')!r} enumerates regulators but omits "
+                    f"{_b} — it would keep drawing the others while a whole regulator went unshown")
+
 if failures:
+
     for f in failures:
         print(f"::error::{f}")
     sys.exit(1)
@@ -212,3 +250,4 @@ segment_resources = segment_writing_resources(('security_segment', 'security_fil
 print(f"checked {n} panels across {len(list(DASH.glob('*.json')))} dashboards; "
       f"no duplicate aliases, no stale facet enumeration, no uncoloured percentage, "
       f"throughput covers {len(segment_resources)} segment/filing resources")
+
