@@ -86,3 +86,13 @@ export const wikidata = () => origin('WIKIDATA_BASE_URL', 'https://query.wikidat
  * dart.ts turns the opaque alert into that sentence rather than leaving it to be rediscovered.
  */
 export const dart = () => origin('DART_BASE_URL', 'https://opendart.fss.or.kr')
+
+/**
+ * `www.nseindia.com` — India's corporate financial results API, and the session cookie it needs.
+ * Unlike DART there is no TLS problem here, so the cache is an optimisation rather than a
+ * correctness dependency and the default origin genuinely works.
+ */
+export const nse = () => origin('NSE_BASE_URL', 'https://www.nseindia.com')
+
+/** `nsearchives.nseindia.com` — where the `INDAS_*` XBRL instances themselves live. */
+export const nseArchives = () => origin('NSE_ARCHIVES_BASE_URL', 'https://nsearchives.nseindia.com')

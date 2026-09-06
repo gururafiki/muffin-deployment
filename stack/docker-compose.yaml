@@ -588,6 +588,10 @@ services:
       TIINGO_BASE_URL: "{{ 'http://http-cache:8080/tiingo' if http_cache_enabled | default(true) else '' }}"
       WIKIDATA_BASE_URL: "{{ 'http://http-cache:8080/wikidata' if http_cache_enabled | default(true) else '' }}"
       DART_BASE_URL: "{{ 'http://http-cache:8080/dart' if http_cache_enabled | default(true) else '' }}"
+      # India. Two origins: the results API (uncached — it is session-cookie'd) and the archives
+      # where the immutable XBRL instances live (cached a year).
+      NSE_BASE_URL: "{{ 'http://http-cache:8080/nse' if http_cache_enabled | default(true) else '' }}"
+      NSE_ARCHIVES_BASE_URL: "{{ 'http://http-cache:8080/nse-archives' if http_cache_enabled | default(true) else '' }}"
       # OPTIONAL. Without it OpenFIGI allows 25 requests/min x 10 ISINs, so ticker resolution is
       # incremental across runs; a free key raises that to 250 x 100 and finishes the backlog in one.
       OPENFIGI_API_KEY: "{{ openfigi_api_key | default('') }}"

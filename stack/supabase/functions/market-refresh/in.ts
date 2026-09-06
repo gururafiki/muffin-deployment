@@ -34,6 +34,8 @@
  */
 
 /** A filing that is not the consolidated one, so the caller can say so rather than guess. */
+import { nse as nseOrigin, nseArchives as nseArchivesOrigin } from './origins.ts'
+
 export const NOT_CONSOLIDATED = Symbol('nse filing is standalone')
 
 export interface NseFiling {
@@ -133,4 +135,111 @@ export function normalise(xml: string): NormaliseResult | typeof NOT_CONSOLIDATE
   )
 
   return { xml: out, named, annualised }
+}
+
+// ── the client ──────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * NSE refuses an unknown caller, and the handshake that fixes it ANSWERS 403.
+ *
+ * `nseindia.com` sets a session cookie on the landing page and its JSON API rejects any request
+ * without it. Measured 2026-09-06: the landing request itself returns **403 while still returning
+ * the `Set-Cookie` the API then accepts**, so a handshake step written as "throw unless ok" throws
+ * away a working session. Deno's fetch does not manage a cookie jar, so the header is carried by
+ * hand.
+ */
+async function handshake(base: string, timeoutMs: number): Promise<string> {
+  const res = await fetch(base + '/', {
+    headers: { 'User-Agent': NSE_UA, 'Accept': 'text/html' },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  // Deliberately not checking res.ok — see above.
+  await res.body?.cancel()
+  const raw = res.headers.get('set-cookie') ?? ''
+  return raw.split(/,(?=[^;]+=)/).map((c) => c.split(';')[0].trim()).filter(Boolean).join('; ')
+}
+
+/** A browser UA is required; the API answers 403 to anything that looks automated. */
+const NSE_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/124.0.0.0 Safari/537.36'
+
+export async function listFilings(symbol: string, timeoutMs: number): Promise<NseFiling[]> {
+  const base = nseOrigin()
+  const cookie = await handshake(base, Math.min(15_000, timeoutMs))
+  const url = `${base}/api/corporates-financial-results?index=equities` +
+    `&symbol=${encodeURIComponent(symbol)}&period=Annual`
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': NSE_UA,
+      'Accept': 'application/json',
+      'Referer': `${base}/companies-listing/corporate-filings-financial-results`,
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!res.ok) throw new Error(`nse results ${res.status} for ${symbol}`)
+  return parseFilings(await res.json())
+}
+
+/**
+ * Pulled out so the shape can be asserted without a network call. NSE returns either a bare array
+ * or `{ data: [...] }` depending on the endpoint version, and a filing with no `xbrl` is a real
+ * row we simply cannot read — dropped here rather than failing the company.
+ */
+export function parseFilings(body: unknown): NseFiling[] {
+  const rows = Array.isArray(body)
+    ? body
+    : (body && typeof body === 'object' && Array.isArray((body as { data?: unknown }).data)
+      ? (body as { data: unknown[] }).data
+      : [])
+  const out: NseFiling[] = []
+  for (const r of rows) {
+    if (!r || typeof r !== 'object') continue
+    const rec = r as Record<string, unknown>
+    const xbrl = typeof rec.xbrl === 'string' ? rec.xbrl : ''
+    if (!xbrl.startsWith('http')) continue
+    out.push({ xbrlUrl: xbrl, toDate: String(rec.toDate ?? rec.to_date ?? '') })
+  }
+  return out
+}
+
+/**
+ * The instance itself. 77-109 KB measured across the three filers — trivial beside SEC's
+ * multi-megabyte documents or DART's 73-second ZIP, so there is no size gate and no warm-up dance.
+ */
+export async function fetchInstance(url: string, timeoutMs: number): Promise<string | null> {
+  // THE ARCHIVES ORIGIN, so the fetch goes through http-cache. NSE returns absolute URLs on
+  // nsearchives.nseindia.com; rewriting the host onto the configured origin is what keeps an
+  // immutable document cacheable — and `origins.ts` defaults to the real host, so the cache
+  // remains removable without an outage.
+  const archives = nseArchivesOrigin()
+  const target = url.replace(/^https?:\/\/nsearchives\.nseindia\.com/, archives)
+  const referer = nseOrigin() + '/'
+  // THE REFERER IS PASSED IN, not written here. NSE wants one, but a provider host spelled inside
+  // this file is exactly what `http-cache-covers-every-provider` fails a PR for — and it is right
+  // to: a hardcoded host is how a call silently stops going through the cache, and nothing in
+  // production can report it. It caught this line the first time it ran.
+  const res = await fetch(target, {
+    headers: { 'User-Agent': NSE_UA, 'Referer': referer },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!res.ok) {
+    await res.body?.cancel()
+    return null
+  }
+  return await res.text()
+}
+
+/**
+ * NSE's `toDate` is `31-Mar-2024`. Returned as an ISO date so `security_filing.report_date` is
+ * comparable with every other source's.
+ */
+export function isoFromNseDate(s: string): string | null {
+  const m = /^(\d{2})-([A-Za-z]{3})-(\d{4})$/.exec(s.trim())
+  if (!m) return null
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const mi = months.indexOf(m[2])
+  if (mi < 0) return null
+  return `${m[3]}-${String(mi + 1).padStart(2, '0')}-${m[1]}`
 }
