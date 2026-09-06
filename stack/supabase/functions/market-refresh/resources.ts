@@ -355,7 +355,19 @@ export function throttled(message: string): boolean {
 export function noDataForSymbol(message: string): boolean {
   const m = message.toLowerCase()
   return m.includes('no dividend data found') ||
-    m.includes("'nonetype' object has no attribute")
+    m.includes("'nonetype' object has no attribute") ||
+    // SEC, VIA openbb, SAYS THE SAME THING IN TWO MORE WORDINGS — measured 2026-09-06 against the
+    // deployed openbb-api, with AAPL answering in the same seconds:
+    //
+    //   AIBRF  -> Unexpected Error -> ContentTypeError -> 404, message='Attempt to decode JSON …'
+    //   BWAGF  -> the same
+    //   BRK/B  -> Could not find CIK for symbol: BRK/B
+    //
+    // openbb's SEC provider resolves symbol -> CIK through SEC's own ticker map, so a US OTC
+    // foreign-ordinary line that is not in that map cannot be served however valid the company is.
+    // Both name the symbol and both are settled facts about it, not about the provider.
+    m.includes('could not find cik for symbol') ||
+    (m.includes('contenttypeerror') && m.includes('404'))
 }
 
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>

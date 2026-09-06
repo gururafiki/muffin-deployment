@@ -1022,6 +1022,10 @@ console.log('\nabsence classifier — a crash in the adapter is still an answer 
     "Error getting data for FAB.AE: 'NoneType' object has no attribute 'empty'",
     "Error getting data for WARBABAN.KW: 'NoneType' object has no attribute 'empty'",
     "Error getting data for ANDINAB.SN: 'NoneType' object has no attribute 'empty'",
+    // SEC, via openbb, for a US OTC line absent from SEC's own ticker map. Both name the symbol.
+    "openbb 500 on /api/v1/equity/fundamental/income?provider=sec&symbol=AIBRF: "
+      + "Unexpected Error -> ContentTypeError -> 404, message='Attempt to decode JSON with unexpected mimetype: text/html'",
+    "Could not find CIK for symbol: BRK/B",
   ]
   // A NEGATIVE CACHE EARNED ON ONE OF THESE WOULD BE THE 1,369-SECURITY INCIDENT AGAIN: a provider
   // refusing us, or a transport fault, recorded as thousands of permanently unanswerable companies.
@@ -1032,14 +1036,26 @@ console.log('\nabsence classifier — a crash in the adapter is still an answer 
     'Signal timed out.',
     'client error (Connect): tcp connection refused',
     'openbb 400 on /api/v1/equity/fundamental/dividends?provider=yfinance&symbol=BRK/B',
+    // A 500 that is NOT a 404 is the provider being unwell, and must never mark a symbol.
+    'openbb 500 on /api/v1/equity/fundamental/income?provider=sec&symbol=AAPL: Internal Server Error',
   ]
   const src = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
+  const handlerSrc = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   const body = src.slice(src.indexOf('export function noDataForSymbol'))
   const terms = [...body.slice(0, body.indexOf('\n}')).matchAll(/includes\((?:'([^']+)'|"([^"]+)")\)/g)]
     .map((m) => m[1] ?? m[2])
-  check(terms.length >= 2,
-    'the absence classifier knows BOTH wordings, not just the tidy one',
+  check(terms.length >= 4,
+    'the absence classifier knows every wording, not just the tidy one',
     terms.join(' | '))
+
+  // THE `no_currency` HALF OF THE STATEMENTS BACKLOG IS MARKED ON PER-SYMBOL EVIDENCE, NOT ON A
+  // RUN-LEVEL TALLY. `secOk` says the endpoint answered for SOMEONE this run — the right guard
+  // against an outage, and guaranteed false once the answerable head has drained, which is how
+  // this resource sat at `written: 240, remaining: 5972` on six identical runs.
+  check(/secNoSuchSymbol \|\| \(secAsked && secRows === 0 && secOk\)/.test(handlerSrc),
+    'a named SEC 404 marks on its own evidence, without the run-level tally in front of it')
+  check(/if \(noDataForSymbol\(msg\)\) \{ secNoSuchSymbol = true; continue \}/.test(handlerSrc),
+    'a SEC 404 is classified as an absence rather than counted as a failure')
 
   const matches = (msg: string) => terms.some((t) => msg.toLowerCase().includes(t))
   const missed = mustMatch.filter((m) => !matches(m))
@@ -1866,15 +1882,29 @@ console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
     /secFailed\+\+/.test(body) && !/usTicker[\s\S]{0,400}statements_missing_at/.test(body),
     'a SEC failure is counted, NOT marked — yfinance is the fallback, and a foreign filer legitimately has nothing there',
   )
+  // A THROTTLE MUST STILL TAKE THE FAILURE PATH, or the classifier's new SEC wordings could let a
+  // rate limit mark a page. Ordering is load-bearing: `throttled` is tested BEFORE the absence
+  // classifier, so a refusal can never reach it.
+  check(
+    /throttled\(msg\)[\s\S]{0,120}throttledOut = true; break \}[\s\S]{0,1200}?noDataForSymbol\(msg\)/.test(body),
+    'a throttle is classified BEFORE the absence wordings, so a refusal can never mark a symbol',
+  )
   // The widening needs its own exit, or the `no_currency` half re-asks for ever — the shape that
   // has now cost this pipeline five separate resources.
   check(
     /update\(\{\s*statement_currency_missing_at:/.test(body),
     'a company SEC has no filings for is recorded, so the no_currency half of the backlog can drain',
   )
+  // THE RULE MOVED RATHER THAN RELAXED. The EMPTY-ANSWER path still carries all three conditions —
+  // asked to completion, produced nothing, and the endpoint answered for someone this run — which
+  // is the right guard against an outage being recorded as a page of dead securities. What was
+  // added beside it is a path for a 404 that NAMES the symbol, which is evidence about that symbol
+  // and needs no tally in front of it. Requiring the tally there is what kept 2,432 securities at
+  // the head of a weight-ordered backlog for ever: with `fromSec: 0` the whole page is
+  // unanswerable, so `secOk` can never become true.
   check(
-    /if \(secAsked && secRows === 0 && secOk/.test(body),
-    'that mark requires the security to have been asked to completion AND the endpoint to have answered for someone — a failure, a throttle or a deadline is not evidence it does not file',
+    /\(secAsked && secRows === 0 && secOk\)/.test(body),
+    'the EMPTY-ANSWER mark still requires the security to have been asked to completion AND the endpoint to have answered for someone — a failure, a throttle or a deadline is not evidence it does not file',
   )
   check(
     /secOk = true/.test(body),
