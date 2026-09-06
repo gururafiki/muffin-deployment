@@ -120,4 +120,12 @@ order by round, already_read desc, best_weight desc, accession_number;
 comment on view market.pending_segments is
   'SEC filings whose XBRL instance has not been read for segment facts. Ordered BREADTH-FIRST: `round` is the filing''s STABLE depth into its own company''s history (annuals before quarterlies), computed over every eligible filing rather than only the outstanding ones — so a company that has had k filings read sits at round k+1 and yields to every company still at round 1. Computing it over the outstanding set instead makes it renumber as the queue drains, which put 3,861 of 3,967 filers at zero re-reads while one company had 131. Requires a CIK — that is the SEC path''s actual precondition, and without it enabling DART puts Korean filings in this queue, where `findInstanceUrl` cannot address them.';
 
+-- A DROP TAKES THE GRANTS WITH IT, AND SUPERUSER CANNOT SEE THAT. Every one of this view's four
+-- earlier definers re-grants for the same reason; omitting it here left `service_role` — which is
+-- the role the edge function reads as — unable to select from the queue at all, so
+-- `security-segments` would have failed on every run while the migration set applied cleanly four
+-- times over. Caught by `every-table-is-reachable.sql`, which exists precisely because the
+-- migration tests run as superuser and prove nothing about grants.
+grant select on market.pending_segments to service_role;
+
 notify pgrst, 'reload schema';
