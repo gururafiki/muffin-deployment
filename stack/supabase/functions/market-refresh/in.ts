@@ -243,3 +243,64 @@ export function isoFromNseDate(s: string): string | null {
   if (mi < 0) return null
   return `${m[3]}-${String(mi + 1).padStart(2, '0')}-${m[1]}`
 }
+
+/**
+ * NSE's own equity list: the ISIN -> trading-symbol map, and the reason India works at all.
+ *
+ * WHY THIS EXISTS. `pending_in_history` originally asked NSE using `market.listing.symbol`, on the
+ * strength of a planning probe against RELIANCE, HDFCBANK and INFY — three symbols that happen to
+ * match. Measured 2026-09-06 against this very file, only **239 of 645** Indian equities carry a
+ * listing symbol NSE recognises. The rest hold a vendor abbreviation:
+ *
+ *     SUEL -> SUZLON      HUVR -> HINDUNILVR    MSIL -> MARUTI
+ *     BAF  -> BAJFINANCE  KMB  -> KOTAKBANK     HNDL -> HINDALCO
+ *
+ * NSE answers an unknown symbol with an EMPTY ARRAY and HTTP 200, so `in-filings` reported
+ * `walked: 6, mapped: 0, failed: 0` with no error at all — a resource succeeding at asking the
+ * wrong question. That is this repo's oldest lesson (probe an endpoint with symbols you expect to
+ * FAIL, not the obvious ones) reproduced while implementing it.
+ *
+ * Joining on ISIN recovers **389** of the 389 remaining, taking coverage from 37% to 97%. The list
+ * is 2,570 rows with 2,570 DISTINCT ISINs and no blanks — measured, which is what makes the ISIN a
+ * safe key here rather than an assumption.
+ */
+export async function equityList(timeoutMs: number): Promise<{ symbol: string; isin: string }[]> {
+  // The archives origin, so this goes through http-cache like every other provider call.
+  const res = await fetch(`${nseArchivesOrigin()}/content/equities/EQUITY_L.csv`, {
+    headers: { 'User-Agent': NSE_UA, 'Referer': nseOrigin() + '/' },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!res.ok) {
+    await res.body?.cancel()
+    throw new Error(`nse equity list failed: HTTP ${res.status}`)
+  }
+  return parseEquityList(await res.text())
+}
+
+/**
+ * Split out so the parse is testable without the network. NSE's header is
+ * `SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE, MARKET LOT, ISIN NUMBER, ...`
+ * — note the LEADING SPACES on every column after the first, which is why the header is matched
+ * on a trimmed name rather than by position: a column inserted upstream would otherwise shift the
+ * ISIN silently and map every company to the wrong symbol.
+ */
+export function parseEquityList(csv: string): { symbol: string; isin: string }[] {
+  const lines = csv.split(/\r?\n/).filter((l) => l.trim().length > 0)
+  if (lines.length < 2) return []
+  const header = lines[0].split(',').map((h) => h.trim().toUpperCase())
+  const iSym = header.indexOf('SYMBOL')
+  const iIsin = header.indexOf('ISIN NUMBER')
+  if (iSym < 0 || iIsin < 0) {
+    throw new Error(`nse equity list header changed: ${header.join('|')}`)
+  }
+  const out: { symbol: string; isin: string }[] = []
+  for (const line of lines.slice(1)) {
+    const cells = line.split(',')
+    const symbol = (cells[iSym] ?? '').trim()
+    const isin = (cells[iIsin] ?? '').trim().toUpperCase()
+    // An ISIN is 12 characters; anything else is a truncated or shifted row, and a bad key here
+    // maps one company's filings onto another.
+    if (symbol && /^[A-Z0-9]{12}$/.test(isin)) out.push({ symbol, isin })
+  }
+  return out
+}

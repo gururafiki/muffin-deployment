@@ -327,6 +327,7 @@ const KR_FILINGS_RESOURCE = 'kr-filings'
 const KR_SEGMENTS_RESOURCE = 'security-kr-segments'
 /** DART's own name for the Korean annual report, and the `filing_form` row seeded by migration 172. */
 const KR_ANNUAL_FORM = '사업보고서'
+const IN_SYMBOLS_RESOURCE = 'in-symbols'
 const IN_FILINGS_RESOURCE = 'in-filings'
 const IN_SEGMENTS_RESOURCE = 'security-in-segments'
 /** NSE labels every annual results filing `Annual`; it is the `filing_form` code seeded for `nse`. */
@@ -462,6 +463,9 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // discovery walks one company per call and is bounded by the shared provider budget.
     [IN_SEGMENTS_RESOURCE]: 4,
     [IN_FILINGS_RESOURCE]: 14,
+    // NSE's equity list is reference data that changes when a company lists or renames, so it is
+    // paced like the CIK map rather than like a backlog.
+    [IN_SYMBOLS_RESOURCE]: REFERENCE_TTL_MINUTES,
     // Links only, and a company's annual reports change once a year — this is the least urgent
     // thing on the cron and is paced accordingly.
     [CN_FILINGS_RESOURCE]: 29,
@@ -2624,6 +2628,40 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // and never permanently. And an ANTI-JOIN, not an ordering — read straight from the security
     // list with a `limit`, this would return the same companies for ever, which is the defect
     // `pending_industry` ran with for months.
+    if (resource === IN_SYMBOLS_RESOURCE) {
+      // NSE'S OWN ISIN -> TRADING-SYMBOL MAP, and the reason India resolves at all.
+      //
+      // `market.listing.symbol` holds a vendor abbreviation for 406 of 645 Indian equities (SUEL
+      // for SUZLON, HUVR for HINDUNILVR), and NSE answers an unknown symbol with an EMPTY ARRAY
+      // and HTTP 200 — so `in-filings` reported `walked: 6, mapped: 0, failed: 0` while asking the
+      // wrong question, with nothing anywhere able to show it.
+      const listed = await nse.equityList(30_000)
+      if (listed.length === 0) {
+        // AN EMPTY LIST IS A PROVIDER EVENT, NEVER A STATEMENT THAT INDIA HAS NO LISTINGS.
+        // Applying it would not erase anything (the upsert only writes what it is given), but
+        // reporting ok would hide a broken feed behind a green run.
+        await market.rpc('finish_refresh', {
+          p_resource: resource, p_ok: false, p_error: 'empty nse equity list',
+        })
+        return json({ resource, ok: false, error: 'NSE returned no listings' })
+      }
+
+      const map: Record<string, string> = {}
+      for (const row of listed) map[row.isin] = row.symbol
+
+      const { data, error } = await market.rpc('apply_nse_symbol_map', { p_map: map })
+      if (error) throw new Error(`apply_nse_symbol_map failed: ${error.message}`)
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        listings: listed.length,
+        // Rows CHANGED, not matched — a security whose symbol is already right is skipped, so a
+        // steady-state run reports 0 and that is the correct answer.
+        updated: typeof data === 'number' ? data : 0,
+      })
+    }
+
     if (resource === IN_FILINGS_RESOURCE) {
       const deadline = Date.now() + 70_000
 
