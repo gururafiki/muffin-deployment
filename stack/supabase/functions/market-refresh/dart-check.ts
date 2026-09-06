@@ -123,6 +123,27 @@ console.log('\nthe zip reader')
   check('a DART body reporting SUCCESS but not being a zip is still not-a-zip',
     classifyBody(enc.encode('{"status":"000","message":"정상"}')) === 'not-a-zip')
 
+  // AND DART SAYS NO IN XML TOO, WHICH IS THE FORM `document.xml` ACTUALLY USES.
+  //
+  // Quoted from production 2026-09-06. Status 014 is "the file does not exist" — an ordinary,
+  // permanent fact about an immutable filing. Matching only the JSON form made it fall through to
+  // `not-a-zip`, which THROWS, and a throw never reaches the code that stamps
+  // `segments_parsed_at`: four filings held the head of a 6,393-filing backlog through 143
+  // IDENTICAL runs over twelve hours.
+  check('DART answering an error as XML+200 reads as an error, not an archive',
+    classifyBody(enc.encode(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<result><status>014</status><message>파일이 존재하지 않습니다</message></result>',
+    )) === 'dart-error')
+  check('...the XML success status is still not an archive',
+    classifyBody(enc.encode(
+      '<?xml version="1.0"?><result><status>000</status><message>정상</message></result>',
+    )) === 'not-a-zip')
+  // The unrecognised-body case must survive the widening: an HTML gateway page carries no status
+  // at all, and swallowing it would turn a proxy outage into 6,393 filings marked as read.
+  check('...and an HTML error page is STILL not-a-zip after the widening',
+    classifyBody(enc.encode('<html><body>504 Gateway Time-out</body></html>')) === 'not-a-zip')
+
   const huge = await buildZip([{ name: 'big.xbrl', body: 'x' }])
   const dv = new DataView(huge.buffer)
   // Rewrite the central directory's uncompressed size to claim 64 MB.
