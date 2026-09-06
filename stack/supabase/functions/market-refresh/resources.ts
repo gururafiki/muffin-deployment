@@ -325,6 +325,39 @@ export function throttled(message: string): boolean {
     m.includes('quota')
 }
 
+/**
+ * Does this provider error say THIS SYMBOL has no data, rather than that the provider is unwell?
+ *
+ * The counterpart to `throttled`, and the distinction this file keeps making: a request that
+ * FAILED and a request that ANSWERED NOTHING are different facts. A symbol the provider genuinely
+ * cannot serve must earn a negative cache, or a weight-ordered backlog re-asks the same head for
+ * ever; a provider that is refusing us must mark nothing.
+ *
+ * Both wordings below are quoted from responses measured on this deployment 2026-09-06, and they
+ * mean the same thing through two different code paths in openbb's yfinance adapter:
+ *
+ *   TSLA          -> "No dividend data found for TSLA"                    (a US non-payer)
+ *   ICT.PS        -> "'NoneType' object has no attribute 'empty'"         (venue not covered)
+ *   FAB.AE        -> "'NoneType' object has no attribute 'empty'"
+ *   WARBABAN.KW   -> "'NoneType' object has no attribute 'empty'"
+ *
+ * The second is the adapter dereferencing a frame it never received. It reads like a bug in our
+ * code and is a statement about the symbol — and because only the FIRST was classified, 60
+ * securities of the Philippines, the UAE, Kuwait and Chile sat at the head of `pending_dividends`
+ * failing eight times a day since 2026-09-05 with `written: 0`, against a backlog of 9,221.
+ *
+ * A THROTTLE IS NOT IN THIS LIST AND MUST NEVER BE. yfinance raises `YFRateLimitError` under rate
+ * limiting, which `throttled` already catches and which breaks the loop before this is consulted —
+ * that separation is what makes it safe to mark on per-symbol evidence here without stacking a
+ * run-level tally on top of it (a tally that, once the answerable head has drained, can never
+ * become true and guarantees the stall it was meant to prevent).
+ */
+export function noDataForSymbol(message: string): boolean {
+  const m = message.toLowerCase()
+  return m.includes('no dividend data found') ||
+    m.includes("'nonetype' object has no attribute")
+}
+
 export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */

@@ -64,6 +64,7 @@ import {
   PRICES_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
   REFERENCE_TTL_MINUTES,
+  noDataForSymbol,
   RESOURCES,
   SEC_PERF_TTL_MINUTES,
   symbolList,
@@ -775,7 +776,17 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
           // `Error getting data for TSLA: No dividend data found for TSLA`. That is the provider
           // speaking about THIS security, so it earns a mark on its own, exactly as Tiingo's 404
           // does. Every other 400 is a real failure and must not mark anything.
-          if (/no dividend data found/i.test(msg)) {
+          //
+          // AND THERE ARE TWO WORDINGS FOR THAT, WHICH COST A NINE-DAY STALL. A venue yfinance
+          // does not cover answers `'NoneType' object has no attribute 'empty'` instead — the
+          // adapter dereferencing a frame it never received. Only the first was classified, so
+          // ICT.PS, FAB.AE, BDO.PS and WARBABAN.KW held the top of a weight-ordered backlog and
+          // were re-asked eight times a day with `failed: 60, written: 0` against 9,221 pending.
+          // Verified against the live provider before trusting it: AAPL and KO return full
+          // dividend histories in the same seconds those four fail, so it is the symbol and not
+          // the provider. Classified in `noDataForSymbol`, beside the throttle classifier it must
+          // never overlap with.
+          if (noDataForSymbol(msg)) {
             anyAnswer = true
             noDividend++
             const { error } = await market

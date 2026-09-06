@@ -1003,6 +1003,73 @@ console.log('\ncurrency — the venue overrules a provider that contradicts it')
   // Read ONCE, not per batch: 59 rows that cannot change mid-run.
 }
 
+console.log('\nabsence classifier — a crash in the adapter is still an answer about the symbol')
+{
+  // THE MIRROR OF THE THROTTLE CLASSIFIER BELOW, and it failed the same way: a vocabulary that
+  // knew one wording for a fact the provider states in two.
+  //
+  // Measured 2026-09-06 against the live openbb-api. `security-dividends` had returned
+  // `ok: false, failed: 60, written: 0` on every run since 2026-09-05 with 9,221 securities
+  // pending, because only "No dividend data found" was classified as an absence. A venue yfinance
+  // does not cover crashes the adapter instead, and those securities — being the HEAVIEST holdings
+  // in the backlog — were re-asked eight times a day for ever.
+  //
+  // Every string is quoted from a response on this deployment. AAPL and KO returned full dividend
+  // histories in the same seconds, which is what proves these are statements about the SYMBOL.
+  const mustMatch = [
+    "Error getting data for TSLA: No dividend data found for TSLA",
+    "Error getting data for ICT.PS: 'NoneType' object has no attribute 'empty'",
+    "Error getting data for FAB.AE: 'NoneType' object has no attribute 'empty'",
+    "Error getting data for WARBABAN.KW: 'NoneType' object has no attribute 'empty'",
+    "Error getting data for ANDINAB.SN: 'NoneType' object has no attribute 'empty'",
+  ]
+  // A NEGATIVE CACHE EARNED ON ONE OF THESE WOULD BE THE 1,369-SECURITY INCIDENT AGAIN: a provider
+  // refusing us, or a transport fault, recorded as thousands of permanently unanswerable companies.
+  const mustNotMatch = [
+    'YFRateLimitError: Too Many Requests',
+    'Error: You have run over your hourly request limit',
+    'our standard API rate limit is 25 requests per day',
+    'Signal timed out.',
+    'client error (Connect): tcp connection refused',
+    'openbb 400 on /api/v1/equity/fundamental/dividends?provider=yfinance&symbol=BRK/B',
+  ]
+  const src = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
+  const body = src.slice(src.indexOf('export function noDataForSymbol'))
+  const terms = [...body.slice(0, body.indexOf('\n}')).matchAll(/includes\((?:'([^']+)'|"([^"]+)")\)/g)]
+    .map((m) => m[1] ?? m[2])
+  check(terms.length >= 2,
+    'the absence classifier knows BOTH wordings, not just the tidy one',
+    terms.join(' | '))
+
+  const matches = (msg: string) => terms.some((t) => msg.toLowerCase().includes(t))
+  const missed = mustMatch.filter((m) => !matches(m))
+  check(missed.length === 0,
+    'every "this symbol has no data" wording seen in production is classified',
+    missed.length ? `NOT matched: ${missed.join(' | ')}` : `${mustMatch.length} wordings`)
+
+  const wrong = mustNotMatch.filter((m) => matches(m))
+  check(wrong.length === 0,
+    'a refusal or a transport fault is NEVER mistaken for an absence',
+    wrong.length ? `wrongly matched: ${wrong.join(' | ')}` : `${mustNotMatch.length} negatives`)
+
+  // AND THE TWO CLASSIFIERS MUST NOT OVERLAP. If a wording were in both, the branch that runs
+  // first decides, and marking a throttled symbol absent is the failure this whole file exists to
+  // prevent — so assert it structurally rather than trusting the two lists to stay disjoint.
+  const tbody = src.slice(src.indexOf('export function throttled'))
+  const tterms = [...tbody.slice(0, tbody.indexOf('\n}')).matchAll(/includes\('([^']+)'\)/g)].map((m) => m[1])
+  const overlap = terms.filter((t) => tterms.some((x) => t.includes(x) || x.includes(t)))
+  check(overlap.length === 0,
+    'the absence and throttle classifiers share no vocabulary',
+    overlap.length ? `BOTH claim: ${overlap.join(', ')}` : `${terms.length} vs ${tterms.length} terms, disjoint`)
+
+  // The handler must actually USE it — a classifier nothing calls is the `filing_form` defect.
+  const handler = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  check(/if \(noDataForSymbol\(msg\)\)/.test(handler),
+    'the dividends handler classifies with it rather than carrying its own regex')
+  check(!/\/no dividend data found\/i\.test\(/.test(handler),
+    'the old single-wording regex is GONE from the handler, not merely joined by the classifier')
+}
+
 console.log('\nthrottle classifier — the wordings providers ACTUALLY use')
 {
   // A CLASSIFIER IS ONLY AS GOOD AS THE VOCABULARY IT KNOWS, and this one was a guess.
@@ -1700,9 +1767,14 @@ console.log('\nsecurity-dividends — the 400 that means "this company pays none
   // these passed a mutation that had deleted the code entirely.
   const body = withComments.replace(/\/\/[^\n]*/g, '')
 
+  // A non-payer is still recognised by the provider MESSAGE (it arrives as a 400, not as an empty
+  // array) — but the VOCABULARY now lives in `noDataForSymbol`, because the provider states that
+  // fact in two wordings and this handler only knew the tidy one. The guard follows the rule to
+  // where it moved rather than being relaxed: the classifier's own wordings are pinned in the
+  // "absence classifier" block above, and what must be true HERE is that the handler consults it.
   check(
-    /no dividend data found/i.test(body),
-    'a non-payer is recognised by the provider MESSAGE — it arrives as a 400, not as an empty array',
+    /noDataForSymbol\(msg\)/.test(body),
+    'a non-payer is recognised by the provider MESSAGE, via the shared absence classifier',
   )
   // Match the WRITE, not the name. `dividends_missing_at` also appears in the error-message string
   // two lines below it, so `includes(name)` passed a mutation that had deleted the update entirely.
