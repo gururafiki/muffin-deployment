@@ -970,15 +970,33 @@ const IPROD = 'ifrs-full:ProductsAndServicesAxis'
     ]
     const out = segmentFactsFrom(instance(cvx), AXES, CONCEPTS)
     const flat = out.filter((f) => f.parentMember === null && f.partitionId > 0)
-    const sum = flat.reduce((a, f) => a + f.value, 0)
-    check(flat.length === 3 && sum === 231370,
+    // PER AXIS, because ONE GRID IS TWO SPLITS and counting them together is meaningless — the
+    // cell dimension and the parent dimension each reconcile to the same total, so a combined
+    // count reads as a double count and a combined sum is simply 2x.
+    const onAxis = (a: string) => flat.filter((f) => f.axis === a)
+    const sumOf = (a: string) => onAxis(a).reduce((x, f) => x + f.value, 0)
+
+    // ── summed ACROSS the parent axis: the cell dimension ────────────────────────────────────
+    check(onAxis(SEG).length === 3 && sumOf(SEG) === 231370,
       'a grid with no stated parent total is summed into a flat split that reconciles',
-      `${flat.length} members summing ${sum}`)
+      `${onAxis(SEG).length} members summing ${sumOf(SEG)}`)
     const up = flat.find((f) => f.memberCode === 'x:UpstreamMember')
     check(up?.value === 88379, 'the marginal is the cell sum across parents (45,518 + 42,861)',
       `got ${up?.value}`)
+
+    // ── summed BY parent: the parent dimension, which was the half not implemented ───────────
+    // Chevron's geography revenue was derivable by addition and shown nowhere. It is 0.25% short
+    // of the filed total because the 581 `AllOther` segment has no geography — inside the 0.5%
+    // tolerance, so it reconciles, and `share-basis` then takes shares against the disclosed sum.
+    check(onAxis(GEO).length === 2 && sumOf(GEO) === 230789,
+      'the same grid summed BY PARENT gives the parent dimension',
+      `${onAxis(GEO).length} members summing ${sumOf(GEO)}`)
+    const us = flat.find((f) => f.memberCode === 'country:US' && f.axis === GEO)
+    check(us?.value === 118003, 'a parent marginal is its own cells summed (45,518 + 72,485)',
+      `got ${us?.value}`)
+
     check(out.some((f) => f.parentMember !== null),
-      'the cells themselves are still kept — the marginal is added, never a replacement')
+      'the cells themselves are still kept — the marginals are added, never a replacement')
   }
 
   // ── NOVO: members nest, so the flat sum is a multiple of revenue ─────────────────────────────
