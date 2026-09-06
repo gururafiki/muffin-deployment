@@ -74,7 +74,14 @@ http_cache_enabled: true
 # Disk ceiling for cached responses. nginx evicts LRU past this. SEC XBRL companyfacts alone is
 # ~3.6 MB x 3,516 filers, so this is sized for the whole universe plus headroom — check the node
 # has the room before raising it.
-http_cache_max_size: "8g"
+# 40g, not the 8g this started at. MEASURED 2026-09-06: the cache was at 6.4 GB of its 8 GB
+# ceiling with 62,658 entries — full, and evicting LRU. That matters because a
+# `segment_parser.version` bump re-queues ~213,500 filings, and `/sec-www/` caches EDGAR archives
+# for 30 days: a re-read inside that window costs no external request, but only if the entry is
+# still there. At 0.7-11 MB per XBRL instance the corpus is far past 8 GB, so most of a re-parse
+# was re-fetching documents the cache had just evicted. `/mnt/data` holds the cache and had 74 GB
+# free of 98 GB.
+http_cache_max_size: "40g"
 
 # --- Legacy single-provider path (IGNORED while llm_chain is set above) ---
 llm_provider: "openrouter"                 # openai | anthropic | openrouter | ollama

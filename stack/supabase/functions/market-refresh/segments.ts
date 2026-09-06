@@ -656,28 +656,46 @@ export function segmentFactsFrom(
         flatSeen.add(`${c.axis}|${c.memberCode}|${c.metricCode}|${c.periodType}|${c.periodEnding}`)
       }
     }
+    // BOTH DIRECTIONS, BECAUSE ONE GRID IS TWO SPLITS.
+    //
+    // Summing across the PARENT axis gives the cell dimension (Chevron's business lines); summing
+    // by PARENT gives the parent dimension (its geographies). Only the first was implemented, so
+    // Chevron's `country:US` and `NonUsMember` revenue rows read null while the four cells that add
+    // up to them — US x Upstream 45,518, US x Downstream 72,485, non-US x Upstream 42,861, non-US x
+    // Downstream 69,925 — sat right there. Measured on production before this change: 1,643 parent
+    // rollups across 58 securities had no flat fact of their own, 965 of them revenue.
+    //
+    // Nothing new is needed to keep it safe. Both directions go through the SAME three guards: a
+    // member the filer states flatly is never replaced (which is also what stops Alphabet's
+    // `GoogleServicesMember` being re-synthesised from its own product cells), the marginal must
+    // survive the ordinary partition search, and one that earns no partition is dropped rather than
+    // stored at 0.
     const rolled = new Map<string, Candidate>()
-    for (const c of unique) {
-      if (c.parentMember === null) continue
-      const flatKey = `${c.axis}|${c.memberCode}|${c.metricCode}|${c.periodType}|${c.periodEnding}`
-      if (flatSeen.has(flatKey)) continue
+    const roll = (c: Candidate, axis: string, memberCode: string) => {
+      const flatKey = `${axis}|${memberCode}|${c.metricCode}|${c.periodType}|${c.periodEnding}`
+      if (flatSeen.has(flatKey)) return
       const existing = rolled.get(flatKey)
-      if (existing) existing.value += c.value
-      else {
-        rolled.set(flatKey, {
-          ...c,
-          parentAxis: null,
-          parentMember: null,
-          // THE QUALIFIER IS KEPT, and dropping it was wrong. A qualifier says which of several
-          // "undimensioned" totals a fact was disaggregated from, and the cells carry the filer's
-          // — Chevron tags its grid `ConsolidationItemsAxis = OperatingSegmentsMember`, whose
-          // total is 231,370m, while the bare undimensioned revenue is 184,432m. Blanking it put
-          // the marginal in the unqualified bucket, where it summed to 231,370 against a target of
-          // 184,432 and reconciled to nothing. It also has to match the FILED members it will be
-          // partitioned beside — Chevron's `AllOther` carries the same qualifier.
-          value: c.value,
-        })
-      }
+      if (existing) { existing.value += c.value; return }
+      rolled.set(flatKey, {
+        ...c,
+        axis,
+        memberCode,
+        parentAxis: null,
+        parentMember: null,
+        // THE QUALIFIER IS KEPT, and dropping it was wrong. A qualifier says which of several
+        // "undimensioned" totals a fact was disaggregated from, and the cells carry the filer's
+        // — Chevron tags its grid `ConsolidationItemsAxis = OperatingSegmentsMember`, whose
+        // total is 231,370m, while the bare undimensioned revenue is 184,432m. Blanking it put
+        // the marginal in the unqualified bucket, where it summed to 231,370 against a target of
+        // 184,432 and reconciled to nothing. It also has to match the FILED members it will be
+        // partitioned beside — Chevron's `AllOther` carries the same qualifier.
+        value: c.value,
+      })
+    }
+    for (const c of unique) {
+      if (c.parentMember === null || c.parentAxis === null) continue
+      roll(c, c.axis, c.memberCode)              // across the parent axis -> the cell dimension
+      roll(c, c.parentAxis, c.parentMember)      // by parent            -> the parent dimension
     }
     return [...rolled.values()]
   })()
