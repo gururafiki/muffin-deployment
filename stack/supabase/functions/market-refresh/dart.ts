@@ -203,8 +203,24 @@ export async function fetchInstance(
 export function classifyBody(bytes: Uint8Array): 'zip' | 'dart-error' | 'not-a-zip' {
   if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b) return 'zip'
   const text = new TextDecoder().decode(bytes.subarray(0, 300))
-  const m = text.match(/"status"\s*:\s*"(\d+)"/)
-  if (m && m[1] !== '000') return 'dart-error'
+  // DART SAYS NO IN TWO FORMATS, AND THIS KNEW ONE OF THEM.
+  //
+  // The `.json` list endpoints answer with JSON; `document.xml` answers with XML:
+  //
+  //   {"status":"010","message":"등록되지 않은 키입니다."}
+  //   <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  //   <result><status>014</status><message>파일이 존재하지 않습니다</message></result>
+  //
+  // Status 014 is "the file does not exist" — an ordinary, permanent fact about an immutable
+  // filing, and the commonest answer for an older Korean report that has no XBRL archive. Matching
+  // only the JSON form made it fall through to `not-a-zip`, which THROWS, and a throw never
+  // reaches the code that stamps `segments_parsed_at`. Measured 2026-09-06: four filings held the
+  // head of a 6,393-filing backlog through **143 identical runs** over twelve hours —
+  // `failed: 4, written: 0, remaining: 6393` every five minutes, against a provider that answers
+  // in ~3.5 s from this node.
+  const m = text.match(/"status"\s*:\s*"(\d+)"|<status>\s*(\d+)\s*<\/status>/)
+  const status = m ? (m[1] ?? m[2]) : null
+  if (status && status !== '000') return 'dart-error'
   return 'not-a-zip'
 }
 
