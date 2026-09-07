@@ -404,6 +404,11 @@ const SEGMENT_METRICS = [
   // Added by migration 148. `total_assets` is an INSTANT and needed the parser to accept
   // stocks as well as flows; the other two are ordinary durations.
   'total_assets', 'depreciation', 'cost_of_revenue',
+  // Added by migration 196, both INSTANTS like `total_assets`. Long-lived assets by geography is
+  // REQUIRED by ASC 280 beside geographic revenue and was in every instance we already download —
+  // Amazon reports US $180bn / non-US $61.3bn on `StatementGeographicalAxis`. Goodwill is per
+  // segment because that is where impairment is tested. 722 and 3,347 filers respectively.
+  'long_lived_assets', 'goodwill',
 ]
 const PRICE_HISTORY_RESOURCE = 'security-price-history'
 const DAILY_HISTORY_RESOURCE = 'security-daily-history'

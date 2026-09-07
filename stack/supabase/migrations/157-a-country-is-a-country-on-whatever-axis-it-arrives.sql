@@ -182,7 +182,18 @@ select
   p.currency_code, p.period_ending, p.accession_number, p.reconciled_to,
   -- Appended: what the member is called and where it is, when that is knowable without curation.
   sm.country_iso2,
-  sm.label as member_label
+  sm.label as member_label,
+  -- APPENDED AGAIN, AND THE ORDER IS LOAD-BEARING. `create or replace view` can only ADD columns
+  -- at the END; inserting these beside `total_assets` where they belong would force the drop
+  -- fallback below and open a window on every deploy in which the view and its matview do not
+  -- exist. Ugly placement, no window.
+  --
+  -- LONG-LIVED ASSETS BY GEOGRAPHY IS REQUIRED BY ASC 280 BESIDE REVENUE, and it was already in
+  -- every instance we download. Measured 2026-09-06: Amazon reports US $180,000,000,000 and
+  -- non-US $61,300,000,000 as INSTANTS on `StatementGeographicalAxis`; SEC's frames API puts
+  -- `NoncurrentAssets` at 722 filers and `Goodwill` at 3,347.
+  lla.value as long_lived_assets,
+  gw.value  as goodwill
 from pivoted p
 -- A SCALAR SUBQUERY, NOT A JOIN. `segment_axis` is keyed (taxonomy, axis) and the `srt:` axes are
 -- shared between us-gaap and ifrs-full filers, so a plain join returns every row twice.
@@ -198,6 +209,25 @@ left join lateral (
     and g.parent_member is null and g.period_ending <= p.period_ending
   order by g.period_ending desc limit 1
 ) ast on true
+-- THE SAME SHAPE AS `ast`, AND FOR THE SAME REASON. Both are INSTANTS, so they cannot go through
+-- the `pivoted` aggregate above — that groups duration facts by (security, axis, member) and an
+-- instant has no duration to group with. Each takes the most recent instant AT OR BEFORE the
+-- member's own period, which is what stops a later balance-sheet date being reported against an
+-- earlier income statement.
+left join lateral (
+  select g.value from market.security_segment_latest g
+  where g.security_id = p.security_id and g.axis = p.axis and g.member_code = p.member_code
+    and g.metric_code = 'long_lived_assets' and g.period_type = 'instant' and g.partition_id = 1
+    and g.parent_member is null and g.period_ending <= p.period_ending
+  order by g.period_ending desc limit 1
+) lla on true
+left join lateral (
+  select g.value from market.security_segment_latest g
+  where g.security_id = p.security_id and g.axis = p.axis and g.member_code = p.member_code
+    and g.metric_code = 'goodwill' and g.period_type = 'instant' and g.partition_id = 1
+    and g.parent_member is null and g.period_ending <= p.period_ending
+  order by g.period_ending desc limit 1
+) gw on true
 -- SAME REASON, AND THE SPECIFIC ALIAS MUST WIN. A member can carry both a company-scoped mapping
 -- and a generic one; `security_id is not null` sorts first so the scoped alias is chosen.
 left join lateral (
