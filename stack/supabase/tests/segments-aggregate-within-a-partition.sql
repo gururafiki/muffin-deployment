@@ -31,7 +31,12 @@ on conflict do nothing;
 
 insert into market.security_filing
   (security_id, accession_number, report_type, filing_date, source_code) values
-  ('00000000-0000-0000-0000-000000014101','0001018724-25-000086','10-Q',date '2025-08-01','sec-segments')
+  -- A SYNTHETIC ACCESSION. The fixture reproduces Amazon's measured splits deliberately, but it
+  -- used Amazon's REAL accession too, and the assertions below count by accession alone — so
+  -- against a populated database the real filing matched as well and the test failed with
+  -- "got 2 rows" for a reason unrelated to what it asserts. The shape is Amazon's; the key is
+  -- ours.
+  ('00000000-0000-0000-0000-000000014101','0000141001-25-000086','10-Q',date '2025-08-01','sec-segments')
 on conflict do nothing;
 
 -- The three splits, exactly as Amazon disclosed them. Partition 1 is the finest that reconciles.
@@ -149,7 +154,7 @@ declare n integer;
 begin
   -- 5. AN UNPARSED FILING IS OFFERED.
   select count(*) into n from market.pending_segments
-   where accession_number = '0001018724-25-000086';
+   where accession_number = '0000141001-25-000086';
   if n <> 1 then raise exception 'an unparsed 10-Q must be queued, got % rows', n; end if;
 
   -- 6. PARSING IT REMOVES IT — the backlog is satisfiable rather than a treadmill. A filed
@@ -158,9 +163,9 @@ begin
   update market.security_filing
      set segments_parsed_at = now(),
          segments_parser_version = (select version from market.segment_parser)
-   where accession_number = '0001018724-25-000086';
+   where accession_number = '0000141001-25-000086';
   select count(*) into n from market.pending_segments
-   where accession_number = '0001018724-25-000086';
+   where accession_number = '0000141001-25-000086';
   if n <> 0 then raise exception 'a parsed filing must leave the backlog, still queued % times', n; end if;
 
   -- 7. BUMPING THE PARSER VERSION RE-QUEUES IT. This is the supported way to pick up a newly
@@ -168,7 +173,7 @@ begin
   --    a widened allowlist would only ever apply to filings nobody had read yet.
   update market.segment_parser set version = version + 1;
   select count(*) into n from market.pending_segments
-   where accession_number = '0001018724-25-000086';
+   where accession_number = '0000141001-25-000086';
   if n <> 1 then
     raise exception 'bumping segment_parser.version must re-queue parsed filings, got % rows', n;
   end if;
