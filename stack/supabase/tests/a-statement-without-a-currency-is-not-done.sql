@@ -27,6 +27,14 @@ insert into market.countries (iso2, name, flag, drillable) values ('ZK','Teststa
 
 -- A: statements exist, WITHOUT a currency, and there is a US ticker to ask SEC with.
 --    This is the 8,559. It must be queued.
+-- A US LISTING, WHICH MIGRATION 197 MADE PART OF THE no_currency PREDICATE. SEC only knows US
+-- registrants, and measured 2026-09-07 not one of the 2,317 securities in that half without a US
+-- listing had EVER been served by it — while, being weight-ordered, they held the head and the
+-- `missing` half moved by a single row in a day. A CIK is not enough on its own, and this fixture
+-- asserted the old rule.
+insert into market.exchange (exch_code, country_iso2, suffix) values ('US','US','')
+  on conflict (exch_code) do nothing;
+
 insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
   ('00000000-0000-0000-0000-000000008901', 'T89 No Currency', 'equity', 'ZK', 8901)
 on conflict (security_id) do nothing;
@@ -44,6 +52,10 @@ on conflict do nothing;
 
 -- B: statements exist WITH a currency. Nothing left to want — must NOT be queued, or the backlog
 --    never drains and the resource re-fetches the same rows on every run, forever.
+insert into market.listing (security_id, exch_code, symbol, is_primary) values
+  ('00000000-0000-0000-0000-000000008901', 'US', 'T89A', true)
+on conflict (security_id, exch_code) do nothing;
+
 insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
   ('00000000-0000-0000-0000-000000008902', 'T89 Has Currency', 'equity', 'ZK', 8902)
 on conflict (security_id) do nothing;
@@ -57,6 +69,11 @@ on conflict do nothing;
 -- C: statements exist without a currency and there is NO US ticker. SEC is addressable by US
 --    ticker only, so re-queueing this buys nothing: the run would spend a call on yfinance and
 --    write back the same four currency-less periods.
+--
+--    MIGRATION 197 STRENGTHENED THIS, and this case now passes under either rule: the security has
+--    no US LISTING either, and a listing is the honest test — measured, 2,317 securities with a
+--    ticker but no listing had never once been served by SEC. Cases D and E below carry listings
+--    precisely so their own subject (the negative cache) is what decides them, not the new filter.
 insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
   ('00000000-0000-0000-0000-000000008903', 'T89 No US Line', 'equity', 'ZK', 8903)
 on conflict (security_id) do nothing;
@@ -92,6 +109,15 @@ on conflict (kind_code, value) do nothing;
 insert into market.security_statement (security_id, statement, period_ending, currency, data, source_code) values
   ('00000000-0000-0000-0000-000000008905', 'income', date '2025-09-27', null, '{}'::jsonb, 'yfinance')
 on conflict do nothing;
+
+
+-- Cases D and E need a US LISTING to be in the no_currency half at all after migration 197,
+-- so that what decides them is their own subject — the negative cache and its expiry —
+-- rather than the new filter.
+insert into market.listing (security_id, exch_code, symbol, is_primary) values
+  ('00000000-0000-0000-0000-000000008904', 'US', 'T89D', true),
+  ('00000000-0000-0000-0000-000000008905', 'US', 'T89E', true)
+on conflict (security_id, exch_code) do nothing;
 
 
 do $$
