@@ -19,7 +19,13 @@
  *   Yangtze  境内水电行业 75,661,563,315.43 + 其他行业 10,323,376,439.80 = 85,984,939,755.23
  *   LONGi    five product members summing 129,497,674,192.20, exactly its industry total
  */
-import { factsFromRows, fiscalYearEndFrom, parseSegmentPage, type TextItem } from './cn-pdf.ts'
+import {
+  factsFromRows,
+  fiscalYearEndFrom,
+  parseSegmentPage,
+  type TextItem,
+  tidyMemberName,
+} from './cn-pdf.ts'
 
 let failures = 0
 function check(ok: boolean, label: string, detail = '') {
@@ -38,6 +44,13 @@ const YANGTZE: TextItem[] = [
   it('行业', 61.2, 561.0), it('百分点', 531.0, 561.0),
   // Row 2 on one line, as most rows are.
   it('其他行业', 61.2, 546.0), it('10,323,376,439.80', 118.0, 546.0), it('7,067,072,381.81', 217.0, 546.0),
+  // Row 3, SET JUSTIFIED, and the shape is quoted from the real document rather than imagined.
+  // Canadian Solar's page 69 emits ONE item carrying the spaces — `"光 伏 组 件 产"` — not one item
+  // per character. That distinction is the whole point: separate items are already rejoined by the
+  // `join('')` below, so a fixture built that way leaves the tidying unreachable and a mutation
+  // deleting it passes clean. It did, first time.
+  it('光 伏 组 件', 61.2, 532.0),
+  it('5,000,000,000.00', 118.0, 532.0), it('4,000,000,000.00', 217.0, 532.0),
   // WHAT FOLLOWS THE TABLE, and it must not be absorbed into the last member. A real page continues
   // straight into the next section — `(2).产销量情况` and a cost-composition table whose columns
   // mean something else — and without the adjacency bound the continuation rule appends every one
@@ -49,7 +62,11 @@ const YANGTZE: TextItem[] = [
 console.log('\ncninfo segment table — rebuilt from positions, not lines')
 {
   const rows = parseSegmentPage(YANGTZE)
-  check(rows.length === 2, 'both members are found', `${rows.length}`)
+  check(rows.length === 3, 'all three members are found', `${rows.length}`)
+  check(rows[2]?.name === '光伏组件',
+    'a JUSTIFIED name is rejoined without its typesetting — the name is the upsert key, so the same '
+      + 'segment set differently next year would otherwise arrive as a second member',
+    `got ${JSON.stringify(rows[2]?.name)}`)
   check(rows[0]?.name === '境内水电行业',
     'the THREE-LINE row rejoins its name around the money line',
     `got ${JSON.stringify(rows[0]?.name)}`)
@@ -78,10 +95,10 @@ console.log('\nfacts, partitions and the reconciliation target')
 {
   const facts = factsFromRows(parseSegmentPage(YANGTZE), '2025-12-31')
   const rev = facts.filter((f) => f.metricCode === 'revenue')
-  check(rev.length === 2 && rev.every((f) => f.partitionId === 1),
+  check(rev.length === 3 && rev.every((f) => f.partitionId === 1),
     'a split that reconciles is partition 1 — safe to aggregate',
     rev.map((f) => f.partitionId).join(','))
-  check(rev.every((f) => f.reconciledTo === 85984939755.23),
+  check(rev.every((f) => f.reconciledTo === 90984939755.23),
     'the target is stored, so a later disagreement can be told from a double count')
   check(facts.every((f) => f.currency === 'CNY'),
     'the currency is stated, not inferred — a scale error here is four orders of magnitude')
@@ -106,6 +123,25 @@ console.log('\nfacts, partitions and the reconciliation target')
   const ind = partial.filter((f) => f.axis === 'cninfo:分行业')
   check(ind.every((f) => f.partitionId === 1),
     '...while the split that does cover the whole stays aggregatable')
+}
+
+console.log('\njustified CJK is typeset with spaces, and the name is the upsert key')
+{
+  // Quoted from Canadian Solar's FY2025 report, which sets its segment names justified: pdf.js
+  // reports `光 伏 组 件 产品收入` for what the filing calls 光伏组件产品收入.
+  check(tidyMemberName('光 伏 组 件 产品收入') === '光伏组件产品收入',
+    'spacing between CJK characters is typesetting and comes back out',
+    tidyMemberName('光 伏 组 件 产品收入'))
+  check(tidyMemberName('境内水电行业') === '境内水电行业',
+    'a name that was never spaced is untouched')
+
+  // THE NEGATIVE THAT MATTERS. A gap beside a Latin character or a digit may be part of the name,
+  // and stripping it would corrupt a name rather than restore one.
+  check(tidyMemberName('A 股') === 'A 股',
+    'a space beside a LATIN character is kept — it may be part of the name', tidyMemberName('A 股'))
+  check(tidyMemberName('Solar Systems') === 'Solar Systems',
+    'a Latin name is untouched entirely')
+  check(tidyMemberName('  境内  ') === '境内', 'surrounding whitespace is trimmed either way')
 }
 
 console.log(failures === 0 ? '\nALL CNINFO PDF CHECKS PASSED' : `\n${failures} CNINFO PDF CHECK(S) FAILED`)
