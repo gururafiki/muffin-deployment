@@ -108,10 +108,28 @@ begin
   -- line for ever. Asserted as COVERAGE because that is the only form the claim takes that a
   -- fixture can see: a mutation replacing the `select ... from market.countries` with a literal
   -- list passes every per-row check above and fails this one.
+  --
+  -- SCOPED TO THE DERIVED SET, because there are now two populations and only one is derived.
+  -- Migration 201 authors filer-namespaced country members (`meli:BrazilSegmentMember`,
+  -- `aapl:JapanSegmentMember`) that CANNOT be derived: they carry a filer's own prefix, and a rule
+  -- matching a country name inside one would adopt `xyz:GeorgiaMember` (a US state), a Nike
+  -- `JordanMember` and a poultry producer's `TurkeyMember`. Counting every member that carries a
+  -- country would therefore fail on correct data, and loosening this to `>=` would let the
+  -- derivation be replaced by a literal list — the exact mutation it exists to catch. Prefix is
+  -- what separates them, so prefix is what it counts.
   select count(*) into named from market.countries;
-  select count(*) into queued from market.segment_member where country_iso2 is not null;
+  select count(*) into queued from market.segment_member where member_code like 'country:%';
   if queued <> named then
-    raise exception 'market.countries has % rows and segment_member has % country members — the ISO members must be derived from the country table, not authored', named, queued;
+    raise exception 'market.countries has % rows and segment_member has % `country:` members — the ISO members must be derived from the country table, not authored', named, queued;
+  end if;
+
+  -- AND THE TWO POPULATIONS MUST NOT BLUR. An authored member may name a country, but it may never
+  -- wear the `country:` prefix, or it would be counted as derived and the check above would pass
+  -- while the derivation had lost a row.
+  select count(*) into queued from market.segment_member
+   where member_code like 'country:%' and country_iso2 is null;
+  if queued <> 0 then
+    raise exception '% `country:` members carry no ISO code — a derived member is derived from a row in market.countries and always has one', queued;
   end if;
 
   -- A REGION IS NOT A COUNTRY. `us-gaap:NonUsMember` is "everywhere except the US"; pinning it to
