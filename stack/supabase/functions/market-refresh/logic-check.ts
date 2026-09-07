@@ -1317,9 +1317,15 @@ console.log('\nresource registry — the cron and the function agree')
     // reports `pending_in_history`, its own backlog of companies whose filing history is unwalked.
     IN_SEGMENTS_RESOURCE: [],
     IN_FILINGS_RESOURCE: [],
-    // China. Filing LINKS only — every CNINFO filing is a PDF (migration 183) — so it writes
-    // `security_filing` and never `security_segment`, and reports its own `pending_cn_filings`.
+    // China, the same split as Korea and India. `cn-filings` walks companies and reports its own
+    // `pending_cn_filings`; `security-cn-segments` parses and reports `pending_cn_segments`.
+    //
+    // The comment that stood here said "filing LINKS only — every CNINFO filing is a PDF", which
+    // was migration 183's conclusion and is no longer the whole truth: the PDFs are TEXT, the CSRC
+    // mandates the breakdown table, and migration 195 reads it. PDF is still why China needs its
+    // own parser rather than the XBRL one.
     CN_FILINGS_RESOURCE: [],
+    CN_SEGMENTS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     WIKIDATA_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
@@ -2341,19 +2347,22 @@ console.log('\nrefresh_run — every invocation is recorded')
   // while one that is too wide fails open, so this is deliberately generous and the gate
   // expressions below stay specific.
   const retractions = [...src.matchAll(/((?:[^\n]*\n){15})[ ]*const \{ error: rtErr \}/g)]
-  // THREE writers now — SEC, DART and NSE. The number is asserted rather than counted loosely so
-  // that adding a fourth is a deliberate act that comes here and reads this comment.
-  check(retractions.length === 3,
+  // FOUR writers now — SEC, DART, NSE and CNINFO. The number is asserted rather than counted
+  // loosely so that adding another is a deliberate act that comes here and reads this comment.
+  check(retractions.length === 4,
     'every segment writer retracts per accession', `found ${retractions.length}`)
-  // TWO LEGAL SHAPES, because the sources fail differently. SEC and DART can return an oversize
+  // THREE LEGAL SHAPES, because the sources fail differently. SEC and DART can return an oversize
   // document, so they gate on `xml !== null && !oversize`. NSE cannot — its instances are 77-109 KB
   // and there is no size gate — but it CAN return the standalone filing rather than the
   // consolidated one, so its retraction sits inside the branch where `normalise` returned a
-  // document. Both are a test of the parsed document, which is what this guard is really asserting;
+  // document. CNINFO downloads a 1-6 MB PDF that can be absent, oversized or not a PDF at all, so
+  // its retraction sits inside the branch where `fetchReport` returned BYTES and the parse ran.
+  // All three are a test of the parsed document, which is what this guard is really asserting;
   // what it must never accept is a delete with nothing in front of it.
   const gated = (before: string) =>
     (/if \((typeof )?xml (!==|===) /.test(before) && /!oversize/.test(before)) ||
-    /NOT_CONSOLIDATED/.test(before) || /segmentFactsFrom\(norm\.xml/.test(before)
+    /NOT_CONSOLIDATED/.test(before) || /segmentFactsFrom\(norm\.xml/.test(before) ||
+    /segmentFactsFromPdf\(bytes\)/.test(before)
   check(retractions.every((m) => gated(m[1])),
     'every retraction is gated on the document having been read',
     retractions.map((m) => m[1].trim().split('\n')[0].slice(0, 40)).join(' | '))

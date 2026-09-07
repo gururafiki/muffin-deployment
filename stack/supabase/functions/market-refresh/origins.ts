@@ -112,5 +112,17 @@ export const cninfo = () => origin('CNINFO_BASE_URL', 'https://www.cninfo.com.cn
  */
 export const CNINFO_STATIC = 'https://static.cninfo.com.cn'
 
+/**
+ * The same host, as a FETCH origin — which is a different job from the line above and needs both.
+ *
+ * `CNINFO_STATIC` builds the link we STORE, so it must stay public. This is what the segment parser
+ * DOWNLOADS through, so it must go via http-cache: an annual report is an immutable document that
+ * we will re-read on every parser-version bump, and it is 1-6 MB. The two coexist exactly as NSE's
+ * do — `nse()` for the API, `nseArchives()` for the instances — with the stored absolute URL
+ * rewritten onto this origin at fetch time.
+ */
+export const cninfoArchives = () =>
+  origin('CNINFO_ARCHIVES_BASE_URL', 'https://static.cninfo.com.cn')
+
 /** `nsearchives.nseindia.com` — where the `INDAS_*` XBRL instances themselves live. */
 export const nseArchives = () => origin('NSE_ARCHIVES_BASE_URL', 'https://nsearchives.nseindia.com')

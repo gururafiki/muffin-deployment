@@ -38,6 +38,7 @@ import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions
 import * as dart from './dart.ts'
 import * as nse from './in.ts'
 import * as cninfo from './cn.ts'
+import * as cnPdf from './cn-pdf.ts'
 import { TOO_LARGE, fetchInstance, findInstanceUrl, instanceIsTooLarge, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { fetchIndustries, slug } from './wikidata.ts'
 import { candidateSymbols } from './symbol-repair.ts'
@@ -327,6 +328,7 @@ const KR_FILINGS_RESOURCE = 'kr-filings'
 const KR_SEGMENTS_RESOURCE = 'security-kr-segments'
 /** DART's own name for the Korean annual report, and the `filing_form` row seeded by migration 172. */
 const KR_ANNUAL_FORM = '사업보고서'
+const CN_SEGMENTS_RESOURCE = 'security-cn-segments'
 const IN_SYMBOLS_RESOURCE = 'in-symbols'
 const IN_FILINGS_RESOURCE = 'in-filings'
 const IN_SEGMENTS_RESOURCE = 'security-in-segments'
@@ -479,6 +481,9 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     // Links only, and a company's annual reports change once a year — this is the least urgent
     // thing on the cron and is paced accordingly.
     [CN_FILINGS_RESOURCE]: 29,
+    // A PDF costs a download and a parse where an XBRL instance costs a parse, and a Chinese report
+    // is 1-6 MB against India's 77-109 KB. Paced between the two.
+    [CN_SEGMENTS_RESOURCE]: 9,
     [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -2632,6 +2637,117 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
         standalone,
         failed,
         remaining: await backlogSize(market, 'pending_in_segments'),
+        first_error: firstError,
+        last_error: lastError,
+      })
+    }
+
+    // ── China: segments out of the annual-report PDF ────────────────────────────────────────────
+    //
+    // The CSRC mandates `主营业务分行业/分产品/分地区情况` in every A-share annual report, so this
+    // reads a standard form rather than scraping each filer. Everything after the parse is the same
+    // machinery the XBRL paths use — `assignPartitions`, the per-accession retraction, the dedupe
+    // and the upsert — because `cn-pdf.ts` produces `SegmentFact[]` and nothing downstream knows or
+    // cares that the source was a PDF.
+    if (resource === CN_SEGMENTS_RESOURCE) {
+      const deadline = Date.now() + 70_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_cn_segments')
+        .select('security_id,accession_number,report_url')
+        .limit(scopeLimit ?? 6)
+      if (pErr) throw new Error(`pending_cn_segments read failed: ${pErr.message}`)
+
+      const { data: pv, error: vErr } = await market.from('segment_parser').select('version').single()
+      if (vErr) throw new Error(`segment_parser read failed: ${vErr.message}`)
+      const parserVersion = Number((pv as { version?: unknown } | null)?.version ?? 0)
+
+      let filings = 0
+      let written = 0
+      let noTable = 0
+      let noReport = 0
+      let tooLarge = 0
+      let failed = 0
+      let firstError: string | null = null
+      let lastError: string | null = null
+
+      for (const item of pending ?? []) {
+        // A 1-6 MB download plus a parse; leaving less than this invites a killed worker, and a
+        // killed worker stamps nothing and returns the same filing at the head for ever.
+        if (Date.now() > deadline - 20_000) break
+        try {
+          const bytes = await cnPdf.fetchReport(
+            String(item.report_url), Math.min(45_000, deadline - Date.now() - 10_000),
+          )
+          filings++
+          if (bytes === cnPdf.TOO_LARGE) {
+            // A REFUSAL AND AN ABSENCE ARE DIFFERENT FACTS. Counted separately so an oversized
+            // document is visible rather than looking like a company that discloses nothing.
+            tooLarge++
+          } else if (bytes === null) {
+            noReport++
+          } else {
+            const parsed = await cnPdf.segmentFactsFromPdf(bytes)
+            if (parsed.facts.length === 0) noTable++
+
+            // Only when the document was actually READ — the same rule as the SEC, DART and NSE
+            // paths. A fetch that answered nothing is not the filing saying it discloses nothing.
+            const { error: rtErr } = await market.from('security_segment').delete()
+              .eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+            if (rtErr) throw new Error(`security_segment retract failed: ${rtErr.message}`)
+
+            if (parsed.facts.length > 0) {
+              const rows = parsed.facts.map((f) => ({
+                security_id: item.security_id,
+                accession_number: item.accession_number,
+                axis: f.axis, member_code: f.memberCode,
+                parent_axis: f.parentAxis, parent_member: f.parentMember,
+                metric_code: f.metricCode, period_type: f.periodType,
+                period_start: f.periodStart, period_ending: f.periodEnding,
+                value: f.value, currency_code: f.currency,
+                partition_id: f.partitionId, reconciled_to: f.reconciledTo,
+                source_code: 'cninfo',
+              }))
+              for (let i = 0; i < rows.length; i += 500) {
+                const { error } = await market.from('security_segment').upsert(
+                  dedupeBy(rows.slice(i, i + 500),
+                    (r) => `${r.security_id}|${r.axis}|${r.member_code}|${r.parent_member ?? ''}|` +
+                      `${r.metric_code}|${r.period_type}|${r.period_ending}`),
+                  { onConflict: 'security_id,axis,member_code,parent_key,metric_code,period_type,period_ending' },
+                )
+                if (error) throw new Error(`security_segment upsert failed: ${error.message}`)
+              }
+              written += rows.length
+            }
+          }
+
+          // Stamped whether or not it yielded segments — a filed document is immutable, so "this
+          // one discloses none" is permanent. A throw never reaches here, so an outage re-queues.
+          // An OVERSIZED document is stamped too: refusing it is a settled fact about that file,
+          // and not stamping it is what made one 127 MB filing block `security-segments` for two
+          // days.
+          const { error: tErr } = await market.from('security_filing').update({
+            segments_parsed_at: new Date().toISOString(),
+            segments_parser_version: parserVersion,
+          }).eq('security_id', item.security_id).eq('accession_number', item.accession_number)
+          if (tErr) throw new Error(`segments_parsed_at update failed: ${tErr.message}`)
+        } catch (e) {
+          failed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          if (firstError === null) firstError = msg
+          lastError = msg
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource,
+        filings,
+        written,
+        noTable,
+        noReport,
+        tooLarge,
+        failed,
+        remaining: await backlogSize(market, 'pending_cn_segments'),
         first_error: firstError,
         last_error: lastError,
       })
