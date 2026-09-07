@@ -51,6 +51,47 @@ insert into market.security_filing
   ('9600003-0004','00000000-0000-0000-0000-000000009603', date '2026-06-01','8-K', 'sec-submissions',true)
 on conflict do nothing;
 
+-- Fixture for the SIBLING queues (Korea and India), which key on `security_filer` rather than a
+-- CIK. Three companies, three annuals each, ALL ALREADY PARSED at an older parser version — the
+-- state a version bump leaves, and the only one in which the renumbering defect exists.
+insert into market.countries (iso2, name, flag, drillable) values ('ZY','Siblingland','ZY',false)
+  on conflict (iso2) do nothing;
+insert into market.security (security_id, name, security_type_code, country_iso2) values
+  ('00000000-0000-0000-0000-0000000096b1', 'T96B Heavy',  'equity', 'ZY'),
+  ('00000000-0000-0000-0000-0000000096b2', 'T96B Middle', 'equity', 'ZY'),
+  ('00000000-0000-0000-0000-0000000096b3', 'T96B Light',  'equity', 'ZY')
+on conflict (security_id) do nothing;
+
+insert into market.security_filer (security_id, source_code, filer_id, as_of)
+select sid, src, 'F' || right(sid::text, 4), now()
+  from unnest(array['00000000-0000-0000-0000-0000000096b1',
+                    '00000000-0000-0000-0000-0000000096b2',
+                    '00000000-0000-0000-0000-0000000096b3']::uuid[]) sid,
+       unnest(array['dart','nse']) src
+on conflict (security_id, source_code) do nothing;
+
+insert into market.security_filing
+  (accession_number, security_id, filing_date, report_type, source_code, is_xbrl,
+   segments_parsed_at, segments_parser_version)
+select src || '-' || right(sid::text, 4) || '-' || g.i, sid,
+       date '2026-01-01' - (g.i || ' year')::interval,
+       case when src = 'dart' then '사업보고서' else 'Annual' end,
+       src, true, now() - interval '1 day', 1
+  from unnest(array['00000000-0000-0000-0000-0000000096b1',
+                    '00000000-0000-0000-0000-0000000096b2',
+                    '00000000-0000-0000-0000-0000000096b3']::uuid[]) sid,
+       unnest(array['dart','nse']) src,
+       generate_series(1, 3) g(i)
+on conflict do nothing;
+
+-- Weights that differ, so `best_weight desc` is a real tie-break and the defect has something to
+-- prefer. Reuses the fund the SEC fixture already created.
+insert into market.fund_holding (fund_id, security_id, as_of, weight, source_code) values
+  ('00000000-0000-0000-0000-000000009601', '00000000-0000-0000-0000-0000000096b1', date '2026-06-30', 9.0, 'sec-nport'),
+  ('00000000-0000-0000-0000-000000009601', '00000000-0000-0000-0000-0000000096b2', date '2026-06-30', 5.0, 'sec-nport'),
+  ('00000000-0000-0000-0000-000000009601', '00000000-0000-0000-0000-0000000096b3', date '2026-06-30', 1.0, 'sec-nport')
+on conflict (fund_id, security_id, as_of) do nothing;
+
 do $$
 declare
   companies int;
@@ -143,6 +184,55 @@ begin
   end if;
 end $$;
 
+-- ── THE SIBLING QUEUES HAVE THE SAME RULE AND HAD THE SAME DEFECT ───────────────────────────────
+--
+-- `pending_kr_segments` (migration 172) and `pending_in_segments` (185) were written from the same
+-- template as the SEC queue and both carried the renumbering defect until migration 194. Korea's
+-- backlog is 6,393 filings deep, so which of 3,516 filers the next month reaches is decided here.
+--
+-- Driven exactly as above: every filing ALREADY PARSED at an older parser version, which is the
+-- state a version bump leaves and the only state in which the defect exists. Against the shipped
+-- views this reported one company three times.
+do $$
+declare
+  src text;
+  view_name text;
+  r record;
+  i int;
+  seen uuid[];
+  companies int;
+begin
+  foreach src in array array['dart', 'nse'] loop
+    seen := '{}';
+    view_name := case when src = 'dart' then 'pending_kr_segments' else 'pending_in_segments' end;
+
+    for i in 1..3 loop
+      execute format(
+        'select security_id, accession_number from market.%I where security_id = any($1) limit 1',
+        view_name
+      ) into r using array[
+        '00000000-0000-0000-0000-0000000096b1'::uuid,
+        '00000000-0000-0000-0000-0000000096b2'::uuid,
+        '00000000-0000-0000-0000-0000000096b3'::uuid
+      ];
+      exit when r.security_id is null;
+      seen := seen || r.security_id;
+      update market.security_filing
+         set segments_parsed_at      = now(),
+             segments_parser_version = (select version from market.segment_parser)
+       where accession_number = r.accession_number;
+    end loop;
+
+    select count(distinct x) into companies from unnest(seen) x;
+    if companies <> 3 then
+      raise exception '% : three successive pages of one covered % companies rather than 3 — '
+                      '`round` is computed over the OUTSTANDING filings, so it renumbers as the '
+                      'queue drains and the heaviest company returns to the head after every parse',
+                      view_name, companies;
+    end if;
+  end loop;
+end $$;
+
 rollback;
 
-\echo 'ok: the segment queue reaches every company before any company''s second filing'
+\echo 'ok: every segment queue reaches every company before any company''s second filing'
