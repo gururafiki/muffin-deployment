@@ -120,6 +120,31 @@ export interface TextItem {
 }
 
 /**
+ * A member name, with the typesetting taken back out of it.
+ *
+ * JUSTIFIED CJK IS SET WITH SPACE BETWEEN THE CHARACTERS, and pdf.js reports what it sees:
+ * Canadian Solar's FY2025 report yields `光 伏 组 件 产品收入` for what the filing calls
+ * 光伏组件产品收入 (PV module product revenue). The name is the UPSERT KEY, so the same segment
+ * typeset differently in next year's report would arrive as a SECOND member and both would survive
+ * — the ASML defect, where `asml:EuvMember` became `asml:NXEMember` between two filings and the
+ * two splits unioned into one that reconciled to nothing.
+ *
+ * ONLY BETWEEN TWO CJK CHARACTERS. Chinese does not space its words, so a gap there is always
+ * typesetting; a gap beside a Latin character or a digit may be real (`A 股`, `H 股`, a unit), and
+ * stripping it would corrupt a name rather than restore it.
+ */
+export function tidyMemberName(raw: string): string {
+  const CJK = /[\u3400-\u9FFF\uF900-\uFAFF]/
+  let out = ''
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (/\s/.test(ch) && CJK.test(raw[i - 1] ?? '') && CJK.test(raw[i + 1] ?? '')) continue
+    out += ch
+  }
+  return out.trim()
+}
+
+/**
  * Rebuild the mandated tables from one page's positioned text.
  *
  * THE COLUMN BOUNDARIES COME FROM THE HEADER, as midpoints between its labels — not from the label
@@ -193,13 +218,13 @@ export function parseSegmentPage(items: TextItem[]): CnSegmentRow[] {
       // ~11pt here, so 16 admits a wrap and nothing else — without the bound the rule keeps
       // swallowing every name-only line after the table ends.
       if (out.length > 0 && lastY > 0 && lastY - line[0].y < 16) {
-        out[out.length - 1].name += names.join('')
+        out[out.length - 1].name = tidyMemberName(out[out.length - 1].name + names.join(''))
       } else {
         pending.push(...names)
       }
       continue
     }
-    const name = [...pending, ...names].join('')
+    const name = tidyMemberName([...pending, ...names].join(''))
     pending = []
     if (!name) continue
     lastY = line[0].y
@@ -314,14 +339,25 @@ export interface CnParseResult {
 /**
  * Read one annual report.
  *
- * `scanPages` bounds the search: the mandated table is in 管理层讨论与分析, which is section 3 of a
- * standard report and sat on page 13 and 23 of the two measured. Scanning the whole document would
- * cost the worker budget for nothing — and a table beyond the bound is better reported as absent
- * than paid for on every filing.
+ * `scanPages` bounds the search, and 45 WAS TOO LOW — measured against production rather than
+ * guessed. The mandated table is in 管理层讨论与分析, section 3 of a standard report, and the two
+ * documents this parser was built on put it on page **13** and **23**. Canadian Solar's 327-page
+ * FY2025 report puts it on page **68**, so the resource read it, found nothing, and stamped it
+ * parsed — a filing recorded as disclosing no segments while its split sat 23 pages past the bound.
+ *
+ * A BOUND IS STILL RIGHT, because the cost of not having one falls on every filing that genuinely
+ * has no table. Measured per document, in isolation, which is how the worker runs them:
+ *
+ *     Canadian Solar 327p, table on p68   limit 90   298 ms   124 MB
+ *     LONGi 320p, table on p23            limit 90   248 ms   140 MB
+ *
+ * against a 90 s / 256 MB worker. (Scanning several documents in one process reaches 234 MB at
+ * limit 120, but that is the harness accumulating, not a worker.) 90 clears the measured range
+ * with room; raising it further buys nothing until a filing is found beyond it.
  */
 export async function segmentFactsFromPdf(
   bytes: Uint8Array,
-  scanPages = 45,
+  scanPages = 90,
 ): Promise<CnParseResult> {
   const doc = await getDocumentProxy(bytes)
   let period: string | null = null
