@@ -55,4 +55,32 @@ insert into market.xbrl_concept (metric_code, concept, priority, unit, taxonomy)
 on conflict (metric_code, concept) do update
   set priority = excluded.priority, unit = excluded.unit, taxonomy = excluded.taxonomy;
 
+-- ── AND THE STATEMENT VOCABULARY, WHICH THE GUARD IS RIGHT TO DEMAND ───────────────────────────
+--
+-- `two-providers-do-not-share-a-vocabulary` requires every non-derived metric to be reachable from
+-- BOTH statement providers, because a metric with no row for one of them silently disappears for
+-- half the data. It failed this migration, correctly: adding a metric code without its provider
+-- spellings is exactly the inert-column shape.
+--
+-- Measured on the deployed openbb-api rather than guessed, and the spellings differ in the way this
+-- table exists for:
+--
+--     sec       total_noncurrent_assets     goodwill
+--     yfinance  total_non_current_assets    goodwill
+--
+-- One underscore, like `total_pretax_income` / `total_pre_tax_income` — it reads as a typo and
+-- "correcting" it empties the series for whichever provider was changed.
+--
+-- I FIRST CONCLUDED YFINANCE HAD NO GOODWILL FIELD AT ALL, having probed with AAPL — which carries
+-- essentially none, so openbb omitted the null key. MSFT and CRM both return it. That is this
+-- file's own rule (probe with symbols you expect to FAIL) inverted: I probed with a symbol whose
+-- VALUE is absent and concluded the FIELD was.
+insert into market.metric_source_field (metric_code, source_code, statement, field) values
+  ('long_lived_assets', 'sec',      'balance', 'total_noncurrent_assets'),
+  ('long_lived_assets', 'yfinance', 'balance', 'total_non_current_assets'),
+  ('goodwill',          'sec',      'balance', 'goodwill'),
+  ('goodwill',          'yfinance', 'balance', 'goodwill')
+on conflict (metric_code, source_code) do update
+  set statement = excluded.statement, field = excluded.field;
+
 notify pgrst, 'reload schema';
