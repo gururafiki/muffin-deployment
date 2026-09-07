@@ -22,6 +22,13 @@
 begin;
 
 insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
+-- SEEDED, NOT ASSUMED. `market.currency` and `market.data_source` are populated by the INGEST at
+-- runtime, not by any migration — so on the throwaway database CI builds, `USD` and `sec` do not
+-- exist and the fixture dies on a foreign key. CLAUDE.md records exactly this for `market.currency`
+-- and I walked into it anyway; the failure only appears on an EMPTY database, so a fixture that
+-- passes against production proves nothing about it.
+insert into market.currency (code) values ('USD') on conflict do nothing;
+insert into market.data_source (code, name) values ('sec','SEC EDGAR') on conflict do nothing;
 insert into market.security (security_id, name, security_type_code) values
   ('00000000-0000-0000-0000-000000019601', 'T196 Instant Inc', 'equity')
 on conflict (security_id) do nothing;
