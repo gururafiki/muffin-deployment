@@ -259,7 +259,8 @@ jobs:
                      stack/supabase/functions/market-refresh/xbrl-check.ts \
                      stack/supabase/functions/market-refresh/segments-check.ts \
                      stack/supabase/functions/market-refresh/wikidata-check.ts \
-                     stack/supabase/functions/market-refresh/dart-check.ts
+                     stack/supabase/functions/market-refresh/dart-check.ts \
+                     stack/supabase/functions/market-refresh/cn-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. `check.ts` covers the
       # same ground against a live openbb-api, but it needs one, so it only runs when someone
       # remembers. That is the difference between a rule that holds and a rule that held once.
@@ -303,6 +304,12 @@ jobs:
           # empty ANSWER rather than a failure, which is what stops a company with no annual report
           # being retried for ever.
           deno run --allow-read stack/supabase/functions/market-refresh/dart-check.ts
+          # CNINFO files THREE documents under one "annual reports" category — the full report, a
+          # summary that omits the mandated breakdown table entirely, and an English edition whose
+          # headings are English. Storing them all as one type meant that of 8 companies sampled,
+          # only 3 held a document a parser could ever read. The classifier is title-based and its
+          # failure is silent, so every title here is quoted from the live API.
+          deno run --allow-read stack/supabase/functions/market-refresh/cn-check.ts
 
       # The quarter-shape check in market-verify rests on one number: that year-to-date stacking
       # gives a last/first quarter ratio near 3 while discrete quarters give near 1. That claim was

@@ -335,6 +335,16 @@ const IN_ANNUAL_FORM = 'Annual'
 const CN_FILINGS_RESOURCE = 'cn-filings'
 /** CNINFO's annual-report category, and the `filing_form` code seeded for `cninfo`. */
 const CN_ANNUAL_FORM = '年度报告'
+// THE SAME CATEGORY CARRIES THREE DOCUMENTS, AND ONLY ONE IS PARSEABLE. Nothing is discarded — a
+// summary is a real document and a useful link — but the type has to distinguish them, because
+// `security_filing` has no title column and `report_type` is the classification's only carrier.
+const CN_SUMMARY_FORM = '年度报告摘要'
+const CN_ENGLISH_FORM = '年度报告（英文版）'
+const CN_FORM_FOR: Record<string, string> = {
+  full: CN_ANNUAL_FORM,
+  summary: CN_SUMMARY_FORM,
+  english: CN_ENGLISH_FORM,
+}
 const FILING_HISTORY_RESOURCE = 'security-filing-history'
 const WIKIDATA_RESOURCE = 'security-wikidata-industries'
 /**
@@ -2437,7 +2447,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
                 // in this system. `(source_code, accession_number)` is already the key, so only the
                 // NAME is SEC-specific.
                 accession_number: f.url,
-                report_type: CN_ANNUAL_FORM,
+                report_type: CN_FORM_FOR[f.kind] ?? CN_ANNUAL_FORM,
                 report_date: f.date,
                 report_url: f.url,
                 source_code: 'cninfo',
@@ -2446,9 +2456,15 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
                 // fetching documents they cannot read.
                 is_xbrl: false,
               }))
+              // MERGE, NOT IGNORE. `ignoreDuplicates` meant a re-walk could never correct a row it
+              // had already written — which is exactly what was needed once the three document
+              // kinds were told apart, and would have left the first 13 companies mis-typed for
+              // ever. Only the columns in the payload are written, so `segments_parsed_at` and
+              // `segments_parser_version` are untouched: a re-walk must not make a filing look
+              // unread.
               const { error } = await market.from('security_filing').upsert(
                 dedupeBy(rows, (r) => `${r.security_id}|${r.accession_number}`),
-                { onConflict: 'security_id,accession_number', ignoreDuplicates: true },
+                { onConflict: 'security_id,accession_number' },
               )
               if (error) throw new Error(`security_filing upsert failed: ${error.message}`)
               written += rows.length

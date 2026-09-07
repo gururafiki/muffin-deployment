@@ -28,7 +28,20 @@ export interface CnFiling {
   url: string
   /** Announcement date as an ISO date, or null when CNINFO omits it. */
   date: string | null
+  /** What KIND of document this is — see `classifyAnnouncement`. */
+  kind: CnDocKind
+  /** Size in KB as CNINFO reports it, or null. A cross-check on `kind`, never the rule. */
+  sizeKb: number | null
 }
+
+/**
+ * The three documents CNINFO files under one annual-report category.
+ *
+ * `full` is the only one a segment parser can read: the summary omits the breakdown table entirely
+ * and the English edition uses English headings, so a parser looking for `主营业务分行业情况` finds
+ * nothing in either and records the company as disclosing nothing.
+ */
+export type CnDocKind = 'full' | 'summary' | 'english'
 
 /**
  * CNINFO's own internal id for a company, which its filing search REQUIRES.
@@ -87,13 +100,55 @@ export function parseAnnouncements(body: unknown): CnFiling[] {
     const rec = r as Record<string, unknown>
     const path = typeof rec.adjunctUrl === 'string' ? rec.adjunctUrl : ''
     if (!path) continue
+    const title = String(rec.announcementTitle ?? '').slice(0, 300)
     out.push({
-      title: String(rec.announcementTitle ?? '').slice(0, 300),
+      title,
       url: `${CNINFO_STATIC}/${path.replace(/^\/+/, '')}`,
       date: isoFromEpochMs(rec.announcementTime),
+      kind: classifyAnnouncement(title),
+      sizeKb: typeof rec.adjunctSize === 'number' && Number.isFinite(rec.adjunctSize)
+        ? rec.adjunctSize
+        : null,
     })
   }
   return out
+}
+
+/**
+ * Which document is this, from its own title?
+ *
+ * CNINFO's `category_ndbg_szsh` is "annual reports" and returns FIVE shapes under it. Measured
+ * against the live API 2026-09-06:
+ *
+ *   中国长江电力…2025年年度报告              full report          259 pages
+ *   …2025年年度报告摘要                     SUMMARY              11-16 pages, ~160 KB
+ *   …2025年年度报告（更正后） / （更正版）      corrected full report
+ *   振华重工2025年年度报告（英文版）           ENGLISH edition
+ *   …2025年年度报告摘要（更正版）              corrected summary
+ *
+ * `cn-filings` stored all of them under one `report_type`, so of 8 companies sampled only 3 held a
+ * full Chinese-language report: FOUR were summaries and one was Kweichow Moutai's English edition —
+ * which is the real reason no Chinese heading could be found in it, not that Moutai discloses
+ * nothing.
+ *
+ * SPLIT OUT SO IT IS TESTABLE WITH NO NETWORK, for the same reason `classifyBody` was split out of
+ * `dart.ts`: left inline it is an untested branch, and the mutation that deletes it passes clean.
+ *
+ * THE ORDER OF THE TWO EXCLUSIONS IS NOT LOAD-BEARING, and saying so is the honest version. A
+ * title carrying BOTH `摘要` and an English marker has not been observed, and if one exists both
+ * branches reach the same place: neither kind is ever parsed, because both lack the mandated
+ * Chinese table. What IS demonstrated is that a CORRECTED summary stays a summary — `更正后` is not
+ * a branch, so it cannot displace `摘要`. A mutation swapping the two exclusion lines passes, and
+ * that is correct rather than a gap.
+ *
+ * The title frequently omits the company name altogether (`2024年年度报告（更正后）`), so nothing
+ * here may depend on it.
+ */
+export function classifyAnnouncement(title: string): CnDocKind {
+  const t = title ?? ''
+  if (t.includes('摘要')) return 'summary'
+  if (t.includes('英文') || /annual\s+report/i.test(t)) return 'english'
+  return 'full'
 }
 
 /** CNINFO dates are epoch milliseconds. A non-number is an absence, not a zero. */
