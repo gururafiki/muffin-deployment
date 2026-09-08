@@ -1332,6 +1332,10 @@ console.log('\nresource registry — the cron and the function agree')
     MANAGEMENT_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     EPS_HISTORY_RESOURCE: [],
+    // Analyst actions. Reports `pending_price_targets` via `backlogSize`; `actions` counts ROWS
+    // (one per analyst action) and `advanced` counts SECURITIES whose cursor moved, which are
+    // deliberately different units and named so.
+    PRICE_TARGETS_RESOURCE: [],
     METRICS_RESOURCE: [],
     PRICE_HISTORY_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above. The deep daily
@@ -2218,6 +2222,45 @@ console.log('\nsecurity-symbol-repair')
         !/quarters\.length === 0[\s\S]{0,200}eps_history_fetched_at/.test(marking),
     'the EPS backlog marks a symbol only when the provider said it does not carry it',
     'marking on an empty result would mark every security in a throttled page')
+}
+
+// ── `adj_price_target` IS THE NEW TARGET AND `price_target` IS THE PREVIOUS ONE ────────────────
+//
+// The names invite the opposite reading, which is why this is pinned rather than left to a comment.
+// Measured 2026-09-07 over 160 rows across eight symbols:
+//
+//   both fields present        90
+//   `adj_price_target` alone   55     Initiated / Resumed — there IS no previous target
+//   `price_target` alone        0     never happens
+//   neither                    15
+//
+// and where both appear they ALWAYS differ (48 of 48), which rules out `adj` meaning
+// split-adjusted. So `adj_price_target` is the target the analyst has just set. Reading
+// `price_target` as "the price target" would store the SUPERSEDED number and be null 40% of the
+// time, while looking entirely reasonable on a page — this schema's signature failure.
+{
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const pt = src.slice(src.indexOf('resource === PRICE_TARGETS_RESOURCE'))
+  check(pt.length > 500, 'the price-target handler is findable',
+    'the anchor has moved and every check below would pass vacuously')
+  check(/target_to:\s*num\(r\.adj_price_target\)/.test(pt),
+    'the CURRENT target is read from `adj_price_target`',
+    'reading `price_target` stores the superseded number and is null 40% of the time')
+  check(/target_from:\s*num\(r\.price_target\)/.test(pt),
+    'the PREVIOUS target is read from `price_target`',
+    'the two fields are the opposite way round from what their names suggest')
+
+  // THE CURSOR ADVANCES ON A SUCCESSFUL ASK, NOT ON ROWS. A US small cap with no analyst coverage
+  // legitimately returns nothing; advancing only on rows would leave it at the head of a
+  // weight-ordered backlog for ever — the stall this schema has hit in five separate resources.
+  // `fetchWithIsolation` returns a null error only when the provider demonstrably answered, so it
+  // is the honest gate. Anchored inside the handler, because `!iso.error` appears elsewhere.
+  check(/if \(!iso\.error\) \{[\s\S]{0,400}price_targets_fetched_at/.test(pt),
+    'the price-target cursor advances for the whole group on a successful ask',
+    'advancing only on answered symbols stalls every uncovered US small cap at the head')
+  check(!/answered\.has[\s\S]{0,200}price_targets_fetched_at/.test(pt),
+    'the cursor is not gated on a per-symbol answer',
+    'that is the five-times-repeated stall in this schema')
 }
 
 // ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────
