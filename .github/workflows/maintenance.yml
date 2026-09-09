@@ -190,6 +190,18 @@ jobs:
       # Delete the OLD /var/lib/docker. THE ONE IRREVERSIBLE STEP in the whole migration — run it
       # only after a soak spanning at least two nightly backups. Renames first, verifies the stack
       # is healthy on the new root, and only then removes.
+      #
+      # THE MARKER TEST NEEDS sudo, AND WITHOUT IT THIS ACTION COULD NEVER RUN. `/mnt/data/docker`
+      # is `drwx--x--- root:root`, so `ubuntu` — which is who ssh lands as — cannot stat anything
+      # inside it: `[ -f /mnt/data/docker/.migrated ]` is false whether the marker is there or not,
+      # and the step always refused with "not migrated". Measured 2026-09-09, with the marker
+      # present since the migration on 2026-08-26 and 7.6 GB still sitting on a root filesystem at
+      # 93%. Every other check in this step already says `sudo`; this one was the exception, which
+      # is why nothing looked wrong.
+      #
+      # The rename is what the comment above always promised and the code did not do: it went
+      # straight to `rm -rf`. Renaming first makes the irreversible half a separate act, with the
+      # stack proven healthy in between, and costs nothing — it is one filesystem.
       - name: Reclaim the old Docker root
         if: inputs.action == 'reclaim-old-docker-root'
         run: |
@@ -199,13 +211,25 @@ jobs:
           ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
             -o ServerAliveInterval=30 -n ubuntu@"$NODE_IP" '
               set -e
-              [ -f /mnt/data/docker/.migrated ] || { echo "not migrated — refusing"; exit 1; }
+              sudo test -f /mnt/data/docker/.migrated || { echo "not migrated — refusing"; exit 1; }
               root=$(sudo docker info --format "{{.DockerRootDir}}")
               [ "$root" = "/mnt/data/docker" ] || { echo "docker root is $root — refusing"; exit 1; }
               down=$(sudo docker service ls --format "{{.Replicas}}" | grep -c "^0/" || true)
               [ "$down" -eq 0 ] || { echo "$down service(s) at 0 replicas — refusing"; exit 1; }
+              sudo test -d /var/lib/docker || { echo "already reclaimed"; df -h /; exit 0; }
               echo "stack healthy on the new root; reclaiming"
               sudo du -sh /var/lib/docker
-              sudo rm -rf /var/lib/docker
+              df -h /
+
+              # Stage it: a rename is instant and reversible, so the stack gets to prove itself
+              # healthy with the old root already gone from its own name before anything is freed.
+              sudo mv /var/lib/docker /var/lib/docker.reclaiming
+              sleep 20
+              sudo docker info >/dev/null || { echo "dockerd unhappy after the rename — rolling back"; sudo mv /var/lib/docker.reclaiming /var/lib/docker; exit 1; }
+              still_down=$(sudo docker service ls --format "{{.Replicas}}" | grep -c "^0/" || true)
+              [ "$still_down" -eq 0 ] || { echo "$still_down service(s) went down — rolling back"; sudo mv /var/lib/docker.reclaiming /var/lib/docker; exit 1; }
+
+              echo "stack still healthy; removing"
+              sudo rm -rf /var/lib/docker.reclaiming
               df -h / /mnt/data
             '

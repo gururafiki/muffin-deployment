@@ -2802,7 +2802,17 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       const { data: pending, error: pErr } = await market
         .from('pending_cn_segments')
         .select('security_id,accession_number,report_url')
-        .limit(scopeLimit ?? 6)
+        // A PAGE OF ONE, FOR THE REASON `security-kr-segments` USES ONE: the cost is per DOCUMENT
+        // and it is MEMORY, not time. `cn-pdf.ts` records 298 ms and 124 MB for a single report
+        // against a 256 MB worker, so a page of six cannot fit however fast it runs -- and a
+        // killed worker writes no `refresh_run` row, so nothing is stamped and the same six return
+        // at the head for ever. Measured 2026-09-09: not one run has finished since 2026-09-07
+        // 17:05, while `refresh_log` still shows a claim opened and never closed.
+        //
+        // The obvious suspect was the size gate, and it is NOT the cause: the three documents at
+        // the head are 9.6 MB, 1.5 MB and 1.4 MB against a 24 MB limit, so every one is admitted
+        // and lowering the limit would have changed nothing.
+        .limit(scopeLimit ?? 1)
       if (pErr) throw new Error(`pending_cn_segments read failed: ${pErr.message}`)
 
       const { data: pv, error: vErr } = await market.from('segment_parser').select('version').single()

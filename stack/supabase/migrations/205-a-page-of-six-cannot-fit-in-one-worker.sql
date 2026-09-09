@@ -1,0 +1,42 @@
+-- Phase 0 stabilisation of the ingestion pipeline. Three unrelated-looking repairs that share one
+-- cause: something was sized or scheduled by assumption, and nothing could report the result.
+--
+-- See docs/superpowers/specs/2026-09-09-ingestion-rework-design.md in the umbrella for the whole
+-- picture; this file is the database half of its Phase 0.
+
+-- 1. `security-in-segments` IS SCHEDULED TWICE.
+--
+-- Migration 186 gave it a dedicated pg_cron job (`muffin-in-segments`, `7-59/5`) because it needs a
+-- cadence the rotation cannot give it, and left its rotation row enabled. So it is claimed by two
+-- schedulers: the dedicated job does the work and the rotation slot arrives to find the TTL fresh
+-- and returns `{"skipped": true}`. Measured 2026-09-09 over 48 hours: 175 runs, of which 4 skipped
+-- against a 4-minute TTL -- and every one of those skips consumed a rotation slot that another
+-- resource could have had. The rotation is 49 resources at one every 5 minutes, so a wasted slot
+-- costs the whole sweep 5 minutes of its 4.1-hour cycle.
+--
+-- The same reasoning already applies to every resource migration 142 and later moved onto its own
+-- job; those rows were disabled at the time and this one was missed.
+update market.cron_resource set enabled = false where resource = 'security-in-segments';
+
+-- 2. THE REDUNDANT INDEX ON `security_price`, for CI parity.
+--
+-- Dropped by hand with DROP INDEX CONCURRENTLY on 2026-09-09 (a plain DROP takes an ACCESS
+-- EXCLUSIVE lock on a 15.5-million-row table that the ingestion writes to continuously). This
+-- statement exists so a database built from migrations matches production.
+--
+-- `security_price_grain_date_idx (security_id, grain, date DESC)` is the primary key's own columns
+-- with the last one reversed, and a btree scans backwards, so `security_price_pkey
+-- (security_id, grain, date)` answers every query it answered. It was not unused -- 7,079,656
+-- scans, and the planner preferred it -- which is why "drop what nothing scans" would not have
+-- found it.
+--
+-- Proven before dropping, by removing it inside a transaction that was rolled back and re-planning
+-- the query the app actually sends, warmed, best of four:
+--
+--                        with the index   without it (falls back to the PK)
+--   price_series daily        0.580 ms                  0.311 ms
+--   price_series weekly       0.849 ms                  0.572 ms
+--
+-- So it cost 1.54 GB of disk and write amplification on a table taking 25.8 million inserts, and
+-- the queries are FASTER without it. `security_price` went 6,650 MB -> 5,110 MB.
+drop index if exists market.security_price_grain_date_idx;

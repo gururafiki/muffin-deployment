@@ -71,7 +71,7 @@ groups:
         refId: A
         format: table
         rawQuery: true
-        rawSql: "select coalesce(max(value), 9999)::float8 as value\n  from market.universe_sample\n where metric = 'scheduler.minutes_since_tick'\n   and sampled_at = (select max(sampled_at) from market.universe_sample)"
+        rawSql: "-- READ THE NEWEST SCHEDULER OBSERVATION, NOT THE NEWEST ROW IN THE TABLE.\n-- This alert has been firing continuously and falsely. `sample_universe` does not write its\n-- metrics in one statement, so a single sampling run lands timestamps a second or so apart --\n-- measured 2026-09-09, `scheduler.minutes_since_tick` at 20:05:33 while `provenance.*` and\n-- `dist.*` were at 20:05:34. The old form pinned `sampled_at` to `max(sampled_at)` over the WHOLE\n-- table, found no scheduler row at that instant, and `coalesce(..., 9999)` turned the absence into\n-- 9999 > 30. So the one alarm that says INGESTION HAS STOPPED was crying wolf while the scheduler\n-- was ticking 65 times an hour -- which is how a red gate hides the next true positive.\n--\n-- `backlog_sample` does not have this problem: `sample_backlog` is handed one `p_sampled_at` for\n-- the whole sweep precisely so its rows can be read as a single reading. `sample_universe` is not\n-- written that way, so no query over it may assume one run means one timestamp.\n--\n-- The staleness arm is what the old form got right by accident: if the SAMPLER stops, the newest\n-- scheduler value stays small for ever and a plain read would never alert. Three hours is three\n-- missed hourly samples.\nselect coalesce(\n         (select case when sampled_at < now() - interval '3 hours' then 9999 else value end\n            from market.universe_sample\n           where metric = 'scheduler.minutes_since_tick'\n           order by sampled_at desc\n           limit 1),\n         9999)::float8 as value"
     - refId: B
       datasourceUid: __expr__
       model:
@@ -326,9 +326,7 @@ groups:
         refId: A
         format: table
         rawQuery: true
-        rawSql: "select count(*)::float8 as value\n  from market.universe_sample\n where sampled_at = (select max(sampled_at) from market.universe_sample\n                      where metric like 'defect.%')\n\
-          \   and metric like 'defect.%'\n   -- `extreme_1y_returns` is a GAUGE, not an invariant: of 40 securities returning >= +300%,\n   -- 34 were REAL (SNDK +2,692%, MU +580%). Asserting zero on it\
-          \ would cry wolf for ever.\n   and metric <> 'defect.extreme_1y_returns'\n   and value > 0"
+        rawSql: "select count(*)::float8 as value\n  from market.universe_sample\n where sampled_at = (select max(sampled_at) from market.universe_sample\n                      where metric like 'defect.%')\n   and metric like 'defect.%'\n   -- GAUGES, NOT INVARIANTS. This set must match `GAUGES` in market-verify.yml, and the two HAVE\n   -- ALREADY DRIFTED: `contradicted_negative_cache` was reclassified there on 2026-09-05 and not\n   -- here, so this alert fired continuously from that day against data that is correct -- 65\n   -- marks, against market-verify's own tripwire of 200. The same fact in two places drifts.\n   --\n   -- `extreme_1y_returns`: of 40 securities returning >= +300%, 34 were REAL (SNDK +2,692%,\n   -- MU +580%), so asserting zero would cry wolf for ever.\n   -- `contradicted_negative_cache`: migration 134's own comment already says it \"is not evidence\n   -- of a defect\". A flat provider series legitimately earns a mark while our stored bars still\n   -- move, because they are two different fetches -- measured on Thailand's NVDR lines, where 15\n   -- of 29 flagged securities were that shape and every one was innocent.\n   and metric not in ('defect.extreme_1y_returns', 'defect.contradicted_negative_cache')\n   and value > 0"
     - refId: B
       datasourceUid: __expr__
       model:
