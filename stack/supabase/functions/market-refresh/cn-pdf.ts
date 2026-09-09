@@ -38,10 +38,23 @@ import { assignPartitions } from './segments.ts'
  * `security-segments` learned the hard way that one oversized document is a PERMANENT head-of-line
  * block: American Electric Power's 2015 10-K is 127.72 MB, a JS string is UTF-16, and the worker
  * died in under two seconds on every firing for two days — with a page of ONE — because a killed
- * worker throws nothing and therefore stamps nothing. The measured Chinese reports run 0.9-5.5 MB,
- * so 24 MB is generous while still bounding the worst case well inside 256 MB.
+ * worker throws nothing and therefore stamps nothing.
+ *
+ * 24 MB WAS JUSTIFIED BY A RANGE THAT DID NOT HOLD, and China reproduced the same two-day silence
+ * for it. The old reasoning was "the measured Chinese reports run 0.9-5.5 MB, so 24 MB is generous
+ * while still bounding the worst case well inside 256 MB" — but a PDF's cost is not its file size.
+ * Measured 2026-09-09 by driving this parser against real reports:
+ *
+ *   1.46 MB report ->  74 MB of RSS, parsed in 356 ms
+ *   9.15 MB report -> 129 MB of RSS, parsed in 577 ms
+ *
+ * So RSS scales with the document while TIME barely moves, and a single 9.15 MB report plus the
+ * worker's own baseline does not fit a 256 MB isolate. The isolate is now 384 MB (see
+ * `functions/main/index.ts`), and this gate is set where the measurement supports rather than where
+ * a file size felt generous: 12 MB admits every report seen so far, including the 9.15 MB one that
+ * wedged the queue, and refuses anything whose cost is unknown.
  */
-export const MAX_PDF_BYTES = 24 * 1024 * 1024
+export const MAX_PDF_BYTES = 12 * 1024 * 1024
 
 /** Returned instead of bytes when the report is too large to read — a refusal, not an absence. */
 export const TOO_LARGE = Symbol('cninfo report exceeds MAX_PDF_BYTES')
