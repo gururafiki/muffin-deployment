@@ -594,6 +594,17 @@ services:
   # Deno serverless functions at /functions/v1/<name>; function sources are
   # staged by Ansible to /home/ubuntu/supabase/functions (main/ is the router).
   supabase-functions:
+    # A TOP-LEVEL `labels:`, not `deploy.labels`. Container labels live in the TASK
+    # TEMPLATE, so a changed hash is a changed task and Swarm restarts it; a service label
+    # would update the service object and restart nothing, which is the mistake that made
+    # the config-hash fix for traefik a no-op when it first shipped.
+    #
+    # It is needed here because `main/index.ts` IS the service and is read once at start,
+    # so the worker's memory, wall-clock and CPU limits are fixed at that moment. Without
+    # this, a limit change is staged to disk, the deploy reports success, and the runtime
+    # keeps enforcing the old value with nothing reporting the difference.
+    labels:
+      - "muffin.config-hash={{ cfg_hash_functions | default('none') }}"
     image: supabase/edge-runtime:v1.74.0
     environment:
       JWT_SECRET: "{{ supabase_jwt_secret }}"
