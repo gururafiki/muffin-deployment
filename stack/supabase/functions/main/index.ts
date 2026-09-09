@@ -157,7 +157,21 @@ Deno.serve(async (req: Request) => {
   // This does NOT remove the need for incremental, wall-clock-bounded resources — a 9,786-security
   // backlog does not fit in 90 s either — it just stops the limit from being the thing that shapes
   // every batch size.
-  const memoryLimitMb = 256
+  // 256 -> 384 MB. MEASURED 2026-09-09 by driving the real CNINFO parser against the real document
+  // at the head of `pending_cn_segments`: RSS scales with the PDF, 74 MB for a 1.46 MB report and
+  // **129 MB for a 9.15 MB one**, while the parse itself is 577 ms and the heap only reaches 51 MB.
+  // So one ordinary Chinese annual report plus this worker's own baseline does not fit 256 MB, and
+  // `security-cn-segments` was killed by the supervisor in UNDER TWO SECONDS on every firing —
+  // reproduced after a deploy, so it is not contention. A killed worker writes no `refresh_run`
+  // row, so it went silent rather than red for two days.
+  //
+  // The container was raised to 1 GB in the same phase, so 384 MB still allows two concurrent
+  // workers with headroom, and the kill is the isolate's own limit rather than the cgroup's —
+  // which is why `OOMKilled` is false and the kernel logs no oom-kill for it.
+  //
+  // This is a ceiling, not a fix. The fix is parsing in a bounded subprocess, which is what
+  // muffin-ingest does; see the ingestion rework design in the umbrella.
+  const memoryLimitMb = 384
   const workerTimeoutMs = 90 * 1000
   const noModuleCache = false
   const importMapPath = null
