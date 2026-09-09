@@ -173,6 +173,31 @@ Deno.serve(async (req: Request) => {
   // muffin-ingest does; see the ingestion rework design in the umbrella.
   const memoryLimitMb = 384
   const workerTimeoutMs = 90 * 1000
+  // THE THIRD LIMIT, AND NOTHING HERE HAS EVER SET IT.
+  //
+  // `memoryLimitMb` and `workerTimeoutMs` were tuned and written up; CPU TIME was left at the
+  // runtime's default and is what has actually been killing `security-cn-segments`. Measured
+  // 2026-09-09, after raising the isolate to 384 MB and lowering the PDF gate changed nothing:
+  //
+  //   [Info] Warning: TT: undefined function: 3      <- the PDF parse has started
+  //   CPU time soft limit reached: isolate: 51af54f5…
+  //   CPU time hard limit reached: isolate: 51af54f5…
+  //   user worker failed to respond: request has been cancelled by supervisor
+  //
+  // The request died after 2.87 SECONDS against a 70-second handler deadline and a 90-second
+  // worker timeout, with `OOMKilled` false and no kernel oom-kill — which is why every memory
+  // theory (a page of six, then one document, then a bigger isolate) was wrong in turn. A CPU
+  // budget is not a wall clock: parsing a 90-page PDF costs 577 ms of CPU on an M-series laptop
+  // and several times that on this node's Ampere core, so a default in the low seconds is a
+  // ceiling the segment parsers sit right on top of.
+  //
+  // The wall clock stays the PRIMARY bound at 90 s, and every handler's own deadline is wall-clock
+  // based, so these are set well under it: a runaway is still stopped, by the limit the code
+  // already reasons about. The names are exactly as the runtime spells them — verified against the
+  // binary's own symbols, because an unrecognised option here would be silently ignored, which is
+  // the failure mode this whole file exists to avoid.
+  const cpuTimeSoftLimitMs = 20 * 1000
+  const cpuTimeHardLimitMs = 60 * 1000
   const noModuleCache = false
   const importMapPath = null
   const envVarsObj = Deno.env.toObject()
@@ -183,6 +208,8 @@ Deno.serve(async (req: Request) => {
       servicePath,
       memoryLimitMb,
       workerTimeoutMs,
+      cpuTimeSoftLimitMs,
+      cpuTimeHardLimitMs,
       noModuleCache,
       importMapPath,
       envVars,
