@@ -253,11 +253,32 @@
       register: _cfg_obs_hash
       changed_when: false
 
+    # THE EDGE-FUNCTION ROUTER IS LOADED **ONCE**, AT SERVICE START.
+    #
+    # `market-refresh/*.ts` needs no restart: a fresh user worker is created per request and reads
+    # the bind mount each time. `main/index.ts` is different — it IS the service, so its worker
+    # limits are fixed at startup, and a bind-mounted file is not part of the service spec.
+    #
+    # Measured 2026-09-09, and it cost most of a day. `security-cn-segments` was being killed by a
+    # CPU-time limit; the fix went in, the deploy reported success, the file on disk was correct —
+    # and the task ID had not changed, so the runtime was still enforcing the old limits. The
+    # previous deploy's isolate change (256 -> 384 MB) had never taken effect either, for the same
+    # reason, and nothing anywhere reported it. One `docker service update --force` and the
+    # resource completed its first run in two days.
+    #
+    # This is the same class as the traefik and http-cache hashes below it, and it was the one
+    # service left out.
+    - name: Checksum the staged edge functions
+      shell: "find /home/ubuntu/supabase/functions -type f -exec sha1sum {} + | sort | sha1sum | cut -d' ' -f1"
+      register: _cfg_fn_hash
+      changed_when: false
+
     - name: Record the config hashes for the stack template
       set_fact:
         cfg_hash_traefik: "{{ _cfg_stat.results[0].stat.checksum }}"
         cfg_hash_http_cache: "{{ (_cfg_stat.results[1].stat.checksum ~ _cfg_stat.results[2].stat.checksum) | hash('sha1') }}"
         cfg_hash_observability: "{{ _cfg_obs_hash.stdout | trim }}"
+        cfg_hash_functions: "{{ _cfg_fn_hash.stdout | trim }}"
 
     # node-exporter's textfile collector reads this. It is how anything the HOST knows but
     # Prometheus cannot scrape gets in — the http-cache volume's size being the case in hand:
