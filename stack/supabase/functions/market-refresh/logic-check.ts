@@ -2240,9 +2240,16 @@ console.log('\nsecurity-symbol-repair')
 // time, while looking entirely reasonable on a page — this schema's signature failure.
 {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const pt = src.slice(src.indexOf('resource === PRICE_TARGETS_RESOURCE'))
-  check(pt.length > 500, 'the price-target handler is findable',
-    'the anchor has moved and every check below would pass vacuously')
+  // BOUNDED AT BOTH ENDS. Sliced only from the start, this window ran to the end of the file and
+  // the "no flat headroom" check below matched FOUR other handlers that legitimately use
+  // `deadline - 8_000` — a guard failing for a reason unrelated to what it tests. That is the
+  // "anchored on the first match in the file" trap this file already records one level down, and
+  // it was committed here anyway; the fix for it is a real end marker, not a cleverer pattern.
+  const ptStart = src.indexOf('resource === PRICE_TARGETS_RESOURCE')
+  const ptEnd = src.indexOf("remaining: await backlogSize(market, 'pending_price_targets')", ptStart)
+  const pt = ptStart >= 0 && ptEnd > ptStart ? src.slice(ptStart, ptEnd) : ''
+  check(pt.length > 500, 'the price-target handler is findable and bounded',
+    'an anchor has moved and every check below would pass vacuously or match a neighbour')
   check(/target_to:\s*num\(r\.adj_price_target\)/.test(pt),
     'the CURRENT target is read from `adj_price_target`',
     'reading `price_target` stores the superseded number and is null 40% of the time')
@@ -2261,6 +2268,25 @@ console.log('\nsecurity-symbol-repair')
   check(!/answered\.has[\s\S]{0,200}price_targets_fetched_at/.test(pt),
     'the cursor is not gated on a per-symbol answer',
     'that is the five-times-repeated stall in this schema')
+
+  // THE BATCH BUDGET IS LEARNED, NOT A CONSTANT. The first version gated on a flat
+  // `deadline - 8_000`; a batch of 40 measured ~15s against finviz, so the last batch of EVERY run
+  // was started with 8s left and cut short, reporting `lastError: "Signal timed out."` on every
+  // run for ever. Nothing was corrupted — the cursor correctly did not advance those securities —
+  // but it poisons the one field an operator reads to tell whether anything is wrong. A bigger
+  // constant would only re-tune the magic number to one afternoon's measurement.
+  check(/lastBatchMs/.test(pt) && /Date\.now\(\) \+ lastBatchMs [\s\S]{0,40}> deadline/.test(pt),
+    'a batch is started only if the LAST batch\'s measured duration still fits',
+    'a flat headroom re-tunes a magic number and times out the final batch of every run')
+  check(!/Date\.now\(\) < deadline - 8_000/.test(pt),
+    'the flat 8s headroom is gone',
+    'it guaranteed a timed-out final batch, because a batch costs about twice that')
+  // AND A BATCH THAT ERRORED IS A FAILED BATCH. `fetchWithIsolation` RETURNS its error rather than
+  // throwing, so the catch never sees it and the tally read `batchesFailed: 0` beside a batch that
+  // answered nothing.
+  check(/if \(iso\.error\) \{[\s\S]{0,120}batchesFailed\+\+/.test(pt),
+    'an isolation error counts as a failed batch',
+    'otherwise a run that answered nothing reports a clean tally')
 }
 
 // ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────
