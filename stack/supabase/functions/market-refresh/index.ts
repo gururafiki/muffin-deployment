@@ -1751,12 +1751,30 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       let batchesFailed = 0
       let advanced = 0
       let throttledOut = false
+      let stoppedEarly = false
       let lastError: string | null = null
 
+      // DO NOT START A BATCH THE BUDGET CANNOT FINISH, AND LEARN THE COST RATHER THAN GUESSING IT.
+      // The first version gated on a flat `deadline - 8_000`. Measured on the first live run, a
+      // batch of 40 takes ~15s against finviz, so the final batch of EVERY run was started with 8s
+      // left and cut short: `lastError: "Signal timed out."` on every single run, for ever. Nothing
+      // was corrupted — `fetchWithIsolation` returned the error, the cursor correctly did not
+      // advance those securities and they came back next run — but it permanently poisons the one
+      // field an operator reads to tell whether anything is wrong, which is this file's
+      // "a monitoring line with no content" failure.
+      //
+      // A bigger constant would only re-tune the magic number to one afternoon's measurement. The
+      // budget is LEARNED instead: after each batch we know exactly what a batch costs here, so the
+      // next one starts only if that much time plus a small margin remains. It self-corrects when
+      // the provider slows down or speeds up, and needs no seed — the first batch always runs,
+      // because a run that attempts nothing is worse than one that overruns slightly.
       const BATCH = 40
-      for (let i = 0; i < wanted.length && Date.now() < deadline - 8_000; i += BATCH) {
+      let lastBatchMs = 0
+      for (let i = 0; i < wanted.length; i += BATCH) {
+        if (Date.now() + lastBatchMs + 3_000 > deadline) { stoppedEarly = true; break }
         const group = wanted.slice(i, i + BATCH)
         const bySymbol = new Map(group.map((g) => [g.symbol.toUpperCase(), g.securityId]))
+        const startedAt = Date.now()
         batches++
         try {
           // ISOLATED, because one dead symbol kills a batched provider call and this backlog is
@@ -1771,7 +1789,13 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
             Math.min(30_000, deadline - Date.now()),
             deadline,
           )
-          if (iso.error) lastError = iso.error
+          // A BATCH THAT ERRORED IS A FAILED BATCH. Reporting `batchesFailed: 0` beside a batch
+          // that answered nothing made the tally read as a clean run — `fetchWithIsolation`
+          // returns its error rather than throwing, so the catch below never sees it.
+          if (iso.error) {
+            lastError = iso.error
+            batchesFailed++
+          }
 
           const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
           const payload = iso.rows.flatMap((r) => {
@@ -1826,12 +1850,19 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
           const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
           lastError = msg
           if (throttled(msg)) { throttledOut = true; break }
+        } finally {
+          // In `finally` so a thrown batch still teaches the loop what a batch costs — otherwise a
+          // single slow failure would leave the estimate stale and the next start over-eager.
+          lastBatchMs = Date.now() - startedAt
         }
       }
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
-        resource, actions, batches, batchesFailed, advanced, throttledOut, lastError,
+        // `stoppedEarly` is the ORDINARY case for a 3,262-deep backlog and is reported as its own
+        // fact rather than as an error: the run ended because our budget ended, not because
+        // anything failed, and those are different things.
+        resource, actions, batches, batchesFailed, advanced, stoppedEarly, throttledOut, lastError,
         remaining: await backlogSize(market, 'pending_price_targets'),
       })
     }
