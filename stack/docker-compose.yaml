@@ -1140,6 +1140,117 @@ services:
       resources:
         limits:
           memory: 192M
+  # ---------------------------------------------------------------------------------------------
+  # INGESTION. Three services from ONE image, differing only by `command`: one build, one pull, and
+  # one thing to keep on a node whose ROOT filesystem is the scarce resource.
+  #
+  # Nothing routes through here yet. The edge function still ingests everything; these stand the
+  # orchestrator up so families can be cut over one at a time, each behind its own migration. See
+  # docs/superpowers/specs/2026-09-09-ingestion-rework-design.md in the umbrella.
+  # ---------------------------------------------------------------------------------------------
+
+  # The code location: a gRPC server holding the assets. Kept separate from the daemon and the
+  # webserver so a code error takes out THIS and leaves the other two running to report it.
+  muffin-ingest:
+    image: "{{ image_ingest | default('ghcr.io/gururafiki/muffin-ingest:latest') }}"
+    command: ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4000", "-m", "muffin_ingest_dagster.definitions"]
+    labels:
+      - "muffin.config-hash={{ cfg_hash_dagster | default('none') }}"
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+      DAGSTER_PG_PASSWORD: "{{ dagster_pg_password | default('') }}"
+      # DIRECT SQL, not PostgREST. A writer needs transactions spanning claim -> write -> complete,
+      # `for update skip locked`, COPY, and its own statement timeout; PostgREST's 1,000-row cap has
+      # cost four separate defects here, the quietest silently truncating a 5,000-row request.
+      INGEST_DATABASE_URL: "postgresql://ingest_rw:{{ ingest_pg_password | default('') }}@supabase-db:5432/postgres"
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom
+      MUFFIN_USER_AGENT: "muffin-market/1.0 (+https://github.com/{{ registry_username | default('gururafiki') }}/muffin)"
+      # Providers, through the cache, exactly as the edge function reaches them. Every default in
+      # `settings.py` is the REAL origin, so removing the cache degrades nothing — except DART,
+      # which Deno could not reach at all and which is documented as the one exception.
+      HTTP_CACHE_URL: "http://http-cache:8080"
+      OPENFIGI_API_KEY: "{{ openfigi_api_key | default('') }}"
+      TIINGO_TOKEN: "{{ tiingo_token | default('') }}"
+      ALPHA_VANTAGE_API_KEY: "{{ alpha_vantage_api_key | default('') }}"
+      FRED_API_KEY: "{{ fred_api_key | default('') }}"
+      DART_API_KEY: "{{ dart_api_key | default('') }}"
+      EDINET_API_KEY: "{{ edinet_api_key | default('') }}"
+    volumes:
+      - /home/ubuntu/dagster:/opt/dagster/home:ro
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          # The code server plus up to `max_concurrent_runs` subprocesses. openbb is imported
+          # in-process at ~250 MB per run and a segment parse costs ~124 MB of RSS, so three
+          # concurrent runs is what this number is for. `openbb-api` (1 GB) is retired once the
+          # last family moves, so the steady state is roughly flat against today.
+          memory: 2560M
+
+  # Schedules, sensors and the run queue. NOT replicable — Dagster supports one daemon.
+  dagster-daemon:
+    image: "{{ image_ingest | default('ghcr.io/gururafiki/muffin-ingest:latest') }}"
+    command: ["dagster-daemon", "run"]
+    labels:
+      - "muffin.config-hash={{ cfg_hash_dagster | default('none') }}"
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+      DAGSTER_PG_PASSWORD: "{{ dagster_pg_password | default('') }}"
+      INGEST_DATABASE_URL: "postgresql://ingest_rw:{{ ingest_pg_password | default('') }}@supabase-db:5432/postgres"
+    volumes:
+      - /home/ubuntu/dagster:/opt/dagster/home:ro
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+
+  # The UI. An ADMIN surface — it can launch runs against production — so it sits behind Cloudflare
+  # Access with grafana and portainer rather than in `cf_public_hostnames`.
+  dagster-webserver:
+    image: "{{ image_ingest | default('ghcr.io/gururafiki/muffin-ingest:latest') }}"
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/opt/dagster/home/workspace.yaml"]
+    labels:
+      - "muffin.config-hash={{ cfg_hash_dagster | default('none') }}"
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+      DAGSTER_PG_PASSWORD: "{{ dagster_pg_password | default('') }}"
+    volumes:
+      - /home/ubuntu/dagster:/opt/dagster/home:ro
+    networks:
+      - muffin-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=muffin-net"
+        - "traefik.http.routers.dagster.rule=Host(`{{ dagster_subdomain | default('muffin-dagster') }}.{{ domain }}`)"
+        - "traefik.http.routers.dagster.entrypoints=websecure"
+        - "traefik.http.routers.dagster.tls.certresolver=cloudflare"
+        - "traefik.http.services.dagster.loadbalancer.server.port=3000"
+
   prometheus:
     image: prom/prometheus:v3.7.3
     # THE CONFIG'S HASH, AS A CONTAINER LABEL — NOT UNDER `deploy:`.

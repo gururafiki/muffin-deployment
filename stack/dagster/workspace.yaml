@@ -1,0 +1,8 @@
+# Where the webserver and daemon find the code. A gRPC server rather than an in-process load, so a
+# code error takes out the code location and leaves the UI and the daemon running to report it —
+# which is the difference between "one asset is broken" and "the orchestrator is down".
+load_from:
+  - grpc_server:
+      host: muffin-ingest
+      port: 4000
+      location_name: muffin_ingest
