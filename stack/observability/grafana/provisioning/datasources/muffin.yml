@@ -53,3 +53,23 @@ datasources:
       # and this flag stops the query editor from offering anything that would need more. A
       # dashboard that can write to the database that runs the product is not a dashboard.
       timescaledb: false
+
+  # Dagster's run and event storage. Its own DATABASE, so this cannot see `market` — and the
+  # database name goes in `jsonData`, never at the top level: the deprecated key still CONNECTS, so
+  # health reads OK and every panel returns rows, while the settings page renders an empty field
+  # and anyone who presses Save writes it back and takes the panels down.
+  - name: muffin-dagster
+    uid: muffin-dagster
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: supabase-db:5432
+    user: metrics_ro
+    isDefault: false
+    editable: false
+    jsonData:
+      database: dagster
+      sslmode: disable
+      postgresVersion: 1700
+      timescaledb: false
+    secureJsonData:
+      password: $MUFFIN_METRICS_RO_PASSWORD

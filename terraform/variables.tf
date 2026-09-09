@@ -143,6 +143,15 @@ variable "cloudflare_grafana_subdomain" {
   default = "muffin-grafana"
 }
 
+variable "cloudflare_dagster_subdomain" {
+  description = "Subdomain for the Dagster UI (ingestion orchestrator; behind an Access app)."
+  type        = string
+  # Prefixed like grafana and portainer rather than a bare `dagster`, for the reason recorded on
+  # `cloudflare_grafana_subdomain`: an unprefixed name can already exist on this zone pointing
+  # somewhere else, and terraform would take the record over silently.
+  default = "muffin-dagster"
+}
+
 variable "cloudflare_portainer_subdomain" {
   description = "Subdomain for Portainer (container ops; behind an Access app). See the note on the Grafana subdomain — a bare `portainer` record may already exist on the zone."
   type        = string

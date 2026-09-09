@@ -196,6 +196,15 @@
         src: "{{ muffin_template_dir }}/supabase/migrations/"
         dest: /home/ubuntu/supabase/migrations/
 
+    - name: Stage the Dagster instance config
+      copy:
+        src: "{{ muffin_template_dir }}/dagster/{{ item }}"
+        dest: "/home/ubuntu/dagster/{{ item }}"
+        mode: "0644"
+      loop:
+        - dagster.yaml
+        - workspace.yaml
+
     - name: Stage Supabase edge-function sources (main/ is the upstream router)
       copy:
         src: "{{ muffin_template_dir }}/supabase/functions/"
@@ -268,6 +277,11 @@
     #
     # This is the same class as the traefik and http-cache hashes below it, and it was the one
     # service left out.
+    - name: Checksum the staged Dagster config
+      shell: "find /home/ubuntu/dagster -type f -exec sha1sum {} + | sort | sha1sum | cut -d' ' -f1"
+      register: _cfg_dagster_hash
+      changed_when: false
+
     - name: Checksum the staged edge functions
       shell: "find /home/ubuntu/supabase/functions -type f -exec sha1sum {} + | sort | sha1sum | cut -d' ' -f1"
       register: _cfg_fn_hash
@@ -279,6 +293,7 @@
         cfg_hash_http_cache: "{{ (_cfg_stat.results[1].stat.checksum ~ _cfg_stat.results[2].stat.checksum) | hash('sha1') }}"
         cfg_hash_observability: "{{ _cfg_obs_hash.stdout | trim }}"
         cfg_hash_functions: "{{ _cfg_fn_hash.stdout | trim }}"
+        cfg_hash_dagster: "{{ _cfg_dagster_hash.stdout | trim }}"
 
     # node-exporter's textfile collector reads this. It is how anything the HOST knows but
     # Prometheus cannot scrape gets in — the http-cache volume's size being the case in hand:
@@ -638,6 +653,93 @@
     # SIGUSR1 is PostgREST's documented "reload the schema cache" signal: no
     # restart, no dropped connections, and it does not depend on LISTEN/NOTIFY
     # having survived. Idempotent and harmless when nothing changed.
+    # --- The ingestion orchestrator's own storage ------------------------------------------------
+    #
+    # A SEPARATE DATABASE, NOT A SCHEMA. Dagster creates and migrates its own tables, and
+    # `03-security.sql` revokes `public` from `anon`/`authenticated` every deploy and re-grants only
+    # the app's tables — run-storage tables in `public` would be caught by that on one deploy and
+    # dropped from it on the next. It is also what lets `metrics_ro` read run history without being
+    # able to see `market`. `create database` cannot run inside a transaction, which is why none of
+    # this is a migration: every migration is applied `--single-transaction`.
+    #
+    # THE PASSWORD IS STAGED TO A ROOT-ONLY FILE FIRST, and that shape is deliberate twice over:
+    #
+    #   * `:'var'` interpolation works in a plain statement and NOT inside a dollar-quoted `do $$`
+    #     block — psql substitutes in its LEXER, which treats `$$ … $$` as opaque text, so the
+    #     obvious `do $$ … create role … $$` fails with a syntax error naming the colon. And
+    #     Ansible's `| to_json` is not the way round it: JSON double quotes are an SQL IDENTIFIER,
+    #     so the password arrives as `column "abc123…" does not exist`. Both cost a failed deploy
+    #     when the vault secrets were added.
+    #   * `no_log: true` on a task HIDES THE ERROR THAT DIAGNOSES IT — a failure reports only
+    #     "the output has been hidden". So it goes on the task whose ONLY job is to stage the
+    #     secret, and the tasks that USE it contain no secret and stay loggable.
+    - name: Stage the ingestion credentials (root-only)
+      copy:
+        content: "{{ item.value }}"
+        dest: "{{ item.path }}"
+        mode: "0600"
+        owner: root
+        group: root
+      loop:
+        - { path: /root/.muffin-dagster-pw, value: "{{ dagster_pg_password | default('') }}" }
+        - { path: /root/.muffin-ingest-pw,  value: "{{ ingest_pg_password | default('') }}" }
+      loop_control:
+        label: "{{ item.path | basename }}"
+      no_log: true
+
+    - name: Create or update the dagster role
+      shell: |
+        set -e
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        pw=$(cat /root/.muffin-dagster-pw)
+        [ -n "$pw" ] || { echo "no dagster password configured — skipping"; exit 0; }
+        if docker exec "$db" psql -U postgres -tAc "select 1 from pg_roles where rolname='dagster'" | grep -q 1; then
+          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw" -c "alter role dagster login password :'pw'"
+        else
+          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw" -c "create role dagster login password :'pw'"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Create the dagster database if it does not exist
+      shell: |
+        set -e
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        if ! docker exec "$db" psql -U postgres -tAc "select 1 from pg_database where datname='dagster'" | grep -q 1; then
+          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -c "create database dagster owner dagster"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # Migration 206 creates `ingest_rw` NOLOGIN with its grants, exactly as migration 127 does for
+    # `metrics_ro`, so the schema owns the permissions and only the credential lives here. Re-run
+    # every deploy, so a rotation lands without a manual step.
+    - name: Give ingest_rw its password
+      shell: |
+        set -e
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        pw=$(cat /root/.muffin-ingest-pw)
+        [ -n "$pw" ] || { echo "no ingest password configured — skipping"; exit 0; }
+        docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw" -c "alter role ingest_rw login password :'pw'"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # Grafana reads Dagster's run history. `failed_when: false` because on the FIRST deploy this
+    # runs before Dagster has created any tables, and a datasource that cannot read yet is a panel
+    # with no data rather than a broken deploy.
+    - name: Let metrics_ro read Dagster's run history
+      shell: >
+        docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)"
+        psql -U postgres -d dagster -v ON_ERROR_STOP=1 -c
+        "grant usage on schema public to metrics_ro;
+         grant select on all tables in schema public to metrics_ro;
+         alter default privileges for role dagster in schema public grant select on tables to metrics_ro"
+      changed_when: false
+      failed_when: false
+
     - name: Reload PostgREST's schema cache (SIGUSR1) so new tables are visible
       shell: >
         docker kill -s SIGUSR1 "$(docker ps -qf name=muffin_supabase-rest | head -1)"

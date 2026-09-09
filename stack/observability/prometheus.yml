@@ -47,3 +47,11 @@ scrape_configs:
   - job_name: postgres
     static_configs:
       - targets: ["postgres-exporter:9187"]
+
+  # The ingestion worker's own view of every provider call: requests, throttles, quota and rows
+  # written, counted AT THE CALLER. `http-cache` cannot see these — calls openbb makes inside its
+  # own process never traverse the proxy, and that is the rate limit that matters most.
+  - job_name: muffin-ingest
+    static_configs:
+      - targets: ["muffin-ingest:9102"]
+

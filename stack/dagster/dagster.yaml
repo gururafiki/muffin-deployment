@@ -1,0 +1,43 @@
+# The Dagster instance. Staged to /home/ubuntu/dagster/ by Ansible and bind-mounted read-only into
+# all three services, whose container label carries this file's hash so an edit actually restarts
+# them — the lesson that cost a day on `security-cn-segments`.
+
+storage:
+  postgres:
+    postgres_db:
+      username: dagster
+      password:
+        env: DAGSTER_PG_PASSWORD
+      hostname: supabase-db
+      # ITS OWN DATABASE, NOT ITS OWN SCHEMA. Dagster creates and migrates its tables itself, and
+      # `03-security.sql` revokes `public` from `anon`/`authenticated` on every deploy and re-grants
+      # only the app's own tables — a run-storage table appearing in `public` would be caught by
+      # that machinery on one deploy and dropped from it on the next. A separate database is also
+      # what lets `metrics_ro` read run history without being able to see `market`.
+      db_name: dagster
+      port: 5432
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    # THREE, and the node is the reason. Each run is a subprocess of the code-location container,
+    # and a segment parse costs ~124 MB of RSS, so the container's 2.5 GB is the real bound. The
+    # per-provider pools below are what actually serialise work; this only caps the total.
+    max_concurrent_runs: 3
+
+run_launcher:
+  module: dagster
+  class: DefaultRunLauncher
+
+concurrency:
+  pools:
+    # A POOL IS A PROVIDER, and this is what replaces the five-minute pg_cron rotation as the
+    # guarantee that nothing bursts. Firing resources back to back is what tripped yfinance's rate
+    # limit and negative-cached ~8,300 securities in one afternoon.
+    #
+    # A pool bounds CONCURRENCY and cannot express a RATE, so requests per second and per day stay
+    # with the limiter and `ingest.provider_budget`. Both are needed: the pool stops two runs
+    # touching one provider at once, the budget stops one run spending a day's quota in a minute.
+    default_limit: 1
+    granularity: run

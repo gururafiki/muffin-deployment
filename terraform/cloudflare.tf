@@ -23,6 +23,9 @@ locals {
     # record and the policy both come from the `for_each` below.
     grafana   = "${var.cloudflare_grafana_subdomain}.${var.cloudflare_domain}"
     portainer = "${var.cloudflare_portainer_subdomain}.${var.cloudflare_domain}"
+    # Dagster belongs with them and not in `cf_public_hostnames`: its UI can LAUNCH RUNS against
+    # production and read every asset's metadata.
+    dagster = "${var.cloudflare_dagster_subdomain}.${var.cloudflare_domain}"
   } : {}
   # Hostnames that stay PUBLIC (no Access app): the Supabase API gateway must be
   # reachable by browsers/native apps directly — it is protected by its own

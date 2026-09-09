@@ -18,6 +18,7 @@ studio_subdomain: "supabase-studio"   # Supabase Studio (admin; behind Cloudflar
 # shortening these.
 grafana_subdomain: "muffin-grafana"     # dashboards + alerts
 portainer_subdomain: "muffin-portainer" # container ops (holds the Docker socket — Access is not optional)
+dagster_subdomain: "muffin-dagster"     # ingestion orchestrator (can launch runs — behind Access)
 acme_email: "you@example.com"   # Let's Encrypt account email (cert-expiry notices)
 
 # === Supabase / LangGraph DB cutover ===
@@ -33,6 +34,7 @@ image_openbb: "ghcr.io/gururafiki/openbb-mcp-docker:latest"
 image_ui: "ghcr.io/gururafiki/agent-chat-ui-docker:latest"
 image_app: "ghcr.io/gururafiki/muffin-ui:latest"
 image_nuq_postgres: "ghcr.io/gururafiki/nuq-postgres-docker:latest"
+image_ingest: "ghcr.io/gururafiki/muffin-ingest:latest"   # ingestion library + Dagster assets
 
 # === Container registry login (so the node can pull the private GHCR packages) ===
 registry_server: "ghcr.io"
