@@ -689,7 +689,12 @@ services:
         delay: 10s
       resources:
         limits:
-          memory: 512M
+          # 512M -> 768M. Measured over the 7 days to 2026-09-09: kong sits between 89.7% and
+          # 96.8% of its limit with no restart in the window, so this is a steady state near the
+          # ceiling rather than a leak that a restart would clear. It is also the single gateway
+          # for the whole Supabase API — PostgREST, GoTrue and the edge functions all route
+          # through it — so an OOM here takes the app's entire data path down, not one feature.
+          memory: 768M
       labels:
         - "traefik.enable=true"
         - "traefik.swarm.network=muffin-net"

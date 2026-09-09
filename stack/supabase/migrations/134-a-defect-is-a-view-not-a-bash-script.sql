@@ -74,15 +74,28 @@ select 'returns_at_minus_100', count(*),
 -- bars, so every period reads exactly +0.00% — "the market was flat" rather than "this fund is
 -- dead". Counting flat ROWS was the wrong test and cried wolf at 12: across 12,348 equities an
 -- exact round-trip is ordinary, because most quotes sit on a coarse tick grid (Tokyo and Shenzhen
--- in whole units, Seoul in won). THE DISCRIMINATOR IS THREE WINDOWS AT ONCE: a frozen series is
--- flat on every window, and coincidence cannot land on three. Measured — 36 symbols had one fresh
--- zero, 2 had two, none had three.
+-- in whole units, Seoul in won). THE DISCRIMINATOR IS THAT A FROZEN SERIES IS FLAT ON EVERY WINDOW
+-- AT ONCE. Measured when this was written — 36 symbols had one fresh zero, 2 had two, none had
+-- three — so "three or more" was used as a proxy for "all of them".
+--
+-- THE PROXY MET ITS FIRST LEGITIMATE EXCEPTION ON 2026-09-09 and the check is now written as what
+-- it always meant. `PTSB.IR` (Permanent TSB, Euronext Dublin) reported 1w, 1m and 3m at exactly
+-- 0.00% while 6m read -4.84%, ytd +3.15% and 1y +29.39%: 98 stored bars carrying **14 distinct
+-- closes**, which is an illiquid line resting on one price for a quarter, not a dead one. Three
+-- zeros are reachable by an ordinary thin stock; three zeros WITH NOTHING ELSE MOVING are not.
+--
+-- The floor of three is kept, so a symbol carrying one or two periods cannot qualify on a thin
+-- sample. Both directions were proven against production before this changed: the tightened
+-- predicate returns nothing for PTSB, and a seeded instrument flat on all seven periods is still
+-- caught.
 union all
 select 'frozen_series', count(*),
-       'symbols at exactly 0.00% on 3+ periods of a FRESH refresh'
+       'symbols whose FRESH refresh is 0.00% on every period it produced (3+ periods)'
   from (select scope_id from market.performance
-         where scope = 'instrument' and change_pct = 0 and as_of > now() - interval '2 days'
-         group by scope_id having count(*) >= 3) q
+         where scope = 'instrument' and as_of > now() - interval '2 days'
+         group by scope_id
+        having count(*) filter (where change_pct = 0) >= 3
+           and count(*) filter (where change_pct is not null and change_pct <> 0) = 0) q
 
 -- A NEGATIVE CACHE CONTRADICTED BY OUR OWN DATA. `performance_missing_at` says the provider has no
 -- series while `security_price` holds bars written this week. THE TWO RESOURCES CALL THE SAME
