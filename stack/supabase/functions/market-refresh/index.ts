@@ -422,6 +422,7 @@ const INSIDER_RESOURCE = 'security-insider'
 const FILINGS_RESOURCE = 'security-filings'
 const MANAGEMENT_RESOURCE = 'security-management'
 const EPS_HISTORY_RESOURCE = 'security-eps-history'
+const PRICE_TARGETS_RESOURCE = 'security-price-targets'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
   const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
   const SEC_PRICES_RESOURCE = 'security-prices'
@@ -465,6 +466,7 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
     [SYMBOL_REPAIR_RESOURCE]: BACKLOG_TTL_MINUTES,
     [NEWS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
+    [PRICE_TARGETS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
     // NOT `BACKLOG_TTL_MINUTES`: these two have their own five-minute pg_cron jobs, and a
@@ -1721,6 +1723,116 @@ const EPS_HISTORY_RESOURCE = 'security-eps-history'
       return json({
         resource, stats, estimates, batches, batchesFailed, missing, throttledOut, lastError,
         remaining: await backlogSize(market, 'pending_share_stats'),
+      })
+    }
+
+    // ANALYST ACTIONS. Distinct in GRAIN from `security_estimate`, which holds the daily consensus
+    // LEVEL for 9,009 securities globally; this is the US-listed event stream behind it — who
+    // re-rated, when, and in which direction.
+    if (resource === PRICE_TARGETS_RESOURCE) {
+      const deadline = Date.now() + 60_000
+      const { data: pending, error: pErr } = await market
+        .from('pending_price_targets')
+        .select('security_id,symbol')
+        .limit(scopeLimit ?? 600)
+      if (pErr) throw new Error(`pending_price_targets read failed: ${pErr.message}`)
+
+      const wanted = (pending ?? []).map((r) => ({
+        securityId: r.security_id as string,
+        symbol: String(r.symbol),
+      }))
+      if (wanted.length === 0) {
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+        return json({ resource, actions: 0, remaining: 0, note: 'every US-listed equity is current' })
+      }
+
+      let actions = 0
+      let batches = 0
+      let batchesFailed = 0
+      let advanced = 0
+      let throttledOut = false
+      let lastError: string | null = null
+
+      const BATCH = 40
+      for (let i = 0; i < wanted.length && Date.now() < deadline - 8_000; i += BATCH) {
+        const group = wanted.slice(i, i + BATCH)
+        const bySymbol = new Map(group.map((g) => [g.symbol.toUpperCase(), g.securityId]))
+        batches++
+        try {
+          // ISOLATED, because one dead symbol kills a batched provider call and this backlog is
+          // weight-ordered — the same poisoned head would return every run. A delisted US ticker is
+          // the realistic case here, since the view already excludes the suffixed and OTC lines
+          // finviz answers with 400.
+          const iso = await fetchWithIsolation(
+            fetcher,
+            (syms: string[]) =>
+              `/api/v1/equity/estimates/price_target?symbol=${symbolList(syms)}&provider=finviz`,
+            group.map((g) => g.symbol),
+            Math.min(30_000, deadline - Date.now()),
+            deadline,
+          )
+          if (iso.error) lastError = iso.error
+
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+          const payload = iso.rows.flatMap((r) => {
+            const id = bySymbol.get(String(r.symbol ?? '').toUpperCase())
+            const day = String(r.published_date ?? '').slice(0, 10)
+            const firm = typeof r.analyst_company === 'string' ? r.analyst_company.trim() : ''
+            // (date, firm) is the key, so a row missing either cannot be stored idempotently.
+            if (!id || !day || !firm) return []
+            return [{
+              security_id: id,
+              published_date: day,
+              analyst_company: firm,
+              // `adj_price_target` IS THE NEW TARGET and `price_target` the PREVIOUS one. Measured
+              // over 160 rows: `price_target` NEVER appears alone, `adj_price_target` appears alone
+              // 55 times (Initiated/Resumed have no prior target), and where both appear they always
+              // differ — which rules out `adj` meaning split-adjusted. Reading `price_target` as the
+              // target would store the SUPERSEDED number and be null 40% of the time.
+              target_from: num(r.price_target),
+              target_to: num(r.adj_price_target),
+              status: typeof r.status === 'string' ? r.status : null,
+              rating_change: typeof r.rating_change === 'string' ? r.rating_change : null,
+              source_code: 'finviz',
+              fetched_at: new Date().toISOString(),
+            }]
+          })
+
+          if (payload.length > 0) {
+            const { error } = await market.from('security_price_target').upsert(
+              dedupeBy(payload, (r) => `${r.security_id}|${r.published_date}|${r.analyst_company}`),
+              { onConflict: 'security_id,published_date,analyst_company' })
+            if (error) throw new Error(`security_price_target upsert failed: ${error.message}`)
+            actions += payload.length
+          }
+
+          // ADVANCE THE WHOLE GROUP ON A SUCCESSFUL ASK, NOT ONLY THE SYMBOLS THAT ANSWERED.
+          // `fetchWithIsolation` returns a null error only when the provider demonstrably answered
+          // — with rows, or after isolating each symbol and proving the provider healthy with a
+          // control. A US small cap with no analyst coverage legitimately returns NOTHING, so
+          // advancing only on rows would leave it at the head of a weight-ordered backlog for ever:
+          // the stall this codebase has hit in five separate resources. Conversely a transport
+          // failure advances nothing, because a thirty-second outage must not cost a week of
+          // staleness — the rule `insider_fetched_at` records.
+          if (!iso.error) {
+            const { error } = await market.from('security')
+              .update({ price_targets_fetched_at: new Date().toISOString() })
+              .in('security_id', group.map((g) => g.securityId))
+            if (error) throw new Error(`price_targets_fetched_at update failed: ${error.message}`)
+            advanced += group.length
+          }
+        } catch (e) {
+          batchesFailed++
+          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+          lastError = msg
+          if (throttled(msg)) { throttledOut = true; break }
+        }
+      }
+
+      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
+      return json({
+        resource, actions, batches, batchesFailed, advanced, throttledOut, lastError,
+        remaining: await backlogSize(market, 'pending_price_targets'),
       })
     }
 
