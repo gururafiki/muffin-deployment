@@ -299,6 +299,31 @@ services:
       - config_file=/etc/postgresql/postgresql.conf
       - -c
       - log_min_messages=fatal
+      # TUNING. The image ships PostgreSQL's own defaults, which are sized for a laptop, and this
+      # is an 11 GB database on a 24 GB node. Measured 2026-09-09 before changing anything:
+      #   shared_buffers        128 MB   -> heap cache hit 27% on security_metric, 51% on
+      #                                     security_statement, 85% on security_price; 3.4 TB read
+      #                                     from disk since the stats reset on 2026-07-20
+      #   effective_cache_size  128 MB   -> the planner believes there is almost no cache and
+      #                                     prices seq scans accordingly
+      #   work_mem                4 MB   -> 77,526 temp files totalling 491 GB spilled to disk,
+      #                                     about 10 GB of temp I/O a day
+      #   random_page_cost           4   -> a spinning-disk number on OCI block storage
+      # Sized against measurement rather than a rule of thumb: peak backends since the reset is 19
+      # and there are 24 connections right now, so work_mem at 16 MB is ~400 MB worst case against
+      # the raised 3 GB limit, and maintenance_work_mem only ever applies to a few workers at once.
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
     volumes:
       # Init scripts run on FIRST boot only (empty volume); staged by Ansible from
       # stack/supabase/db/ (upstream supabase/docker/volumes/db, verbatim).
@@ -349,7 +374,10 @@ services:
         delay: 10s
       resources:
         limits:
-          memory: 1536M
+          # 1536M -> 3G to make room for shared_buffers=1GB above. Measured usage before the change
+          # was 246 MB of 1.5 GB, i.e. the old ceiling was never the constraint — the tiny buffer
+          # pool was. Node headroom at the time: 14.7 GB available of 24 GB.
+          memory: 3G
 
   supabase-auth:
     image: supabase/gotrue:v2.189.0
@@ -620,7 +648,15 @@ services:
         delay: 10s
       resources:
         limits:
-          memory: 512M
+          # 512M -> 1G, and this is a STOP-GAP for a leak, not a fix for one. Measured 2026-09-09:
+          # the container is OOM-killed every 3-5 hours (kernel oom-kill at 07:24, 10:02, 12:25 and
+          # 17:12 UTC that day, anon-rss ~520 MB each time) and RSS climbs about 1 MB a minute from
+          # a fresh start regardless of which resource runs, so the ceiling only changes how often.
+          # A killed worker writes no refresh_run row, so every in-flight resource disappears
+          # silently — which is how security-cn-segments went unnoticed for two days.
+          # The nightly restart in ansible/muffin_stack.yml is the other half. Both go away when
+          # ingestion moves off the edge runtime (see the ingestion rework design in the umbrella).
+          memory: 1G
 
   # Public gateway (EXPOSED via Traefik: supabase.<domain>) — key-auth (anon /
   # service_role) + CORS in front of GoTrue and PostgREST. Config rendered by

@@ -712,6 +712,30 @@
             user: root
             job: "/usr/local/bin/muffin-db-backup.sh >> /var/log/muffin-db-backup.log 2>&1"
 
+        # STOP-GAP for a leak in the edge runtime, paired with the 1G limit in the stack template.
+        # Measured 2026-09-09: `muffin_supabase-functions` is OOM-killed every 3-5 hours (four
+        # kernel oom-kills that day) and its RSS climbs ~1 MB a minute from a fresh start whatever
+        # it is running, so a bigger ceiling only lengthens the interval. A restart at a known quiet
+        # minute is better than a kill at an arbitrary one, because a KILLED worker writes no
+        # `refresh_run` row at all -- it goes silent rather than red, which is how
+        # `security-cn-segments` died on every invocation for two days without anything noticing.
+        #
+        # 04:35 rather than on the hour: pg_cron fires the ingestion rotation every 5 minutes and
+        # the SEC/regulator jobs at :02/:04/:07/:09 past, so this lands in the widest gap. It is
+        # deliberately NOT `docker service update --force` on a schedule from CI -- the node's own
+        # cron keeps working when Actions is down, which is the same reason the scheduler moved
+        # into pg_cron.
+        #
+        # DELETE THIS with the edge runtime itself, once ingestion runs in muffin-ingest (see
+        # docs/superpowers/specs/2026-09-09-ingestion-rework-design.md in the umbrella).
+        - name: Install the nightly edge-runtime restart (04:35 UTC) -- leak stop-gap
+          cron:
+            name: muffin-functions-restart
+            minute: "35"
+            hour: "4"
+            user: root
+            job: "docker service update --force --quiet muffin_supabase-functions >> /var/log/muffin-functions-restart.log 2>&1"
+
         # Fire-and-forget (poll: 0) so it NEVER holds or severs the deploy's SSH
         # session — a synchronous run once starved the node and knocked services
         # to 0/1. It also runs niced + checkpoint-light now; verify the object
