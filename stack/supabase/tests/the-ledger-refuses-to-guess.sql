@@ -26,11 +26,19 @@ values ('t206-provider', 2, 25, 'CONTROL') on conflict (provider_code) do nothin
 -- A symbol-keyed facet MUST declare what an absence retracts; the constraint enforces it, and the
 -- retraction here is observable so the test can prove it ran.
 create table if not exists ingest.t206_served (subject text primary key);
-insert into ingest.facet (facet, family, asset, provider_code, key_kind, grain, ttl, retract_sql, enabled)
+-- `population_sql` is NOT NULL on purpose: a facet that cannot say who owes it is not a facet, and
+-- a backlog defined as anything other than an anti-join over the ENTITY is this pipeline's
+-- most-repeated defect. Omitting it here is what the first run of this test did, and the column
+-- refused — which is the constraint working.
+insert into ingest.facet
+  (facet, family, asset, provider_code, key_kind, grain, ttl, population_sql, retract_sql, enabled)
 values
   ('t206-symbol','test','t206_served','t206-provider','symbol','security','1 hour',
+   'select security_id, 0::numeric from market.security where country_iso2 = ''ZL''',
    'delete from ingest.t206_served where subject = $1', true),
-  ('t206-isin','test','t206_served','t206-provider','isin','security','1 hour', null, true)
+  ('t206-isin','test','t206_served','t206-provider','isin','security','1 hour',
+   'select security_id, 0::numeric from market.security where country_iso2 = ''ZL''',
+   null, true)
   on conflict (facet) do nothing;
 
 insert into ingest.task (facet, subject, security_id, round, priority) values
