@@ -20,17 +20,28 @@ storage:
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
-  config:
-    # THREE, and the node is the reason. Each run is a subprocess of the code-location container,
-    # and a segment parse costs ~124 MB of RSS, so the container's 2.5 GB is the real bound. The
-    # per-provider pools below are what actually serialise work; this only caps the total.
-    max_concurrent_runs: 3
 
 run_launcher:
   module: dagster
   class: DefaultRunLauncher
 
 concurrency:
+  # `max_concurrent_runs` LIVES HERE, NOT UNDER `run_coordinator`, AND DECLARING BOTH IS A HARD
+  # FAILURE. Dagster sets `using_concurrency_config = "runs" in cfg or "pools" in cfg` and then
+  # refuses any `run_coordinator.config.max_concurrent_runs` — so the moment this file declared a
+  # pool, the old placement stopped being merely deprecated and became fatal:
+  #
+  #   DagsterInvalidConfigError: Found config value for `['max_concurrent_runs']` in
+  #   `run_coordinator` which is incompatible with the `concurrency > runs` config
+  #
+  # The daemon crash-looped on it. Read from the installed package's own
+  # `_core/instance/config.py` rather than inferred from the message, which names `concurrency >
+  # runs` while the conflicting key here was `pools`.
+  runs:
+    # THREE, and the node is the reason. Each run is a subprocess of the code-location container,
+    # and a segment parse costs ~124 MB of RSS, so the container's 2.5 GB is the real bound. The
+    # per-provider pools below are what actually serialise work; this only caps the total.
+    max_concurrent_runs: 3
   pools:
     # A POOL IS A PROVIDER, and this is what replaces the five-minute pg_cron rotation as the
     # guarantee that nothing bursts. Firing resources back to back is what tripped yfinance's rate
