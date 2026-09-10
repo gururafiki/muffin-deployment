@@ -30,14 +30,19 @@ create table if not exists ingest.t206_served (subject text primary key);
 -- a backlog defined as anything other than an anti-join over the ENTITY is this pipeline's
 -- most-repeated defect. Omitting it here is what the first run of this test did, and the column
 -- refused — which is the constraint working.
+--
+-- These queries return the FOUR columns `ingest.sync_population` requires (migration 207). Until
+-- that function existed nothing executed this column, so the shape was never checked and both rows
+-- carried a two-column query that would have failed on first use. A NOT NULL column holding SQL
+-- that nothing runs is a string, not a contract.
 insert into ingest.facet
   (facet, family, asset, provider_code, key_kind, grain, ttl, population_sql, retract_sql, enabled)
 values
   ('t206-symbol','test','t206_served','t206-provider','symbol','security','1 hour',
-   'select security_id, 0::numeric from market.security where country_iso2 = ''ZL''',
+   'select security_id::text, security_id, 0::numeric, 1::numeric from market.security where country_iso2 = ''ZL''',
    'delete from ingest.t206_served where subject = $1', true),
   ('t206-isin','test','t206_served','t206-provider','isin','security','1 hour',
-   'select security_id, 0::numeric from market.security where country_iso2 = ''ZL''',
+   'select security_id::text, security_id, 0::numeric, 1::numeric from market.security where country_iso2 = ''ZL''',
    null, true)
   on conflict (facet) do nothing;
 
