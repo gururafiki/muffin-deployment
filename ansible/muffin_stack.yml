@@ -253,6 +253,15 @@
         dest: /home/ubuntu/supabase/config.toml
         mode: "0644"
 
+    - name: Stage the Supabase CLI wrapper
+      # `copy:` with a `src:`, like the observability collectors: a real file is lintable, is
+      # runnable on the node before shipping, and cannot be mangled by Ansible rendering inline
+      # content through Jinja.
+      copy:
+        src: "{{ muffin_template_dir }}/supabase/run-cli.sh"
+        dest: /home/ubuntu/supabase/run-cli.sh
+        mode: "0755"
+
     - name: Stage the always-applied SQL
       # `always/` is NOT migrations: 001 and 003 are idempotent by design and must run on EVERY
       # deploy. `003-security.sql` revokes the DEFAULT PRIVILEGES so a table LangGraph creates later
@@ -668,20 +677,12 @@
       shell: |
         set -euo pipefail
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
-        pw=$(cat /root/.muffin-db-pw)
         version=$(basename /home/ubuntu/supabase/migrations/*_baseline.sql | cut -d_ -f1)
         recorded=$(docker exec "$db" psql -U postgres -tAc \
           "select count(*) from supabase_migrations.schema_migrations where version = '$version'" \
           </dev/null 2>/dev/null | tr -d ' ' || echo 0)
         if [ "${recorded:-0}" = "0" ]; then
-          docker run --rm --network muffin-net \
-            -v /usr/local/bin/supabase:/usr/local/bin/supabase:ro \
-            -v /home/ubuntu/supabase:/work -w /work \
-            --entrypoint /usr/local/bin/supabase \
-            supabase/postgres:17.6.1.136 \
-            migration repair --status applied "$version" \
-            --db-url "postgresql://postgres:$pw@supabase-db:5432/postgres" 2>&1 \
-            | sed "s|:$pw@|:REDACTED@|g"
+          /home/ubuntu/supabase/run-cli.sh migration repair --status applied "$version"
           echo BASELINED
         else
           echo ALREADY_BASELINED
@@ -692,29 +693,7 @@
       changed_when: "'BASELINED' in _supabase_baseline.stdout and 'ALREADY' not in _supabase_baseline.stdout"
 
     - name: Apply pending migrations (supabase db push)
-      shell: |
-        set -euo pipefail
-        run_cli() {
-          docker run --rm --network muffin-net \
-            -v /usr/local/bin/supabase:/usr/local/bin/supabase:ro \
-            -v /home/ubuntu/supabase:/work -w /work \
-            --entrypoint /usr/local/bin/supabase \
-            supabase/postgres:17.6.1.136 "$@"
-        }
-        # A PRECONDITION, NOT AN ASSUMPTION: the bind-mounted binary has to actually run inside
-        # this image. A linkage change would otherwise surface as a failed push in the middle of a
-        # deploy rather than as the one-line cause.
-        # (NO APOSTROPHES ANYWHERE IN THIS BLOCK, comments included. Ansible runs `split_args`
-        # over a `shell:` body to find key=value arguments, and a single-quote character opens a
-        # quoted region there even inside a comment. One unmatched apostrophe fails the WHOLE PLAY
-        # at parse time with `failed at splitting arguments, either an unbalanced jinja2 block or
-        # quotes`, and it points at the first line of the block rather than at the word.)
-        pw=$(cat /root/.muffin-db-pw)
-        run_cli --version >/dev/null
-        # REDACTED RATHER THAN HIDDEN. The password can appear in a connection error, and this is a
-        # public repository, so the output is filtered instead of the whole task being censored.
-        run_cli db push --db-url "postgresql://postgres:$pw@supabase-db:5432/postgres" 2>&1 \
-          | sed "s|:$pw@|:REDACTED@|g"
+      shell: /home/ubuntu/supabase/run-cli.sh db push
       args:
         executable: /bin/bash
       changed_when: true
