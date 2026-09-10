@@ -178,10 +178,60 @@
         dest: /home/ubuntu/proxy/openresty.conf
         mode: "0644"
 
+    - name: Ensure the Supabase staging directory exists
+      # `copy:` of a DIRECTORY creates its destination AND its parents, so `/home/ubuntu/supabase`
+      # has always been made as a side effect of staging `supabase/db/`. rsync creates only the
+      # final destination — `--mkpath` is what makes it create parents, and it is rsync 3.2.3+ —
+      # so switching the staging tasks below silently removed the thing that created this
+      # directory. It exists on the live node, so nothing would have broken until a node was
+      # replaced. `check_staged_files_have_a_directory.py` caught it on the first run after the
+      # change, which is the whole reason that guard exists.
+      file:
+        path: /home/ubuntu/supabase
+        state: directory
+        mode: "0755"
+
+    # RSYNC, NOT `copy:`, AND THE DIFFERENCE IS NINE MINUTES OF EVERY DEPLOY.
+    #
+    # Measured on run 34462861831, the first with `profile_tasks` enabled — of a 26m20s play:
+    #
+    #   Stage Supabase app migrations ......... 559.00s
+    #   Apply idempotent app migrations ....... 527.48s
+    #   Stage Supabase edge-function sources ... 90.19s
+    #   Stage observability config ............. 56.86s
+    #
+    # 559s / 206 files = 2.71s each, which is exactly what `copy:` of a DIRECTORY costs: it stats
+    # and checksums every file over its own SSH round trip. The largest single task in the deploy
+    # was COPYING the migrations, not applying them — and the rework plan had attributed the
+    # deploy's length to applying them. Both are real; only one of them is what it looked like.
+    #
+    # The same transfer by rsync, timed against this node: **2.57 seconds**, cold.
+    #
+    # Three details, each read out of the module rather than assumed, and then DRIVEN against this
+    # node with a throwaway playbook before any of this was committed:
+    #   * `use_ssh_args` is deliberately LEFT OFF. It looks necessary — synchronize builds its own
+    #     ssh command rather than reusing the connection's — but the module adds
+    #     `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` ITSELF, because
+    #     `verify_host` defaults to false. Turning it on only appends ControlMaster/ControlPersist,
+    #     which buys nothing for a 2.5 MB transfer and is one more string to malform.
+    #   * `become` is handled BY THE ACTION PLUGIN: with the play `become: true` and no explicit
+    #     rsync_path it sets `--rsync-path='sudo -u root rsync'` and unsets local become. These
+    #     destinations are root-owned, so that is load-bearing. Verified — the probe's files landed
+    #     owned by root.
+    #   * RSYNC CREATES ONLY THE LAST PATH COMPONENT. The probe failed with
+    #     `mkdir "/tmp/synctest/migrations" failed: No such file or directory` until its parent was
+    #     created, which is why `/home/ubuntu/supabase` now has a task of its own: `copy:` of a
+    #     directory had been creating it as a side effect all along.
+    #
+    # `delete: true` also fixes drift `copy:` cannot: it never removes anything, so the node held
+    # **304 migration files against the repo's 206** — 98 renamed or deleted ones, lying around
+    # since whenever. Harmless today only because the apply loop globs the CONTROLLER, not the
+    # node; anything that ever globbed the node would apply migrations this repo no longer has.
     - name: Stage Supabase db init scripts (verbatim upstream; run on first db boot only)
-      copy:
+      ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/supabase/db/"
         dest: /home/ubuntu/supabase/db/
+        delete: true
 
     - name: Render Supabase Kong declarative config
       template:
@@ -192,9 +242,10 @@
         mode: "0644"
 
     - name: Stage Supabase app migrations (idempotent; applied post-deploy below)
-      copy:
+      ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/supabase/migrations/"
         dest: /home/ubuntu/supabase/migrations/
+        delete: true
 
     - name: Ensure the Dagster config directory exists
       # `copy`/`template` DO NOT CREATE PARENT DIRECTORIES, and this is the second task to learn it
@@ -221,9 +272,10 @@
         - workspace.yaml
 
     - name: Stage Supabase edge-function sources (main/ is the upstream router)
-      copy:
+      ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/supabase/functions/"
         dest: /home/ubuntu/supabase/functions/
+        delete: true
 
     # Observability config: the Prometheus scrape config, and Grafana's provisioned datasources,
     # dashboards and alert rules.
@@ -236,9 +288,10 @@
     # Grafana re-reads its provisioning directory only at STARTUP, so a dashboard or alert-rule
     # edit needs the service restarted — see the forced update after the stack deploy below.
     - name: Stage observability config (Prometheus scrape + Grafana provisioning)
-      copy:
+      ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/observability/"
         dest: /home/ubuntu/observability/
+        delete: true
 
     # A BIND-MOUNTED CONFIG CHANGE RESTARTS NOTHING. `docker stack deploy` only updates a service
     # whose SPEC changed, and a file on disk is not part of the spec — so an edited traefik.yml or

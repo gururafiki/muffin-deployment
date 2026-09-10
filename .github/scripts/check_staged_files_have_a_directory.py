@@ -45,6 +45,10 @@ PREEXISTING = {
 }
 
 FILE_MODULES = ("copy", "template")
+# `synchronize` (rsync) creates its DESTINATION but NOT the parents above it — `--mkpath` does
+# that, and it is rsync 3.2.3+. So it counts as creating exactly one directory, unlike a `copy:`
+# of a directory, which behaves like `mkdir -p`.
+DIR_ONLY_MODULES = ("synchronize", "ansible.posix.synchronize")
 
 
 def _tasks(node: object) -> list[dict]:
@@ -60,7 +64,7 @@ def _tasks(node: object) -> list[dict]:
         for key in ("block", "rescue", "always"):
             if key in node:
                 out += _tasks(node[key] or [])
-        if any(m in node for m in (*FILE_MODULES, "file", "ansible.builtin.file")):
+        if any(m in node for m in (*FILE_MODULES, *DIR_ONLY_MODULES, "file", "ansible.builtin.file")):
             out.append(node)
     return out
 
@@ -106,6 +110,13 @@ def audit(docs: list[object]) -> list[str]:
             # the entire reason the rule is easy to miss.
             if m and str(m.get("src", "")).endswith("/") and m.get("dest"):
                 remember(str(m["dest"]), known)
+        for name in DIR_ONLY_MODULES:
+            m = _module(task, name)
+            # Only the destination itself, never its parents — that asymmetry against `copy:` is
+            # exactly what made switching the staging tasks to rsync drop the thing that had been
+            # creating /home/ubuntu/supabase.
+            if m and m.get("dest"):
+                known.add(_norm(str(m["dest"])))
 
     failures: list[str] = []
     for task in tasks:
@@ -207,6 +218,18 @@ SELF_TESTS: list[tuple[str, str, bool]] = [
   tasks:
     - name: stage it
       copy: {src: "dagster/{{ item }}", dest: "/home/ubuntu/dagster/{{ item }}"}
+""",
+        False,
+    ),
+    (
+        "rsync creates its destination but NOT its parents",
+        """
+- hosts: all
+  tasks:
+    - name: rsync a subdirectory
+      ansible.posix.synchronize: {src: supabase/db/, dest: /home/ubuntu/supabase/db/}
+    - name: stage a file in its PARENT
+      template: {src: kong.yml, dest: /home/ubuntu/supabase/kong.yml}
 """,
         False,
     ),
