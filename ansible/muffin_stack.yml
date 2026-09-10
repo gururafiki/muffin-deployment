@@ -301,6 +301,42 @@
         - dagster.yaml
         - workspace.yaml
 
+    # The RAW ingestion store: what a provider actually said, as Parquet, before anything
+    # interprets it. Stage 2 of every pipeline reads it, so re-running a transformation after a
+    # logic fix costs no provider request — see the umbrella's
+    # docs/superpowers/specs/2026-09-10-prices-dagster-design.md.
+    #
+    # ON THE BLOCK VOLUME, AND CHECKED RATHER THAN ASSUMED. `/` is a 45 GB boot volume at 74%, and
+    # the price history alone is ~1 GB of Parquet growing with the universe; landing it there would
+    # fail the next image pull rather than anything that names this directory. block_storage writes
+    # a sentinel when it mounts the real volume, so that is what gets tested — an unmounted
+    # /mnt/data is an ordinary empty directory and looks perfectly writable.
+    - name: Confirm the data volume is mounted before putting the raw store on it
+      stat:
+        path: /mnt/data/.muffin-data-volume
+      register: _data_volume_sentinel
+
+    - name: Refuse to create the raw store on the boot volume
+      fail:
+        msg: >-
+          /mnt/data carries no block-volume sentinel, so it is not the data volume. Creating the raw
+          ingestion store there would write to the 45 GB boot volume. Refusing rather than filling
+          the disk that every image pull needs.
+      when: not _data_volume_sentinel.stat.exists
+
+    # NUMERIC uid/gid, because the owner is a user INSIDE the image and not on the host: the
+    # Dockerfile creates `muffin` with `--uid 10001` and the three Dagster services run as it. A
+    # host that has never heard of that name still owns the directory correctly by number, and a
+    # bind mount the container cannot write is a run that fails at its first output rather than at
+    # its first fetch.
+    - name: Ensure the raw ingestion store exists on the data volume
+      file:
+        path: /mnt/data/ingest/raw
+        state: directory
+        owner: "10001"
+        group: "10001"
+        mode: "0750"
+
     - name: Stage Supabase edge-function sources (main/ is the upstream router)
       ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/supabase/functions/"

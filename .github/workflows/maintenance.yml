@@ -23,6 +23,7 @@ on:
           - prune-thread
           - migrate-docker-root
           - reclaim-old-docker-root
+          - roll-ingest
         default: checkpoint-report
       thread_id:
         description: Thread UUID (prune-thread only)
@@ -32,7 +33,6 @@ on:
         description: prune-thread needs delete; migrate-docker-root needs migrate; reclaim-old-docker-root needs reclaim
         type: string
         default: "dry-run"
-
 concurrency:
   group: node-maintenance
   cancel-in-progress: false
@@ -94,6 +94,35 @@ jobs:
               echo "== langgraph-api logs (tail) =="
               docker service logs muffin_langgraph-api --tail 40 2>&1 | tail -40
             '
+
+      # Pull the newest `muffin-ingest` build onto the three Dagster services.
+      #
+      # THIS IS NOT A DEPLOY, and that is the point: no terraform, no ansible, no migrations
+      # re-applied, no config restaged — so shipping an asset costs a minute instead of eleven.
+      # It is only correct because `image_ingest` is a MOVING tag (`:latest`) in all three places
+      # that set it (this repo's deploy workflow, `stack/config.example.yml`, and the compose
+      # default), so a later full deploy renders the same tag this roll pulled and the two
+      # converge. Pin that tag to a sha and this silently becomes something a deploy undoes.
+      #
+      # Anything touching `dagster.yaml`, `workspace.yaml`, the compose file or the schema is a
+      # deploy, not a roll.
+      #
+      # DELIBERATELY MANUAL, unlike the auto-CD the other image repos use. A run executes as a
+      # SUBPROCESS OF the code location, so rolling it kills whatever is in flight — harmless for
+      # `openbb-mcp` or `langgraph-api`, and not harmless here. `muffin-ingest` pushes an image on
+      # every merge; when to adopt it is an operator decision, and the script reports how many runs
+      # it interrupted.
+      - name: Roll the Dagster services onto the newest image
+        if: inputs.action == 'roll-ingest'
+        run: |
+          # Piped over ssh rather than scp — see the prune-thread step for why.
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            ubuntu@"$NODE_IP" 'cat > /tmp/muffin-roll-ingest.sh' \
+            < stack/muffin-roll-ingest.sh
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=40 \
+            -n ubuntu@"$NODE_IP" \
+            'chmod +x /tmp/muffin-roll-ingest.sh && /tmp/muffin-roll-ingest.sh'
 
       - name: Checkpoint storage report (read-only)
         if: inputs.action == 'checkpoint-report'
