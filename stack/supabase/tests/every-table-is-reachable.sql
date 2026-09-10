@@ -20,6 +20,7 @@ do $$
 declare
   t          text;
   missing    text[] := '{}';
+  blocked    text[] := '{}';
   -- `refresh_log` is written ONLY through `begin_refresh`/`finish_refresh`, which are
   -- `security definer`, and it deliberately carries RLS with NO policy so every non-bypassing role
   -- is denied. It is the one table service_role is not expected to reach directly.
@@ -58,6 +59,40 @@ begin
       missing := missing || format('%s (INSERT)', t);
     end if;
   end loop;
+
+  -- AND A GRANT IS ONLY HALF THE GATE. RLS is a second, independent check that
+  -- `has_table_privilege` cannot see: every `market` table carries it with a permissive SELECT
+  -- policy and NONE has one permitting INSERT, which was invisible for as long as the only writer
+  -- held BYPASSRLS. The first run of a new writer collected 77 bars and failed with "new row
+  -- violates row-level security policy" while every check above was green.
+  for t in
+    select c.relname
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'market'
+       and c.relkind in ('r', 'p')
+       and not c.relispartition
+       and c.relrowsecurity
+     order by c.relname
+  loop
+    if not exists (
+      select 1 from pg_roles where rolname = 'ingest_rw' and rolbypassrls
+    ) and not exists (
+      select 1 from pg_policy p
+       where p.polrelid = format('market.%I', t)::regclass
+         and p.polcmd in ('a', '*')
+    ) then
+      blocked := blocked || t;
+    end if;
+  end loop;
+
+  if array_length(blocked, 1) > 0 then
+    raise exception E'RLS blocks the ingestion writer on % market table(s): %\n'
+      'The grants are correct and the write still fails with "new row violates row-level security '
+      'policy". Either ingest_rw holds BYPASSRLS, as the writer it replaces does, or each table '
+      'carries a policy permitting it to write.',
+      array_length(blocked, 1), array_to_string(blocked, ', ');
+  end if;
 
   if array_length(missing, 1) > 0 then
     raise exception E'service_role cannot reach % market table(s): %\n'

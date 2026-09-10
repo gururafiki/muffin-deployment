@@ -1,0 +1,26 @@
+-- The ingestion writer could not write a single `market` table, and nothing could see it.
+--
+-- Measured 2026-09-11, on the first real run of the price assets: 48 of 50 securities answered, 77
+-- bars collected, and the write failed with
+--
+--     new row violates row-level security policy for table "price_bar"
+--
+-- WHY IT WAS INVISIBLE. Every `market` table carries RLS with a permissive SELECT policy — that is
+-- the deliberate convention, and it is what stops `anon` reading a table someone forgot to revoke.
+-- Not one of the 83 has a policy permitting INSERT, and none needed one: the only writer until now
+-- was `service_role`, which holds BYPASSRLS. `ingest_rw` does not.
+--
+-- `every-table-is-reachable` passed throughout, because it asks `has_table_privilege` — a question
+-- about GRANTS, which were correct. RLS is a second, independent gate that the grant cannot see.
+-- CLAUDE.md already says "verify RLS by BEHAVIOUR, not by the flag"; this is the same lesson from
+-- the other side, where the flag being right is what hid it.
+--
+-- THE CHOICE, AND WHY NOT 83 POLICIES. The alternative is a permissive write policy per table,
+-- regenerated whenever a table is added — which is the hand-maintained-list shape this schema has
+-- been bitten by repeatedly, and it would leave the next new table silently unwritable in exactly
+-- the same way. RLS on `market` exists to bound what the PUBLIC can read, not to constrain the
+-- writer: `ingest_rw` already holds explicit DML grants on these tables and the database password
+-- to use them. Giving it the same capability the writer it replaces already has says that plainly,
+-- and its blast radius is bounded by its grants — which do not include `public`, and which
+-- migration 207 deliberately narrowed inside `ingest` so the worker still cannot forge a task.
+alter role ingest_rw bypassrls;
