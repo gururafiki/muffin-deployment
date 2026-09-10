@@ -360,8 +360,16 @@ jobs:
           PGPASSWORD: postgres
         run: |
           set -euo pipefail
+          # `pg_dump` REFUSES A NEWER SERVER — `aborting because of server version mismatch` — and
+          # the runner ships client 16 against this job's Postgres 17 service. `psql` does not care,
+          # which is why only the dumps need this. Same image as the service, so the client always
+          # matches whatever the service is pinned to.
+          pgdump() {
+            docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
+              pg_dump -h localhost -U postgres "$@"
+          }
           dump() {  # schema only, ours only, and stable enough to diff
-            pg_dump -h localhost -U postgres --schema-only --no-owner --no-privileges \
+            pgdump --schema-only --no-owner --no-privileges \
               --schema=market --schema=api --schema=ingest "$1" \
               | grep -vE '^(--|SET |SELECT pg_catalog|$)'
           }
@@ -392,7 +400,8 @@ jobs:
           PGPASSWORD: postgres
         run: |
           mkdir -p /tmp/baseline
-          pg_dump -h localhost -U postgres --schema-only --no-owner --no-privileges \
+          docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
+            pg_dump -h localhost -U postgres --schema-only --no-owner --no-privileges \
             --schema=market --schema=api --schema=ingest postgres \
             > /tmp/baseline/candidate_baseline.sql || true
       - name: Upload it
@@ -421,7 +430,8 @@ jobs:
              create role anon nologin; create role authenticated nologin;
              create role service_role nologin bypassrls;"
           snap() {
-            pg_dump -h localhost -U postgres --schema-only --no-owner alwaystest \
+            docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
+              pg_dump -h localhost -U postgres --schema-only --no-owner alwaystest \
               | grep -vE '^(--|SET |SELECT pg_catalog|$)'
           }
           for pass in 1 2; do
