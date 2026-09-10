@@ -680,9 +680,14 @@
             --entrypoint /usr/local/bin/supabase \
             supabase/postgres:17.6.1.136 "$@"
         }
-        # A PRECONDITION, NOT AN ASSUMPTION. The bind-mounted binary has to actually run in this
-        # image's userland; a linkage change would otherwise surface as a failed `db push` in the
-        # middle of a deploy rather than as the one-line cause.
+        # A PRECONDITION, NOT AN ASSUMPTION: the bind-mounted binary has to actually run inside
+        # this image. A linkage change would otherwise surface as a failed push in the middle of a
+        # deploy rather than as the one-line cause.
+        # (NO APOSTROPHES ANYWHERE IN THIS BLOCK, comments included. Ansible runs `split_args`
+        # over a `shell:` body to find key=value arguments, and a single-quote character opens a
+        # quoted region there even inside a comment. One unmatched apostrophe fails the WHOLE PLAY
+        # at parse time with `failed at splitting arguments, either an unbalanced jinja2 block or
+        # quotes`, and it points at the first line of the block rather than at the word.)
         run_cli --version >/dev/null
         run_cli db push --db-url "postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres"
       args:
