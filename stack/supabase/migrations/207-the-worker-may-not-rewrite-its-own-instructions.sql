@@ -161,28 +161,7 @@ begin
   end loop;
 end $$;
 
--- The worker READS the ledger and APPENDS to `attempt`. Everything else it does, it does through a
--- function that carries an invariant. Derived rather than listed, so a control table added later
--- is protected by existing rather than by being remembered.
-do $$
-declare t record;
-begin
-  for t in
-    select c.relname
-      from pg_class c join pg_namespace n on n.oid = c.relnamespace
-     where n.nspname = 'ingest' and c.relkind = 'r' and c.relname <> 'attempt'
-  loop
-    execute format('revoke insert, update, delete on ingest.%I from ingest_rw', t.relname);
-  end loop;
-end $$;
-
--- 206's `alter default privileges` would hand DML on the next `ingest` table straight back. Narrow
--- it to select, and let the loop above stay the thing that decides.
-alter default privileges in schema ingest revoke insert, update, delete on tables from ingest_rw;
-alter default privileges in schema ingest grant select on tables to ingest_rw;
--- `attempt` is the exception and is re-granted explicitly, because a killed run leaving a record is
--- the property that made `security-cn-segments` visible after two silent days.
-grant insert, update, select on ingest.attempt to ingest_rw;
+-- MUTATION: the revoke block and the default-privilege narrowing are removed.
 
 comment on function ingest.sync_population(text) is
   'Enqueue the subjects a facet owes that are not already in the ledger, assigning a stored round '
