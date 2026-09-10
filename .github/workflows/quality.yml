@@ -431,6 +431,40 @@ jobs:
           path: /tmp/baseline
           if-no-files-found: ignore
 
+      # NEW MIGRATIONS ARE THE ONLY PLACE SCHEMA WORK GOES NOW, AND NOTHING WAS APPLYING THEM.
+      #
+      # Before the Supabase-CLI cutover a new migration joined the set this job applies, so it was
+      # exercised by every step below it. After it, `migrations/` holds the baseline plus everything
+      # since — and this job applied ONLY the baseline, into a throwaway database, purely to prove
+      # equivalence. So the first migration written after 2026-09-10 would have reached production
+      # without CI ever running it, and the behaviour tests would have been asserting against a
+      # schema that did not include it.
+      #
+      # Applied AFTER the equivalence proof, deliberately: that proof dumps this database and
+      # compares it with the baseline, and anything applied earlier would show up as a difference
+      # between them. And applied ONCE, not twice — `supabase db push` runs a migration exactly
+      # once, so the old "must apply twice" discipline describes a deploy model that no longer
+      # exists. Idempotency is now `always/`'s property, not every migration's.
+      - name: Apply the migrations written since the baseline
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          files=$(ls stack/supabase/migrations/*.sql | grep -v '_baseline\.sql$' | sort || true)
+          if [ -z "$files" ]; then
+            echo "  ok  nothing since the baseline"
+            exit 0
+          fi
+          for f in $files; do
+            if ! psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 \
+                   -f "$f" > /tmp/m.out 2>&1; then
+              echo "::error::$(basename "$f") failed: $(grep -m1 ERROR /tmp/m.out)"
+              cat /tmp/m.out
+              exit 1
+            fi
+            echo "  ok  $(basename "$f")"
+          done
+
       # `always/` RUNS ON EVERY DEPLOY, SO IT MUST BE SAFE TO RUN ON EVERY DEPLOY.
       #
       # It cannot be exercised against `auth.users` here, so this asserts the property that does not

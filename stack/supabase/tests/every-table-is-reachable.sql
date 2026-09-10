@@ -26,7 +26,25 @@ declare
   exempt     text[] := array['refresh_log'];
 begin
   for t in
-    select tablename from pg_tables where schemaname = 'market' order by tablename
+    -- NOT `pg_tables`, WHICH LISTS EVERY PARTITION AND WOULD CRY WOLF ON ALL OF THEM.
+    --
+    -- Measured on the node 2026-09-10, inside a rolled-back transaction: with `grant select,
+    -- insert` on a partitioned PARENT only, `service_role` inserts and selects through the parent
+    -- perfectly, while `has_table_privilege('service_role', '<partition>', 'SELECT')` is FALSE —
+    -- a partition's own ACL is empty and is never consulted when the query names the parent. So
+    -- `market.price_bar`'s sixty-one yearly partitions would each be reported as unreachable
+    -- while the table they belong to is fully reachable.
+    --
+    -- This NARROWS the check to the relation an access path actually names; it does not loosen it.
+    -- The parent is still asserted, and a partitioned table with no grant on the parent still
+    -- fails — which is the defect this test exists for.
+    select c.relname
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'market'
+       and c.relkind in ('r', 'p')     -- ordinary and partitioned tables
+       and not c.relispartition        -- ... but never a partition, which is reached via its parent
+     order by c.relname
   loop
     if t = any(exempt) then continue; end if;
 

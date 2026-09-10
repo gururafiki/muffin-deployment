@@ -1175,8 +1175,22 @@ services:
       FRED_API_KEY: "{{ fred_api_key | default('') }}"
       DART_API_KEY: "{{ dart_api_key | default('') }}"
       EDINET_API_KEY: "{{ edinet_api_key | default('') }}"
+      # Where stage 1 lands what a provider actually said, before anything interprets it. Stage 2
+      # reads it, which is what makes re-running a transformation after a logic fix cost no
+      # provider request.
+      MUFFIN_RAW_ROOT: /var/lib/muffin-ingest/raw
     volumes:
       - /home/ubuntu/dagster:/opt/dagster/home:ro
+      # A SECOND MOUNT, WRITABLE, RATHER THAN LOOSENING THE FIRST. `DAGSTER_HOME` is read-only on
+      # purpose: Dagster's telemetry tried to write into it and crash-looped the daemon, and the
+      # answer was to turn telemetry off rather than hand three containers a writable config
+      # directory. Raw needs write access and has nothing to do with the instance config, so it
+      # gets its own mount — on /mnt/data, because / is a 45 GB boot volume at 74%.
+      #
+      # ONLY THIS SERVICE. `DefaultRunLauncher` executes a run as a subprocess of the code
+      # location's gRPC server, so the runs that write raw live in THIS container; the daemon and
+      # the webserver never touch the files.
+      - /mnt/data/ingest/raw:/var/lib/muffin-ingest/raw
     networks:
       - muffin-net
     deploy:
