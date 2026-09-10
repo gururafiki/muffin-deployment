@@ -23,6 +23,14 @@ set -euo pipefail
 
 IMAGE="${MUFFIN_CLI_IMAGE:-debian:12-slim}"
 PW_FILE="${MUFFIN_DB_PW_FILE:-/root/.muffin-db-pw}"
+# THE PROJECT ROOT IS THE DIRECTORY THAT *CONTAINS* `supabase/`, NOT THE `supabase/` FOLDER.
+# Mounting the folder itself as the working directory makes every command look one level too high:
+#
+#     glob supabase/migrations/20260910000000_*.sql: file does not exist
+#
+# so the staged directory is mounted AT `/work/supabase` and the working directory is `/work`.
+# Mounted precisely rather than by mounting the parent, which would hand the container everything
+# else staged under /home/ubuntu for no reason.
 PROJECT="${MUFFIN_SUPABASE_DIR:-/home/ubuntu/supabase}"
 
 pw=$(cat "$PW_FILE")
@@ -30,7 +38,7 @@ pw=$(cat "$PW_FILE")
 run() {
   docker run --rm --network muffin-net \
     -v /usr/local/bin/supabase:/usr/local/bin/supabase:ro \
-    -v "$PROJECT":/work -w /work \
+    -v "$PROJECT":/work/supabase -w /work \
     --entrypoint /usr/local/bin/supabase \
     "$IMAGE" "$@"
 }
