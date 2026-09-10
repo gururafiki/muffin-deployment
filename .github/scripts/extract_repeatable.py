@@ -114,6 +114,27 @@ def psql(dsn: str, sql: str, *, params: dict[str, object] | None = None) -> str:
     return out.stdout
 
 
+#: `pg_get_viewdef` IS NOT ROUND-TRIP STABLE, and exactly one construct in this schema shows it.
+#:
+#: A `union all` arm carrying an unaliased literal renders as `'sector'::text`. Recreating the view
+#: from that text makes Postgres assign the DEFAULT alias — the type name — so it re-renders as
+#: `'sector'::text AS text`, and the extraction is then different from the thing it extracted.
+#: `coverage_current` does this eleven times.
+#:
+#: The difference is cosmetic by construction: a union's output column names come from its FIRST
+#: arm, so an alias on a later arm names nothing. Stripping an alias that merely repeats its own
+#: cast's type is therefore information-preserving, and it is what makes extract -> apply ->
+#: extract a fixed point rather than an oscillation.
+#:
+#: Deliberately narrow. It does not touch `AS anything_else`, and an alias that genuinely reads
+#: `AS text` was already the default it is being compared to.
+_DEFAULT_ALIAS = re.compile(r"::(\w+) AS \1\b")
+
+
+def _stable(sql: str) -> str:
+    return _DEFAULT_ALIAS.sub(r"::\1", sql)
+
+
 def definition(dsn: str, kind: str, schema: str, name: str, oid: str) -> str:
     ident = f"{schema}.{name}"
     if kind == "function":
@@ -126,7 +147,7 @@ def definition(dsn: str, kind: str, schema: str, name: str, oid: str) -> str:
         body = psql(dsn, f"select pg_get_functiondef({oid}::oid)")
         return body.strip() + ";\n"
 
-    body = psql(dsn, f"select pg_get_viewdef({oid}::oid, true)").strip()
+    body = _stable(psql(dsn, f"select pg_get_viewdef({oid}::oid, true)").strip())
     # `IF EXISTS` DOES NOT PROTECT AGAINST A RELKIND MISMATCH: `drop view if exists` on a
     # materialized view raises `"x" is not a view`, and the converse raises too — so NEITHER
     # ordering of the two is safe and the object survives both. A relkind-aware block is the only
