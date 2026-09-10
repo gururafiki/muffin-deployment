@@ -231,6 +231,15 @@ begin
   reset role;
 end $$;
 
-rollback;
+-- `raise notice`, NOT `\echo`. The CI runner prints `sed -n 's/.*NOTICE: *//p'`, so an `\echo`
+-- passes and shows NOTHING — which is the silent-success trap the step's own comment warns about,
+-- and it means a test could be deleted without the log changing.
+do $$
+begin
+  raise notice 'ok  the queue fills breadth-first and a page of two reaches two companies';
+  raise notice 'ok  a stored round survives a drain; a new filing joins the back of its own queue';
+  raise notice 'ok  ingest_rw cannot rewrite a facet, forge an absence or raise its own quota';
+  raise notice 'ok  it can still append an attempt, which is what makes a killed run visible';
+end $$;
 
-\echo 'ok: the queue fills breadth-first, a stored round survives a drain, and the worker cannot forge an absence or rewrite its instructions'
+rollback;
