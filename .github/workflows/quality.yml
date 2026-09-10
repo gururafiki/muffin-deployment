@@ -449,10 +449,20 @@ jobs:
           # NO ROLE CREATION HERE: roles are CLUSTER-wide, not per-database, so the first step's
           # `create role anon` already made them and repeating it fails with `role "anon" already
           # exists`. Only the auth stubs are per-database.
+          # SORTED, AND THAT IS THE POINT RATHER THAN A CONVENIENCE. `pg_dump` emits GRANTs in ACL
+          # ARRAY order, and re-granting an existing privilege REORDERS the array — pass 2 produced
+          # the identical five grants with `service_role` moved ahead of `authenticated`. Comparing
+          # line by line would call that a schema change for ever.
+          #
+          # Sorting asks the question this check actually means: is the same SET of statements
+          # present? An added, removed or altered grant still shows; only pure reordering is
+          # forgiven, which is exactly the artifact.
           snap() {
             docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
               pg_dump -h localhost -U postgres --schema-only --no-owner alwaystest \
-              | grep -vE '^(--|SET |SELECT pg_catalog|$)'
+              | python3 .github/scripts/sqlnorm.py \
+              | grep -vE '^(--|SET |SELECT pg_catalog|$)' \
+              | sort
           }
           for pass in 1 2; do
             for f in $(ls stack/supabase/always/*.sql | sort); do
