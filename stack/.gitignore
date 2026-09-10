@@ -1,6 +1,11 @@
 # Runtime artifacts copied in from the muffin-agent repo before deploy (not secrets,
 # but environment-specific — keep them out of version control).
-config.toml
+#
+# ANCHORED. Unanchored, `config.toml` matches at ANY depth, and it silently blocked
+# `stack/supabase/config.toml` — the Supabase CLI project root — from ever being committed. It also
+# matched nothing that exists: the opensandbox config it was written for lives at
+# `config/opensandbox/config.toml`, outside this directory entirely.
+/config.toml
 searxng/
 
 # Filled deployment config + secrets (commit the .example files only).

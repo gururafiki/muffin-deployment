@@ -1,0 +1,18 @@
+# The Supabase CLI project root. Deliberately minimal: this deployment is SELF-HOSTED, so the CLI
+# is used for exactly three commands and never to run a stack —
+#
+#   supabase db push   --db-url …   apply pending migrations on the node (the deploy)
+#   supabase db diff   -f <name>    generate a migration from schemas/ (a developer/CI step)
+#   supabase migration repair       mark the baseline applied, once
+#
+# `supabase start` is not used and must not be: the stack here is `stack/docker-compose.yaml`,
+# rendered by Ansible and deployed to Swarm. A `config.toml` that described services would be a
+# second, divergent description of the deployment — the same-fact-in-two-places failure this repo
+# has hit repeatedly (the venue map, the gauge sets, the form vocabulary).
+project_id = "muffin"
+
+[db]
+# Matches the running Postgres (supabase/postgres:17.6.1.136). The CLI uses this to pick the image
+# for its SHADOW database when generating a diff, so a mismatch would diff against the wrong
+# server version and generate migrations that do not apply here.
+major_version = 17
