@@ -272,8 +272,27 @@ jobs:
           AWS_SECRET_ACCESS_KEY:             ${{ secrets.TFSTATE_S3_SECRET_ACCESS_KEY }}
           AWS_REQUEST_CHECKSUM_CALCULATION:  when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION:  when_required
-          # ansible.cfg sets stdout_callback=yaml (nice locally); force the built-in in CI so we
-          # don't depend on the community.general yaml callback being present. Inherited by local-exec.
+          # THE PLAYBOOK IS 27 OF THIS RUN'S 29 MINUTES AND HAD NO PER-TASK VISIBILITY AT ALL.
+          # Measured on run 34414969842: `ansible_playbook.muffin` took 27m02s while Terraform
+          # itself took ~2 minutes, and the provider CAPTURES Ansible's stdout into an attribute
+          # rather than streaming it — so the deploy log holds nothing but `Still creating...`
+          # every ten seconds. Every claim about what makes a deploy slow has therefore been an
+          # inference. (The one that prompted this: the rework plan blames re-applying the 206
+          # migrations, and `quality.yml` applies that whole set FOUR TIMES plus 85 tests in 43
+          # seconds — so on an empty database the DDL is not the cost. What it costs against
+          # production, nobody has measured.) `ansible.posix.profile_tasks` prints a per-task
+          # duration table at the end of the run; the step below lifts it out of state into the
+          # job summary. `ansible.posix` is already pinned in ansible/requirements.yml.
+          ANSIBLE_CALLBACKS_ENABLED:         ansible.posix.profile_tasks
+          PROFILE_TASKS_SORT_ORDER:          descending
+          PROFILE_TASKS_TASK_OUTPUT_LIMIT:   "25"
+          # `ansible/ansible.cfg` IS NOT READ BY THIS DEPLOY, which is why every Ansible setting
+          # here is an environment variable. Ansible discovers a config file from $ANSIBLE_CONFIG
+          # or the CURRENT DIRECTORY, and the provider runs `ansible-playbook` from `terraform/`
+          # — so the file one directory over is never found, locally or in CI. That is also why
+          # `ansible.tf` passes `ansible_ssh_common_args` explicitly rather than relying on the
+          # `host_key_checking` line sitting in that file. This comment previously said
+          # "ansible.cfg sets stdout_callback=yaml"; it sets no such thing and never did.
           ANSIBLE_STDOUT_CALLBACK:           default
           TF_VAR_tenancy_ocid:               ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_user_ocid:                  ${{ secrets.OCI_USER_OCID }}
@@ -294,3 +313,59 @@ jobs:
           TF_VAR_cloudflare_supabase_subdomain: ${{ vars.SUPABASE_SUBDOMAIN || 'supabase' }}
           TF_VAR_cloudflare_studio_subdomain:   ${{ vars.STUDIO_SUBDOMAIN || 'supabase-studio' }}
           TF_VAR_cloudflare_access_emails:   ${{ vars.ACCESS_EMAILS }}
+
+      # WHERE THE PLAYBOOK'S TWENTY-SEVEN MINUTES WENT.
+      #
+      # The provider stores Ansible's whole stdout in `ansible_playbook_stdout` and streams none
+      # of it, so the timing table `profile_tasks` prints exists only in state. This lifts out the
+      # table and nothing else: the block after the final `====` rule, which is task names and
+      # durations. Deliberately NOT the full stdout — that would put every task's output into a
+      # public job summary, and `no_log` covers the tasks that stage secrets but nothing promises
+      # a future task will not echo one.
+      #
+      # `if: always()` and a non-zero exit that never fails the job: a broken instrument must not
+      # break a deploy that worked. It DOES warn when it finds no table, because an instrument
+      # that silently reports nothing is worse than none — you go on believing you have one.
+      - name: Where the playbook's minutes went
+        if: always()
+        working-directory: terraform
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID:                 ${{ secrets.TFSTATE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:             ${{ secrets.TFSTATE_S3_SECRET_ACCESS_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION:  when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION:  when_required
+        run: |
+          terraform show -json > /tmp/state.json 2>/dev/null || { echo "::warning::terraform show failed; no task timings"; exit 0; }
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, re, os, sys
+
+          state = json.load(open("/tmp/state.json"))
+          out = ""
+          for r in state.get("values", {}).get("root_module", {}).get("resources", []):
+              if r.get("address") == "ansible_playbook.muffin":
+                  out = r.get("values", {}).get("ansible_playbook_stdout") or ""
+
+          # profile_tasks closes with a rule of '=' and then one line per task. Take the LAST such
+          # rule: a task's own output could contain one, and only the final block is the summary.
+          rules = [m.start() for m in re.finditer(r"^={60,}\s*$", out, re.M)]
+          if not out or not rules:
+              print("### Playbook task timings\n\n_No `profile_tasks` table in the playbook output._")
+              print("::warning::no profile_tasks table found in ansible_playbook_stdout", file=sys.stderr)
+              raise SystemExit(0)
+
+          table = out[rules[-1]:].strip().splitlines()[1:]
+          # The recap line is keyed on the INVENTORY NAME, which here is the node's IP — so the
+          # obvious `^(\w[\w\s]*?)` does not match it, and the first version of this silently
+          # dropped the ok/changed counts while the table above rendered perfectly.
+          recap = re.findall(r"^(\S+)\s*:\s*ok=(\d+)\s+changed=(\d+)", out, re.M)
+
+          print("### Playbook task timings (slowest first)\n")
+          if recap:
+              host, ok, changed = recap[-1]
+              print(f"`{host.strip()}` — {ok} ok, {changed} changed\n")
+          print("```")
+          print("\n".join(table))
+          print("```")
+          PY
+
