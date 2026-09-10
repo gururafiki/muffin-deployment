@@ -502,7 +502,7 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/extract_repeatable.py \
             --dsn "postgresql://postgres@localhost:5432/postgres" --out /tmp/extracted
-          if ! diff -ru stack/supabase/repeatable /tmp/extracted > /tmp/bundle.diff; then
+          if ! diff -ru stack/supabase/schemas /tmp/extracted > /tmp/bundle.diff; then
             echo "::error::the repeatable bundle no longer matches the migrations — regenerate it"
             head -60 /tmp/bundle.diff
             echo "regenerate: download the `repeatable-bundle` artifact from this run and commit it"
@@ -537,13 +537,13 @@ jobs:
           set -euo pipefail
           # `check_function_bodies = off` is what lets functions be created before the views they
           # read — the same ordering `pg_dump` uses, and for the same reason.
-          { echo "set check_function_bodies = off;"; cat stack/supabase/repeatable/*.sql; } \
+          { echo "set check_function_bodies = off;"; cat stack/supabase/schemas/*.sql; } \
             | psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 > /tmp/b.out 2>&1 \
             || { echo "::error::the bundle failed to apply: $(grep -m1 ERROR /tmp/b.out)"; cat /tmp/b.out; exit 1; }
 
           python3 .github/scripts/extract_repeatable.py \
             --dsn "postgresql://postgres@localhost:5432/postgres" --out /tmp/reextracted
-          if ! diff -ru stack/supabase/repeatable /tmp/reextracted > /tmp/after.diff; then
+          if ! diff -ru stack/supabase/schemas /tmp/reextracted > /tmp/after.diff; then
             echo "::error::applying the bundle CHANGED an object definition:"
             head -80 /tmp/after.diff
             exit 1
