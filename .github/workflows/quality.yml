@@ -400,9 +400,14 @@ jobs:
           PGPASSWORD: postgres
         run: |
           mkdir -p /tmp/baseline
+          # `\restrict` / `\unrestrict` are pg_dump SESSION artifacts carrying a random token, so
+          # they differ on every dump — committed, they would make the baseline look changed every
+          # time it was regenerated. They are also psql META-COMMANDS, and this job's psql is a
+          # version behind the server. Dropped; the rest is plain SQL.
           docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
             pg_dump -h localhost -U postgres --schema-only --no-owner --no-privileges \
             --schema=market --schema=api --schema=ingest postgres \
+            | grep -vE '^\\(un)?restrict ' \
             > /tmp/baseline/candidate_baseline.sql || true
       - name: Upload it
         if: always()
