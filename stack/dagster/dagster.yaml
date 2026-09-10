@@ -17,6 +17,19 @@ storage:
       db_name: dagster
       port: 5432
 
+# OFF, AND IT IS NOT A PREFERENCE — IT WAS CRASH-LOOPING THE DAEMON. Dagster OSS reports anonymous
+# usage telemetry by default and writes its state under `$DAGSTER_HOME`, which is bind-mounted
+# READ-ONLY into all three services (the config is staged by Ansible and its hash restarts them):
+#
+#     OSError: [Errno 30] Read-only file system: '/opt/dagster/home/.telemetry'
+#
+# The daemon exits 1 on it, so Swarm restarts it, so it exits again. Making the mount writable
+# would fix the symptom and hand a read-write DAGSTER_HOME to three containers for the sake of a
+# feature this deployment should not be using anyway: it is an internal service on a private
+# overlay, and its asset names are this pipeline's schema.
+telemetry:
+  enabled: false
+
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator

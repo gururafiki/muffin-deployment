@@ -781,12 +781,23 @@
         executable: /bin/bash
       changed_when: false
 
+    # `postgres` IS NOT A SUPERUSER ON SUPABASE, and PostgreSQL 16 made that matter here.
+    # `create database … owner <role>` now requires the creating role to be able to SET ROLE to the
+    # owner — a superuser bypasses it, and `pg_roles` says `rolsuper = f` for `postgres` on this
+    # image (it has createdb and createrole; `supabase_admin` is the superuser). So the obvious
+    # statement fails with a message that mentions neither database nor privilege system:
+    #
+    #     ERROR:  must be able to SET ROLE "dagster"
+    #
+    # `grant dagster to postgres` makes it a member and satisfies the rule. Idempotent, and it
+    # grants nothing meaningful — `postgres` administers this cluster already.
     - name: Create the dagster database if it does not exist
       shell: |
         set -e
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -c "grant dagster to postgres" </dev/null
         if ! docker exec "$db" psql -U postgres -tAc "select 1 from pg_database where datname='dagster'" | grep -q 1; then
-          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -c "create database dagster owner dagster"
+          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -c "create database dagster owner dagster" </dev/null
         fi
       args:
         executable: /bin/bash

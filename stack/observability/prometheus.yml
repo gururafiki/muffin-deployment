@@ -48,10 +48,22 @@ scrape_configs:
     static_configs:
       - targets: ["postgres-exporter:9187"]
 
-  # The ingestion worker's own view of every provider call: requests, throttles, quota and rows
-  # written, counted AT THE CALLER. `http-cache` cannot see these — calls openbb makes inside its
-  # own process never traverse the proxy, and that is the rate limit that matters most.
-  - job_name: muffin-ingest
-    static_configs:
-      - targets: ["muffin-ingest:9102"]
+  # NOT YET. The ingestion worker will expose its own view of every provider call — requests,
+  # throttles, quota and rows written, counted AT THE CALLER, which `http-cache` cannot see because
+  # calls openbb makes inside its own process never traverse the proxy. The counters exist in
+  # `muffin_ingest.http.client`; nothing calls them yet, and no exporter is started, so this job
+  # scraped a port nothing listens on and sat DOWN from the moment it shipped.
+  #
+  # A permanently-red target is worse than a missing one: it is the same failure as a permanently
+  # red gate, and the cost is never the ignored target, it is the next real one behind it.
+  #
+  # It comes back with the first facet, together with the piece that is actually missing: a
+  # `prometheus_client` exporter in MULTIPROCESS mode. Each Dagster run is a subprocess of the code
+  # location, so the counters live in short-lived children — one exporter in the parent aggregating
+  # `PROMETHEUS_MULTIPROC_DIR` (already set on the service) is the only shape that works, and it
+  # needs `mark_process_dead` on run exit or the per-PID files grow without bound.
+  #
+  # - job_name: muffin-ingest
+  #   static_configs:
+  #     - targets: ["muffin-ingest:9102"]
 
