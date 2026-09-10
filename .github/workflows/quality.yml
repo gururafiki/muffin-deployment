@@ -336,6 +336,69 @@ jobs:
       # Applying cleanly is only half the contract — a view can be valid SQL and still express an
       # invariant that can never be satisfied. `pending_industry` did exactly that: it reported work
       # forever while the same 300 securities were re-fetched on every run, with no error anywhere.
+      # THE REPEATABLE BUNDLE MUST BE WHAT THE MIGRATIONS PRODUCE.
+      #
+      # `create or replace view` can only APPEND columns, so the earliest file defining a view can
+      # never replace the latest one's shape — and the set has grown to where **36 of 84 views and
+      # 10 of 40 functions are defined more than once**, up to TWELVE times for
+      # `symbol_cache_classification`. Every deploy re-runs all twelve, and any definer that has to
+      # change a shape must `drop` first: a real window, every deploy, in which a view and its
+      # dependents do not exist. `permission denied for view pending_segments` has been seen in
+      # `refresh_run` for exactly that.
+      #
+      # The other half is silent. Migration 106 rebuilt `symbol_cache_classification` from
+      # migration 050's nine entries and deleted the eight added since; only a behaviour test
+      # naming all seventeen caught it. One definition per object makes that impossible.
+      #
+      # This does NOT change how deploys work yet. It extracts the definitions the migrations
+      # actually produced and fails if the committed bundle differs — so while both exist they
+      # cannot drift, and the cutover becomes a small change rather than a leap.
+      - name: The repeatable bundle matches what the migrations produce
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/extract_repeatable.py \
+            --dsn "postgresql://postgres@localhost:5432/postgres" --out /tmp/extracted
+          if ! diff -ru stack/supabase/repeatable /tmp/extracted > /tmp/bundle.diff; then
+            echo "::error::the repeatable bundle no longer matches the migrations — regenerate it"
+            head -60 /tmp/bundle.diff
+            echo "regenerate: download the `repeatable-bundle` artifact from this run and commit it"
+            exit 1
+          fi
+          echo "  ok  $(ls /tmp/extracted | wc -l | tr -d ' ') objects match the migrations"
+      # The extraction is reproducible from the migrations, so a mismatch is regenerated rather
+      # than hand-edited: `create or replace view` output is the SERVER's own rendering, and hand
+      # editing it would reintroduce exactly the drift this check exists to prevent.
+      - name: Publish the extraction so a mismatch can be regenerated
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repeatable-bundle
+          path: /tmp/extracted
+          if-no-files-found: ignore
+
+      # AND APPLYING IT MUST BE A NO-OP AGAINST THE SCHEMA THE MIGRATIONS BUILT.
+      #
+      # Extraction proves the bundle SAYS the same thing. This proves it DOES: applied over the
+      # migrated schema, in one transaction exactly as the deploy will, every definition comes back
+      # byte-identical. A bundle that reproduces its own text but changes a view is the failure
+      # mode that would be invisible until an app query returned a different shape.
+      - name: Applying the bundle changes nothing
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          before=$(psql -h localhost -U postgres -tAc "select c.relname, pg_get_viewdef(c.oid, true) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('market','api') and c.relkind in ('v','m') order by 1" | sha1sum)
+          # `check_function_bodies = off` is what lets functions be created before the views they
+          # read, which is how `pg_dump` orders a restore for the same reason.
+          { echo "set check_function_bodies = off;"; cat stack/supabase/repeatable/*.sql; } \
+            | psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 > /tmp/b.out 2>&1 \
+            || { echo "::error::the bundle failed to apply: $(grep -m1 ERROR /tmp/b.out)"; cat /tmp/b.out; exit 1; }
+          after=$(psql -h localhost -U postgres -tAc "select c.relname, pg_get_viewdef(c.oid, true) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('market','api') and c.relkind in ('v','m') order by 1" | sha1sum)
+          [ "$before" = "$after" ] || { echo "::error::applying the bundle CHANGED a view definition"; exit 1; }
+          echo "  ok  every view definition is byte-identical after applying the bundle"
+
       - name: Behaviour — every backlog is satisfiable
         env:
           PGPASSWORD: postgres
