@@ -445,9 +445,10 @@ jobs:
           psql -h localhost -U postgres -d alwaystest -q -c \
             "create schema if not exists auth;
              create table if not exists auth.users (id uuid primary key);
-             create or replace function auth.uid() returns uuid language sql as \$\$ select null::uuid \$\$;
-             create role anon nologin; create role authenticated nologin;
-             create role service_role nologin bypassrls;"
+             create or replace function auth.uid() returns uuid language sql as \$\$ select null::uuid \$\$;"
+          # NO ROLE CREATION HERE: roles are CLUSTER-wide, not per-database, so the first step's
+          # `create role anon` already made them and repeating it fails with `role "anon" already
+          # exists`. Only the auth stubs are per-database.
           snap() {
             docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
               pg_dump -h localhost -U postgres --schema-only --no-owner alwaystest \
