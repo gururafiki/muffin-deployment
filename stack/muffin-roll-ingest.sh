@@ -42,12 +42,24 @@ if [ "$running" != "0" ] && [ "$running" != "?" ]; then
   echo "::warning::${running} run(s) in flight; rolling the code location interrupts them"
 fi
 
+# THE RUNNING CONTAINER'S IMAGE, NOT THE SPEC'S — and the first version of this script got it
+# wrong in the direction that matters. After `docker service update --image <tag>` the spec carries
+# the tag with NO digest at all, so `${ref##*@}` returns the whole tag and a no-op roll printed
+# exactly what a successful one printed. A report that cannot distinguish the two certifies
+# everything, which is the failure this whole codebase keeps recording.
+running_image() {
+  local cid
+  cid="$(docker ps -qf "name=$1" | head -1)"
+  [ -n "$cid" ] || { echo ""; return; }
+  docker inspect "$cid" --format '{{.Image}}' 2>/dev/null || echo ""
+}
+
 declare -A BEFORE
 for svc in "${SERVICES[@]}"; do
   ref="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
-  BEFORE["$svc"]="${ref##*@}"
+  BEFORE["$svc"]="$(running_image "$svc")"
   tag="${ref%%@*}"
-  log "rolling $svc  (tag $tag, was ${BEFORE[$svc]})"
+  log "rolling $svc  (tag $tag, running ${BEFORE[$svc]:-unknown})"
   # --force so the tasks are recreated even when the digest is unchanged; --image with the digest
   # STRIPPED so the tag is re-resolved against the registry.
   docker service update --quiet --force --image "$tag" "$svc" >/dev/null
@@ -108,13 +120,20 @@ PY
 done
 
 echo
-echo "== digests =="
+echo "== images =="
+unknown=0
 for svc in "${SERVICES[@]}"; do
-  after="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
-  after="${after##*@}"
-  if [ "$after" = "${BEFORE[$svc]}" ]; then
+  after="$(running_image "$svc")"
+  if [ -z "$after" ]; then
+    printf '%-28s ::error::could not read the running image\n' "$svc"
+    unknown=1
+  elif [ "$after" = "${BEFORE[$svc]}" ]; then
     printf '%-28s unchanged %s\n' "$svc" "$after"
   else
-    printf '%-28s %s -> %s\n' "$svc" "${BEFORE[$svc]}" "$after"
+    printf '%-28s %s -> %s\n' "$svc" "${BEFORE[$svc]:-unknown}" "$after"
   fi
 done
+# An unreadable image is a BROKEN REPORT, not a quiet one. "unchanged" is a legitimate outcome —
+# rolling when nothing new has been pushed — but it has to be a thing this script observed rather
+# than a thing it failed to observe.
+[ "$unknown" -eq 0 ] || { echo "::error::the roll cannot say what is running"; exit 1; }
