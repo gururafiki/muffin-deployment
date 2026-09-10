@@ -389,14 +389,28 @@ jobs:
           PGPASSWORD: postgres
         run: |
           set -euo pipefail
-          before=$(psql -h localhost -U postgres -tAc "select c.relname, pg_get_viewdef(c.oid, true) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('market','api') and c.relkind in ('v','m') order by 1" | sha1sum)
+          defs() {
+            psql -h localhost -U postgres -tAc "select n.nspname || '.' || c.relname || E'\t' || md5(pg_get_viewdef(c.oid, true)) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('market','api') and c.relkind in ('v','m') order by 1"
+          }
+          defs > /tmp/before.txt
           # `check_function_bodies = off` is what lets functions be created before the views they
           # read, which is how `pg_dump` orders a restore for the same reason.
           { echo "set check_function_bodies = off;"; cat stack/supabase/repeatable/*.sql; } \
             | psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 > /tmp/b.out 2>&1 \
             || { echo "::error::the bundle failed to apply: $(grep -m1 ERROR /tmp/b.out)"; cat /tmp/b.out; exit 1; }
-          after=$(psql -h localhost -U postgres -tAc "select c.relname, pg_get_viewdef(c.oid, true) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('market','api') and c.relkind in ('v','m') order by 1" | sha1sum)
-          [ "$before" = "$after" ] || { echo "::error::applying the bundle CHANGED a view definition"; exit 1; }
+          defs > /tmp/after.txt
+          if ! diff -u /tmp/before.txt /tmp/after.txt > /tmp/defs.diff; then
+            echo "::error::applying the bundle CHANGED these view definitions:"
+            grep -E "^[-+][a-z]" /tmp/defs.diff | head -20
+            # The definition itself, for the first one that moved — a hash tells you THAT it
+            # changed and never WHAT, and this check is worthless without the what.
+            name=$(grep -E "^\+[a-z]" /tmp/defs.diff | head -1 | cut -c2- | cut -f1)
+            if [ -n "$name" ]; then
+              echo "--- $name now reads:"
+              psql -h localhost -U postgres -tAc "select pg_get_viewdef('$name'::regclass, true)" | head -40
+            fi
+            exit 1
+          fi
           echo "  ok  every view definition is byte-identical after applying the bundle"
 
       - name: Behaviour — every backlog is satisfiable
