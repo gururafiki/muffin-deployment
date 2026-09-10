@@ -813,6 +813,47 @@ jobs:
       # `dagster-boots` deliberately runs plain postgres and so cannot reproduce this; a static
       # pairing rule is the proportionate cover. It fires on the OWNER form only: `create database
       # x` with no owner is unaffected, and that is the common case.
+      # AN APOSTROPHE IN A `shell:` BLOCK FAILS THE WHOLE PLAY, INCLUDING INSIDE A COMMENT.
+      #
+      # Ansible runs `split_args` over a shell body to find key=value arguments, and a single-quote
+      # character opens a quoted region there. One unmatched apostrophe — "the image's userland" in
+      # a comment — fails at PARSE time with `failed at splitting arguments, either an unbalanced
+      # jinja2 block or quotes`, and the error points at the first line of the block rather than at
+      # the word, so it reads as a problem with the shell rather than with the prose.
+      #
+      # `--syntax-check` already catches it, which is how it was found. This names it instead.
+      - name: Offline check — shell blocks have balanced quotes
+        run: |
+          python3 - <<'PYCHK'
+          import re, sys, glob
+          bad = []
+          for path in sorted(glob.glob('ansible/**/*.yml', recursive=True)):
+              lines = open(path).read().splitlines()
+              starts = [i for i, l in enumerate(lines) if re.match(r'\s*- name:', l)]
+              for n, i in enumerate(starts):
+                  end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                  block, inside, indent = [], False, 0
+                  for line in lines[i:end]:
+                      m = re.match(r'(\s*)shell:\s*[|>]', line)
+                      if m:
+                          inside, indent = True, len(m.group(1))
+                          continue
+                      if inside:
+                          if line.strip() and (len(line) - len(line.lstrip())) <= indent:
+                              inside = False
+                          else:
+                              block.append(line)
+                  body = '\n'.join(block)
+                  if body.count("'") % 2:
+                      bad.append(f"{path}:{i+1}  {lines[i].strip()}")
+          if bad:
+              print("::error::a `shell:` block has an odd number of single quotes — Ansible will "
+                    "fail the whole play at parse time, pointing at the wrong line")
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print('  ok  every shell block has balanced single quotes')
+          PYCHK
       - name: Offline check — creating a database for another owner grants that role first
         run: |
           python3 - <<'PYCHK'
