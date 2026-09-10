@@ -724,7 +724,12 @@
       shell: |
         set -euo pipefail
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
-        docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -c 'select pg_stat_reset()' </dev/null
+        # AS `supabase_admin`, NOT `postgres`. `pg_stat_reset()` is superuser-only by default and
+        # `postgres` is NOT a superuser on this image — the same fact that made
+        # `create database ... owner dagster` fail with `must be able to SET ROLE`. Here it says
+        # `permission denied for function pg_stat_reset`, which reads like a missing grant and is a
+        # missing ROLE. `supabase_admin` is the only superuser in this cluster; checked, not assumed.
+        docker exec "$db" psql -U supabase_admin -v ON_ERROR_STOP=1 -c 'select pg_stat_reset()' </dev/null
         touch /home/ubuntu/.muffin-pg-stats-reset
       args:
         executable: /bin/bash
