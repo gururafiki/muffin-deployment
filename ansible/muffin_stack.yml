@@ -245,7 +245,24 @@
         dest: /home/ubuntu/supabase/kong.yml
         mode: "0644"
 
-    - name: Stage Supabase app migrations (idempotent; applied post-deploy below)
+    - name: Stage the Supabase CLI project root
+      # `supabase db push` reads `config.toml` and `migrations/` from the directory it runs in, so
+      # the node needs the project shape rather than a bare pile of SQL.
+      copy:
+        src: "{{ muffin_template_dir }}/supabase/config.toml"
+        dest: /home/ubuntu/supabase/config.toml
+        mode: "0644"
+
+    - name: Stage the always-applied SQL
+      # `always/` is NOT migrations: 001 and 003 are idempotent by design and must run on EVERY
+      # deploy. `003-security.sql` revokes the DEFAULT PRIVILEGES so a table LangGraph creates later
+      # cannot silently re-acquire anon access — it works only because it re-runs.
+      ansible.posix.synchronize:
+        src: "{{ muffin_template_dir }}/supabase/always/"
+        dest: /home/ubuntu/supabase/always/
+        delete: true
+
+    - name: Stage Supabase app migrations (applied by `supabase db push` below)
       ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/supabase/migrations/"
         dest: /home/ubuntu/supabase/migrations/
@@ -598,44 +615,113 @@
       changed_when: false
       when: use_supabase_db | default(false)
 
-    - name: Apply idempotent app migrations (tables + RLS)
-      shell: >
-        docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)"
-        psql -U postgres --single-transaction -v ON_ERROR_STOP=1 -d postgres
-        < "/home/ubuntu/supabase/migrations/{{ item | basename }}"
-      # `--single-transaction` because psql otherwise AUTOCOMMITS EACH STATEMENT, and two
-      # consequences of that both bit today:
-      #
-      #   1. Migration 35 drops the serving views before recreating them (it discovers dependents
-      #      via pg_depend). Autocommitted, that leaves a window where they do not exist, and every
-      #      reader in it fails — `price_series` 42P01, `pending_performance.fetch_symbol does not
-      #      exist`, and a `fund_sector_weight` statement timeout, all chased as bugs before being
-      #      recognised as a deploy in progress.
-      #   2. A migration that fails PART WAY leaves its earlier statements committed. That is how
-      #      migration 38's failure left production without `pending_prices` — 35 had already
-      #      dropped it and 38 died before anything recreated it.
-      #
-      # Verified before enabling: the whole set applies three times under --single-transaction and
-      # all seven behaviour tests pass. Migration 39 carries its own begin/commit for a temp-table
-      # rekey; under this flag its inner commit simply ends the outer transaction early, which is no
-      # worse than the autocommit it has always had.
-      #
-      # `with_fileglob` does NOT sort — it returns Python glob order, which is
-      # filesystem order. Measured 2026-08-09: the migrations ran 04, 01, 05, 02, 03,
-      # so 04/05 hit a `market` schema that 02 had not created yet and the deploy
-      # failed. The numeric prefixes only mean anything if this is sorted.
-      #
-      # AND `| sort` IS LEXICOGRAPHIC, WHICH IS WHY THE PREFIXES ARE ZERO-PADDED.
-      # Jinja has no numeric sort, so the moment a migration numbered 100 existed it
-      # sorted between `02-` and `29-` and ran before the schema it depends on. Caught
-      # locally on the first 3-digit migration; it would have failed the next deploy.
-      # Padding to three digits makes lexicographic order BE numeric order, with no
-      # clever sorting anywhere — and `migrations-sort-numerically.sql` fails CI if a
-      # filename ever stops matching that shape.
-      loop: "{{ query('fileglob', playbook_dir + '/../stack/supabase/migrations/*.sql') | sort }}"
-      loop_control:
-        label: "{{ item | basename }}"
+    # APPLY ONLY WHAT IS PENDING, THE WAY SUPABASE RECOMMENDS.
+    #
+    # This used to be a `with_fileglob` loop applying ALL 204 files on EVERY deploy — 527 seconds,
+    # of which roughly 110 was SQL and the rest Ansible's per-item SSH round trip. Worse than the
+    # time: re-running them meant every view with more than one definer was DROPPED and recreated on
+    # each deploy, and 36 of 84 views had more than one. `permission denied for view
+    # pending_segments` was observed in `refresh_run` for exactly that.
+    #
+    # `supabase db push` applies only migrations absent from `supabase_migrations.schema_migrations`
+    # and records what it applies. The 204 historical files are in `migrations-legacy/`, retired but
+    # kept as the reference the baseline is proven against in CI.
+    #
+    # WHY A CONTAINER FOR A BINARY THAT IS INSTALLED ON THE HOST. Postgres is NOT published on the
+    # host — measured, nothing listens on 5432 — so anything reaching `supabase-db` has to be on the
+    # `muffin-net` overlay. There is also no official Supabase CLI image to run instead: `supabase/cli`
+    # does not exist on Docker Hub (the registry answers 401 for it while `library/postgres` answers
+    # 200 through the same request), so the released binary is the only distribution. It is
+    # DYNAMICALLY LINKED against glibc — `interpreter /lib/ld-linux-aarch64.so.1` — so it cannot run
+    # in an alpine image; `supabase/postgres` is Debian, is the database's own image, and is
+    # therefore guaranteed present on the node.
+    # BASELINE THE EXISTING DATABASE, ONCE.
+    #
+    # Production already HAS the schema those 204 files build, so the baseline must be recorded as
+    # applied rather than run — running it would try to recreate every table that exists. `migration
+    # repair --status applied` inserts the history row and nothing else.
+    #
+    # Guarded on the row's absence, so it is a no-op on every deploy after the first and on any node
+    # that was built after the baseline existed. `changed_when` reflects whether it actually did
+    # anything, so the play's recap does not claim a change it did not make.
+    - name: Baseline the migration history if it has never been recorded
+      shell: |
+        set -euo pipefail
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        version=$(basename /home/ubuntu/supabase/migrations/*_baseline.sql | cut -d_ -f1)
+        recorded=$(docker exec "$db" psql -U postgres -tAc \
+          "select count(*) from supabase_migrations.schema_migrations where version = '$version'" \
+          </dev/null 2>/dev/null | tr -d ' ' || echo 0)
+        if [ "${recorded:-0}" = "0" ]; then
+          docker run --rm --network muffin-net \
+            -v /usr/local/bin/supabase:/usr/local/bin/supabase:ro \
+            -v /home/ubuntu/supabase:/work -w /work \
+            --entrypoint /usr/local/bin/supabase \
+            supabase/postgres:17.6.1.136 \
+            migration repair --status applied "$version" \
+            --db-url "postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres"
+          echo BASELINED
+        else
+          echo ALREADY_BASELINED
+        fi
+      args:
+        executable: /bin/bash
+      register: _supabase_baseline
+      changed_when: "'BASELINED' in _supabase_baseline.stdout and 'ALREADY' not in _supabase_baseline.stdout"
+      no_log: true          # the DSN carries the database password
+
+    - name: Apply pending migrations (supabase db push)
+      shell: |
+        set -euo pipefail
+        run_cli() {
+          docker run --rm --network muffin-net \
+            -v /usr/local/bin/supabase:/usr/local/bin/supabase:ro \
+            -v /home/ubuntu/supabase:/work -w /work \
+            --entrypoint /usr/local/bin/supabase \
+            supabase/postgres:17.6.1.136 "$@"
+        }
+        # A PRECONDITION, NOT AN ASSUMPTION. The bind-mounted binary has to actually run in this
+        # image's userland; a linkage change would otherwise surface as a failed `db push` in the
+        # middle of a deploy rather than as the one-line cause.
+        run_cli --version >/dev/null
+        run_cli db push --db-url "postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres"
+      args:
+        executable: /bin/bash
       changed_when: true
+      no_log: true          # the DSN carries the database password
+
+    # THE DELIBERATELY REPEATABLE HALF, and it must run after `db push` because it grants on tables
+    # the migrations may just have created. One transaction, so a reader never sees a partial state.
+    - name: Apply the always-run SQL (app tables + the anon revoke)
+      shell: |
+        set -euo pipefail
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        cat /home/ubuntu/supabase/always/*.sql \
+          | docker exec -i "$db" psql -U postgres --single-transaction -v ON_ERROR_STOP=1 -d postgres
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: use_supabase_db | default(false)
+
+    # PHASE 0 LEFTOVER: make the Postgres tuning measurable.
+    #
+    # `shared_buffers` went 128 MB -> 1 GB, and the check for it — `pg_statio_user_tables` heap hit
+    # ratio — is CUMULATIVE since the last stats reset. That reset was 2026-07-20, so the ratio
+    # averages 52 days of which one is post-tuning: it cannot show the improvement, and reading it
+    # as "the tuning did nothing" would be wrong in the other direction.
+    #
+    # ONE SHOT, keyed on a marker file, because resetting on every deploy would destroy the very
+    # history the reading needs. It discards STATISTICS only — no data, no plans, no settings.
+    - name: Reset Postgres statistics once, so the tuning can be measured
+      shell: |
+        set -euo pipefail
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -c 'select pg_stat_reset()' </dev/null
+        touch /home/ubuntu/.muffin-pg-stats-reset
+      args:
+        executable: /bin/bash
+        creates: /home/ubuntu/.muffin-pg-stats-reset
+      when: use_supabase_db | default(false)
 
     # Migration 127 creates `metrics_ro` NOLOGIN and passwordless, because migrations are applied
     # by piping the file into psql with NO variable substitution — a password cannot reach that
