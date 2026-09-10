@@ -168,6 +168,31 @@ def definition(dsn: str, kind: str, schema: str, name: str, oid: str) -> str:
     return f"{drop}{verb} {ident} as\n{body}\n"
 
 
+#: DROPPING A VIEW LOSES ITS GRANTS, AND NOTHING ELSE IN THE BUNDLE WOULD PUT THEM BACK.
+#:
+#: Caught the first time this ran: `anon cannot read 40 serving view(s)` — the app's entire read
+#: path, gone, because a recreated view carries only the owner's default ACL. `create or replace
+#: function` is the opposite (it PRESERVES the ACL, which is why a grant in a re-run migration can
+#: only ever ADD a privilege), so functions need nothing here and views need everything.
+#:
+#: Emitted from `relacl` rather than from a list of expected roles: `metrics_ro`, `service_role`,
+#: `anon` and `authenticated` do not hold the same privileges on the same objects, and a list would
+#: be a second copy of the truth that drifts. `aclexplode` says exactly what is there.
+GRANTS_SQL = r"""
+select 'grant ' || string_agg(distinct a.privilege_type, ', ' order by a.privilege_type)
+       || ' on ' || n.nspname || '.' || c.relname
+       || ' to ' || pg_get_userbyid(a.grantee) || ';'
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  cross join lateral aclexplode(c.relacl) a
+ where n.nspname = any(%(schemas)s)
+   and c.relkind in ('v','m')
+   and a.grantee <> c.relowner
+ group by n.nspname, c.relname, a.grantee
+ order by 1
+"""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dsn", required=True)
@@ -191,7 +216,17 @@ def main() -> int:
         path.write_text(definition(args.dsn, kind, schema, name, oid))
         written += 1
 
-    print(f"  ok  extracted {written} objects in dependency order into {args.out}")
+    # LAST, and by a filename that sorts after every object: a grant on a view that has not been
+    # created yet fails the whole transaction. `9999-` beats any four-digit position.
+    grants = [g for g in psql(args.dsn, GRANTS_SQL, params={"schemas": SCHEMAS}).splitlines() if g]
+    (args.out / "9999-grants.sql").write_text(
+        "-- Re-issued because DROPPING A VIEW LOSES ITS ACL. Extracted from `relacl`, so this is\n"
+        "-- what the database actually grants rather than a list of what someone expected.\n"
+        + "\n".join(grants)
+        + "\n"
+    )
+
+    print(f"  ok  extracted {written} objects and {len(grants)} grants into {args.out}")
     return 0
 
 
