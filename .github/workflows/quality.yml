@@ -428,6 +428,46 @@ jobs:
               sys.exit(1)
           print('  ok  every task using bash-only syntax declares bash')
           PYCHK
+      # `psql -c` DOES NOT INTERPOLATE `:'var'`, AND THAT HAS NOW FAILED THREE DEPLOYS.
+      #
+      # psql substitutes variables in its LEXER, on input read from a file or stdin. `-c` hands its
+      # string straight to the server, so `-v pw=… -c "create role x login password :'pw'"` dies
+      # with `syntax error at or near ":"` — the SAME message the dollar-quoted `do $$ … $$` form
+      # produces, which is exactly why it reads as the already-known problem rather than a new one.
+      #
+      # Measured on the node, two commands apart:
+      #   psql -tA -v x=hello -c "select :'x'"   ->  ERROR: syntax error at or near ":"
+      #   echo "select :'x'" | psql -tA -v x=hello  ->  hello
+      #
+      # So a `-c` string containing `:'` or `:"` is always wrong. The fix is to pipe the statement
+      # in, which is the one place `docker exec -i` is required.
+      - name: Offline check — psql variables are not passed to -c
+        run: |
+          python3 - <<'PYCHK'
+          import re, sys, glob
+          bad = []
+          for path in sorted(glob.glob('ansible/*.yml')):
+              lines = open(path).read().splitlines()
+              starts = [i for i, l in enumerate(lines) if re.match(r'\s*- name:', l)]
+              for n, i in enumerate(starts):
+                  end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                  block = '\n'.join(lines[i:end])
+                  # Only the COMMAND matters, never the prose above it: this file explains the trap
+                  # at length, and a check that reads its own documentation as a violation is one
+                  # somebody deletes.
+                  code = '\n'.join(l for l in block.splitlines() if not l.lstrip().startswith('#'))
+                  for m in re.finditer(r'psql[^\n|]*?-c\s+(.)', code):
+                      tail = code[m.start():m.start() + 400]
+                      if re.search(r":'|:\"", tail.split('\n')[0]):
+                          bad.append(f"{path}:{i+1}  {lines[i].strip()}")
+                          break
+          if bad:
+              print("::error::a psql -c string uses :'var' interpolation, which -c does not perform")
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print("  ok  no psql -c string relies on variable interpolation")
+          PYCHK
       # THE COLLECTORS ARE REAL FILES, AND THEY MUST COMPILE. `muffin-service-metrics.py` was once
       # an inline `copy: content:` block and its `{{json .}}` format string killed a deploy, because
       # Ansible renders inline content through Jinja. They are `copy: src:` files now — which also

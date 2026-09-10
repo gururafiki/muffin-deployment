@@ -685,6 +685,15 @@
     #     Ansible's `| to_json` is not the way round it: JSON double quotes are an SQL IDENTIFIER,
     #     so the password arrives as `column "abc123…" does not exist`. Both cost a failed deploy
     #     when the vault secrets were added.
+    #   * AND `psql -c` DOES NOT INTERPOLATE AT ALL, which is the third failed deploy in this
+    #     family. `-c` hands its string to the server as one query without the lexer pass that
+    #     performs substitution, so `-v pw=… -c "create role dagster login password :'pw'"` fails
+    #     with `syntax error at or near ":"` — the SAME message the dollar-quoted version gives,
+    #     which is what makes it look like the known problem rather than a new one. Measured on the
+    #     node, seconds apart: `psql -tA -v x=hello -c "select :'x'"` errors, while the same
+    #     statement fed on STDIN prints `hello`. So these tasks pipe the SQL in, and that is the
+    #     one place `docker exec -i` is REQUIRED — without `-i` the heredoc is discarded and psql
+    #     silently reads nothing.
     #   * `no_log: true` on a task HIDES THE ERROR THAT DIAGNOSES IT — a failure reports only
     #     "the output has been hidden". So it goes on the task whose ONLY job is to stage the
     #     secret, and the tasks that USE it contain no secret and stay loggable.
@@ -709,9 +718,11 @@
         pw=$(cat /root/.muffin-dagster-pw)
         [ -n "$pw" ] || { echo "no dagster password configured — skipping"; exit 0; }
         if docker exec "$db" psql -U postgres -tAc "select 1 from pg_roles where rolname='dagster'" | grep -q 1; then
-          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw" -c "alter role dagster login password :'pw'"
+          echo "alter role dagster login password :'pw'" |
+            docker exec -i "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw"
         else
-          docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw" -c "create role dagster login password :'pw'"
+          echo "create role dagster login password :'pw'" |
+            docker exec -i "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw"
         fi
       args:
         executable: /bin/bash
@@ -737,7 +748,8 @@
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
         pw=$(cat /root/.muffin-ingest-pw)
         [ -n "$pw" ] || { echo "no ingest password configured — skipping"; exit 0; }
-        docker exec "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw" -c "alter role ingest_rw login password :'pw'"
+        echo "alter role ingest_rw login password :'pw'" |
+          docker exec -i "$db" psql -U postgres -v ON_ERROR_STOP=1 -v pw="$pw"
       args:
         executable: /bin/bash
       changed_when: false
