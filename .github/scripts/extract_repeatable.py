@@ -168,6 +168,25 @@ def definition(dsn: str, kind: str, schema: str, name: str, oid: str) -> str:
     return f"{drop}{verb} {ident} as\n{body}\n"
 
 
+#: DROPPING A MATVIEW LOSES ITS INDEXES, AND ONE OF THEM IS LOAD-BEARING.
+#:
+#: Caught on the run after grants: `security_facets has no UNIQUE index — refresh materialized view
+#: concurrently is rejected without one, so every refresh takes ACCESS EXCLUSIVE and blocks all
+#: readers`. The matview would have come back, correct and populated, with a refresh that locks the
+#: thing every aggregate reads for the whole rebuild.
+#:
+#: Only matviews: a plain view has no indexes, and a TABLE's indexes are not this bundle's business
+#: — they belong to the versioned migration that created the table.
+INDEXES_SQL = r"""
+select pg_get_indexdef(i.indexrelid) || ';'
+  from pg_index i
+  join pg_class c on c.oid = i.indrelid
+  join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = any(%(schemas)s) and c.relkind = 'm'
+ order by 1
+"""
+
+
 #: DROPPING A VIEW LOSES ITS GRANTS, AND NOTHING ELSE IN THE BUNDLE WOULD PUT THEM BACK.
 #:
 #: Caught the first time this ran: `anon cannot read 40 serving view(s)` — the app's entire read
@@ -216,6 +235,17 @@ def main() -> int:
         path.write_text(definition(args.dsn, kind, schema, name, oid))
         written += 1
 
+    # After every matview and before the grants. `refresh … concurrently` needs the unique index,
+    # and a `create index` on a relation that does not exist yet fails the whole transaction.
+    indexes = [i for i in psql(args.dsn, INDEXES_SQL, params={"schemas": SCHEMAS}).splitlines() if i]
+    (args.out / "9998-matview-indexes.sql").write_text(
+        "-- Re-issued because DROPPING A MATVIEW LOSES ITS INDEXES. The unique one is not optional:\n"
+        "-- without it `refresh materialized view concurrently` is REJECTED, and every refresh then\n"
+        "-- takes ACCESS EXCLUSIVE on the relation every aggregate reads.\n"
+        + "\n".join(indexes)
+        + "\n"
+    )
+
     # LAST, and by a filename that sorts after every object: a grant on a view that has not been
     # created yet fails the whole transaction. `9999-` beats any four-digit position.
     grants = [g for g in psql(args.dsn, GRANTS_SQL, params={"schemas": SCHEMAS}).splitlines() if g]
@@ -226,7 +256,10 @@ def main() -> int:
         + "\n"
     )
 
-    print(f"  ok  extracted {written} objects and {len(grants)} grants into {args.out}")
+    print(
+        f"  ok  extracted {written} objects, {len(indexes)} matview indexes and "
+        f"{len(grants)} grants into {args.out}"
+    )
     return 0
 
 
