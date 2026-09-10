@@ -289,7 +289,11 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v7
-      - name: Apply migrations twice
+      - name: Apply the legacy migrations twice
+        # STILL APPLIED, AND STILL TWICE — as the REFERENCE the baseline is measured against.
+        # These 204 files are no longer applied by a deploy (see `migrations-legacy/`), but they
+        # remain the definition of what this schema is supposed to be, and the equivalence proof
+        # below is the only thing that makes retiring them safe.
         env:
           PGPASSWORD: postgres
         run: |
@@ -301,7 +305,12 @@ jobs:
           # 01 and 03 reference auth.users / GoTrue-owned schemas, which only exist in a real
           # Supabase stack — they are applied there after GoTrue has migrated, and cannot be
           # exercised here.
-          files=$(ls stack/supabase/migrations/*.sql | grep -vE '/(001|003)-' | sort)
+          # 001 and 003 reference auth.users / GoTrue-owned schemas, which only exist in a real
+          # Supabase stack. They now live in `always/` — they are IDEMPOTENT BY DESIGN and must run
+          # on EVERY deploy, which is exactly why they cannot be baselined: `003-security.sql`
+          # revokes the DEFAULT PRIVILEGES so a table LangGraph creates later cannot silently
+          # re-acquire anon access, and it only works because it re-runs.
+          files=$(ls stack/supabase/migrations-legacy/*.sql | sort)
 
           for pass in 1 2; do
             echo "--- pass $pass ---"
@@ -314,7 +323,7 @@ jobs:
                 exit 1
               fi
             done
-            echo "  ok  $(echo "$files" | wc -l | tr -d ' ') migrations"
+            echo "  ok  $(echo "$files" | wc -l | tr -d ' ') legacy migrations"
 
             # A RE-PARSE TRIGGER MUST FIRE ONCE, NOT ON EVERY DEPLOY.
             # `segment_parser.version` re-queues EVERY filing when it changes. Migration 169
@@ -336,6 +345,139 @@ jobs:
       # Applying cleanly is only half the contract — a view can be valid SQL and still express an
       # invariant that can never be satisfied. `pending_industry` did exactly that: it reported work
       # forever while the same 300 securities were re-fetched on every run, with no error anywhere.
+      # THE BASELINE MUST BE WHAT THE 204 MIGRATIONS PRODUCE. THIS IS THE CHECK THAT MAKES
+      # RETIRING THEM SAFE, AND IT IS THE WHOLE REASON THE CUTOVER IS A SEPARATE PR.
+      #
+      # Baselining marks the historical migrations applied and stops running them. If the baseline
+      # differs from what they build, every future `supabase db diff` is computed against the wrong
+      # starting point and generates migrations that are wrong in a way nothing else would catch.
+      #
+      # The baseline is generated HERE rather than dumped from production, deliberately: a
+      # hand-edit made in Studio would otherwise be baked in and become the definition. The schema
+      # the migrations produce is the definition.
+      - name: The baseline is what the legacy migrations produce
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          # `pg_dump` REFUSES A NEWER SERVER — `aborting because of server version mismatch` — and
+          # the runner ships client 16 against this job's Postgres 17 service. `psql` does not care,
+          # which is why only the dumps need this. Same image as the service, so the client always
+          # matches whatever the service is pinned to.
+          pgdump() {
+            docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
+              pg_dump -h localhost -U postgres "$@"
+          }
+          # NORMALISED, and the two rules live in `sqlnorm.py` because the extractor needs the
+          # identical pair. Both are round-trip artifacts rather than differences in meaning: the
+          # `\restrict` token is random per dump session, and `pg_get_viewdef` re-renders an
+          # unaliased union-arm literal WITH the default alias once the view is recreated from its
+          # own text. Without them this check compares a schema against itself and reports a diff.
+          dump() {  # schema only, ours only, and stable enough to diff
+            pgdump --schema-only --no-owner --no-privileges \
+              --schema=market --schema=api --schema=ingest "$1" \
+              | python3 .github/scripts/sqlnorm.py \
+              | grep -vE '^(--|SET |SELECT pg_catalog|$)'
+          }
+          dump postgres > /tmp/from-legacy.sql
+
+          # A FRESH database, so the baseline is proven to stand on its own rather than to be a
+          # no-op against a schema that already exists.
+          psql -h localhost -U postgres -q -c 'create database baseline'
+          if ! psql -h localhost -U postgres -d baseline -q --single-transaction \
+                 -v ON_ERROR_STOP=1 -f stack/supabase/migrations/*_baseline.sql > /tmp/bl.out 2>&1; then
+            echo "::error::the baseline failed to apply: $(grep -m1 ERROR /tmp/bl.out)"
+            cat /tmp/bl.out; exit 1
+          fi
+          dump baseline > /tmp/from-baseline.sql
+
+          if ! diff -u /tmp/from-legacy.sql /tmp/from-baseline.sql > /tmp/schema.diff; then
+            echo "::error::the baseline does not reproduce the schema the migrations build"
+            head -60 /tmp/schema.diff
+            echo "regenerate: download the \`baseline\` artifact from this run and commit it"
+            exit 1
+          fi
+          echo "  ok  the baseline reproduces the legacy schema exactly"
+
+      # Regenerating is downloading this, never hand-editing: the text is pg_dump's own rendering.
+      - name: Publish the schema the migrations build, so the baseline can be regenerated
+        if: always()
+        env:
+          PGPASSWORD: postgres
+        run: |
+          mkdir -p /tmp/baseline
+          # `\restrict` / `\unrestrict` are pg_dump SESSION artifacts carrying a random token, so
+          # they differ on every dump — committed, they would make the baseline look changed every
+          # time it was regenerated. They are also psql META-COMMANDS, and this job's psql is a
+          # version behind the server. Dropped; the rest is plain SQL.
+          # SCHEMA **AND DATA**, and the reason is specific to this job: in CI the database holds
+          # ONLY what the migrations put there — no ingested securities, prices or filings — so a
+          # full dump captures exactly the SEED DATA of the control tables and nothing else.
+          #
+          # A schema-only baseline would come up with `countries`, `exchange`, `metric`,
+          # `filing_form`, `cron_resource` and the rest EMPTY, so a rebuilt node would have no
+          # control surface at all. That capability exists today (a fresh `terraform apply` replays
+          # the 204 files and gets a seeded database) and must survive baselining.
+          docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
+            pg_dump -h localhost -U postgres --no-owner --no-privileges \
+            --schema=market --schema=api --schema=ingest postgres \
+            | grep -vE '^\\(un)?restrict ' \
+            > /tmp/baseline/candidate_baseline.sql || true
+      - name: Upload it
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: /tmp/baseline
+          if-no-files-found: ignore
+
+      # `always/` RUNS ON EVERY DEPLOY, SO IT MUST BE SAFE TO RUN ON EVERY DEPLOY.
+      #
+      # It cannot be exercised against `auth.users` here, so this asserts the property that does not
+      # need GoTrue: applying it twice to the same database must leave the same schema. An
+      # `always/` file that is not idempotent would fail every deploy after the first.
+      - name: always/ is idempotent
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h localhost -U postgres -q -c 'create database alwaystest'
+          psql -h localhost -U postgres -d alwaystest -q -c \
+            "create schema if not exists auth;
+             create table if not exists auth.users (id uuid primary key);
+             create or replace function auth.uid() returns uuid language sql as \$\$ select null::uuid \$\$;"
+          # NO ROLE CREATION HERE: roles are CLUSTER-wide, not per-database, so the first step's
+          # `create role anon` already made them and repeating it fails with `role "anon" already
+          # exists`. Only the auth stubs are per-database.
+          # SORTED, AND THAT IS THE POINT RATHER THAN A CONVENIENCE. `pg_dump` emits GRANTs in ACL
+          # ARRAY order, and re-granting an existing privilege REORDERS the array — pass 2 produced
+          # the identical five grants with `service_role` moved ahead of `authenticated`. Comparing
+          # line by line would call that a schema change for ever.
+          #
+          # Sorting asks the question this check actually means: is the same SET of statements
+          # present? An added, removed or altered grant still shows; only pure reordering is
+          # forgiven, which is exactly the artifact.
+          snap() {
+            docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
+              pg_dump -h localhost -U postgres --schema-only --no-owner alwaystest \
+              | python3 .github/scripts/sqlnorm.py \
+              | grep -vE '^(--|SET |SELECT pg_catalog|$)' \
+              | sort
+          }
+          for pass in 1 2; do
+            for f in $(ls stack/supabase/always/*.sql | sort); do
+              if ! psql -h localhost -U postgres -d alwaystest -q --single-transaction \
+                     -v ON_ERROR_STOP=1 -f "$f" > /tmp/a.out 2>&1; then
+                echo "::error::$(basename "$f") failed on pass $pass: $(grep -m1 ERROR /tmp/a.out)"
+                cat /tmp/a.out; exit 1
+              fi
+            done
+            snap > "/tmp/always-$pass.sql"
+          done
+          diff -u /tmp/always-1.sql /tmp/always-2.sql \
+            || { echo "::error::always/ is not idempotent — it changes the schema on a second run"; exit 1; }
+          echo "  ok  always/ applies twice with no difference"
+
       # THE REPEATABLE BUNDLE MUST BE WHAT THE MIGRATIONS PRODUCE.
       #
       # `create or replace view` can only APPEND columns, so the earliest file defining a view can
@@ -360,7 +502,7 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/extract_repeatable.py \
             --dsn "postgresql://postgres@localhost:5432/postgres" --out /tmp/extracted
-          if ! diff -ru stack/supabase/repeatable /tmp/extracted > /tmp/bundle.diff; then
+          if ! diff -ru stack/supabase/schemas /tmp/extracted > /tmp/bundle.diff; then
             echo "::error::the repeatable bundle no longer matches the migrations — regenerate it"
             head -60 /tmp/bundle.diff
             echo "regenerate: download the `repeatable-bundle` artifact from this run and commit it"
@@ -395,13 +537,13 @@ jobs:
           set -euo pipefail
           # `check_function_bodies = off` is what lets functions be created before the views they
           # read — the same ordering `pg_dump` uses, and for the same reason.
-          { echo "set check_function_bodies = off;"; cat stack/supabase/repeatable/*.sql; } \
+          { echo "set check_function_bodies = off;"; cat stack/supabase/schemas/*.sql; } \
             | psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 > /tmp/b.out 2>&1 \
             || { echo "::error::the bundle failed to apply: $(grep -m1 ERROR /tmp/b.out)"; cat /tmp/b.out; exit 1; }
 
           python3 .github/scripts/extract_repeatable.py \
             --dsn "postgresql://postgres@localhost:5432/postgres" --out /tmp/reextracted
-          if ! diff -ru stack/supabase/repeatable /tmp/reextracted > /tmp/after.diff; then
+          if ! diff -ru stack/supabase/schemas /tmp/reextracted > /tmp/after.diff; then
             echo "::error::applying the bundle CHANGED an object definition:"
             head -80 /tmp/after.diff
             exit 1

@@ -48,24 +48,29 @@ THROUGHPUT = {
         ('security_segment', 'security_filing'),
 }
 INDEX_TS = pathlib.Path('stack/supabase/functions/market-refresh/index.ts')
-MIGRATIONS = pathlib.Path('stack/supabase/migrations')
+SCHEMAS = pathlib.Path('stack/supabase/schemas')
 
 
 def facet_columns() -> list[str]:
     """The facets `coverage_current` actually exposes, READ FROM THE MIGRATION rather than listed
     here. A hardcoded list in this file would be the very thing it is guarding against: an
     enumeration that goes stale when the thing it enumerates grows."""
-    latest = sorted(pathlib.Path('stack/supabase/migrations').glob('*.sql'),
-                    key=lambda f: f.name)
+    # READ FROM `schemas/`, WHICH HAS EXACTLY ONE DEFINITION. This used to walk every migration and
+    # keep the LAST match, because `coverage_current` was defined by FIVE files and the last definer
+    # wins. Declarative schemas remove the ambiguity, so the guard no longer has to model it.
     defn = ''
-    for f in latest:                      # the LAST definer wins, exactly as the deploy applies them
+    for f in sorted(SCHEMAS.glob('*.sql')):
         text = f.read_text()
         if 'view market.coverage_current as' in text:
             defn = text
     if not defn:
-        print('::error::no migration defines market.coverage_current — this guard cannot run')
+        print('::error::no file in schemas/ defines market.coverage_current — this guard cannot run')
         sys.exit(1)
-    cols = sorted(set(re.findall(r'as\s+(with_[a-z_]+)', defn)))
+    # CASE-INSENSITIVE: the migration wrote `as with_price`, `pg_get_viewdef` renders `AS
+    # with_price`. A case-sensitive match against the declared file finds ZERO columns and
+    # the guard then fails on its own vacuity check — which is the check working, but the
+    # cause is the rendering, not the view.
+    cols = sorted(set(re.findall(r'\bas\s+(with_[a-z_]+)', defn, re.I)))
     if len(cols) < 10:
         print(f'::error::only {len(cols)} facet columns parsed from coverage_current; the guard '
               f'would pass vacuously')
@@ -81,8 +86,10 @@ def segment_backlog_views() -> list[str]:
     and the queue count — and each would have kept drawing SEC and Korea while silently omitting a
     third. That is the same family as the `limit 60` that hid the United States: a panel claiming to
     summarise a bounded set must contain all of it."""
+    # `schemas/` holds one file per view, so the set is the FILENAMES — no need to parse a `create`
+    # statement out of a migration that may or may not be the last definer.
     found = set()
-    for sql in MIGRATIONS.glob('*.sql'):
+    for sql in SCHEMAS.glob('*.sql'):
         for m in re.finditer(r'create view market\.(pending_[a-z_]*segments)\b', sql.read_text()):
             found.add(m.group(1))
     return sorted(found)

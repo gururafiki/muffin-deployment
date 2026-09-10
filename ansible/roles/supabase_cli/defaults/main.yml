@@ -1,0 +1,13 @@
+---
+# PINNED, and a version bump is a deliberate commit. The CLI decides how migrations are applied to
+# a live database; letting it float would mean the tool that writes the schema could change under a
+# deploy that changed nothing.
+supabase_cli_version: "2.117.0"
+
+# arm64 because the Oracle node is aarch64. The release publishes `linux_arm64` and `linux_amd64`
+# tarballs; the architecture is resolved from Ansible facts rather than assumed, so this role does
+# not silently install the wrong binary if it is ever run somewhere else.
+supabase_cli_arch_map:
+  aarch64: arm64
+  arm64: arm64
+  x86_64: amd64

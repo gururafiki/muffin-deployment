@@ -69,7 +69,7 @@ on conflict do nothing;
 -- guard would skip this fixture entirely. Clearing the key is what makes the migration RUN here.
 delete from market.one_shot where key = 'retract-subtotals-and-residual-only-splits';
 
-\i stack/supabase/migrations/177-a-dropped-fact-cannot-retract-itself.sql
+\i stack/supabase/migrations-legacy/177-a-dropped-fact-cannot-retract-itself.sql
 
 do $$
 declare

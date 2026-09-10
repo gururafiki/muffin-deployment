@@ -98,6 +98,10 @@
       changed_when: true
   roles:
     - oci-swarm-node
+    # The Supabase CLI, pinned. It is how migrations reach the database from the play below —
+    # `supabase db push` applies only what `supabase_migrations.schema_migrations` says is pending,
+    # instead of re-running the whole history on every deploy.
+    - supabase_cli
   vars:
     ufw_tcp_ports:
       - 22    # SSH

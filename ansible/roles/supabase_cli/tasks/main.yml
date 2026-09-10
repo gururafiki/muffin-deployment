@@ -1,0 +1,63 @@
+---
+# The Supabase CLI, installed as a plain binary rather than run as a container.
+#
+# WHY A BINARY. The alternative is `docker run supabase/cli`, which needs the container on the
+# `muffin_muffin-net` overlay to reach `supabase-db`, and adds an image pull to the critical path of
+# every deploy. The CLI is a single static Go binary with an arm64 release; installing it is smaller,
+# faster and has fewer moving parts than a container whose network has to be right.
+#
+# WHY NOT `npm i -g supabase` — the npm package is a downloader wrapper, so it would add a Node
+# toolchain to the node for no benefit.
+
+- name: Check the installed Supabase CLI version
+  # `changed_when: false` and a tolerated failure: this is a QUESTION, not a change, and the answer
+  # on a node that has never had the CLI is a non-zero exit.
+  command: supabase --version
+  register: _supabase_cli_installed
+  changed_when: false
+  failed_when: false
+
+- name: Install the pinned Supabase CLI
+  when: _supabase_cli_installed.stdout | default('') | trim != supabase_cli_version
+  block:
+    - name: Resolve the architecture
+      set_fact:
+        _supabase_cli_arch: "{{ supabase_cli_arch_map[ansible_architecture] | default('') }}"
+
+    - name: Refuse an architecture we do not have a build for
+      # Louder than installing nothing: a missing CLI would surface much later as `db push: command
+      # not found` in the middle of a deploy, which reads as a broken playbook rather than a
+      # platform we never shipped for.
+      fail:
+        msg: >-
+          no Supabase CLI build mapped for architecture {{ ansible_architecture }};
+          add it to supabase_cli_arch_map
+      when: _supabase_cli_arch == ''
+
+    - name: Download and unpack it
+      unarchive:
+        src: >-
+          https://github.com/supabase/cli/releases/download/v{{ supabase_cli_version }}/supabase_{{
+          supabase_cli_version }}_linux_{{ _supabase_cli_arch }}.tar.gz
+        dest: /usr/local/bin
+        remote_src: true
+        include:
+          - supabase
+        mode: "0755"
+        owner: root
+        group: root
+
+- name: Confirm the CLI answers
+  # An unpacked file is not a working binary — a wrong architecture unpacks perfectly and then dies
+  # with `Exec format error` at the moment it is first used, which on this playbook is mid-deploy.
+  command: supabase --version
+  register: _supabase_cli_check
+  changed_when: false
+
+- name: The installed CLI is the pinned one
+  assert:
+    that: _supabase_cli_check.stdout | trim == supabase_cli_version
+    fail_msg: >-
+      expected Supabase CLI {{ supabase_cli_version }},
+      found {{ _supabase_cli_check.stdout | trim }}
+    success_msg: "Supabase CLI {{ supabase_cli_version }}"

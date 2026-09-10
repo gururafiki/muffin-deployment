@@ -21,6 +21,31 @@ import {
   planPriceFetches,
   type Bar,
 } from './resources.ts'
+
+// WHERE THE MIGRATION HISTORY LIVES, IN ONE PLACE.
+//
+// `migrations/` holds the BASELINE (Supabase's `<timestamp>_name.sql` convention) and anything
+// generated since; `migrations-legacy/` holds the 204 historical files, retired from the deploy but
+// still the only place a seed is written as TEXT — the baseline carries the same rows as a pg_dump
+// COPY block, which no grep for an `insert into` can match.
+//
+// ONE DEFINITION BECAUSE THREE SEPARATE READERS EXISTED AND I FIXED ONE. The data_source seed check
+// built its own `migText` in a different scope and reported `0 seeds found` while the checks above
+// it were reading both directories perfectly — the "six call sites, four spellings" shape this repo
+// keeps meeting. A shared helper is the only version that cannot drift.
+const MIGRATION_DIRS = [
+  new URL('../../migrations/', import.meta.url),
+  new URL('../../migrations-legacy/', import.meta.url),
+]
+
+async function* migrationSql(): AsyncGenerator<string> {
+  for (const dir of MIGRATION_DIRS) {
+    for await (const entry of Deno.readDir(dir)) {
+      if (!entry.isFile || !entry.name.endsWith('.sql')) continue
+      yield await Deno.readTextFile(new URL(entry.name, dir))
+    }
+  }
+}
 import { pickHomeListing, type YahooHit } from './yahoo.ts'
 import { venuesFromRows, hasLocalExchange, pickLocalSymbol, venueForSymbol } from './exchanges.ts'
 
@@ -1143,11 +1168,8 @@ console.log('\nresource registry — the cron and the function agree')
   // this guard report a correctly-scheduled resource as unscheduled. That is the "anchored on one
   // file" shape that has already cost this repo a guard reading the wrong `while` loop: the fix
   // for "the pattern matched somewhere else" is not a better pattern, it is the right SCOPE.
-  const migrationsDir = new URL('../../migrations/', import.meta.url)
   const cronResources: string[] = []
-  for await (const entry of Deno.readDir(migrationsDir)) {
-    if (!entry.isFile || !entry.name.endsWith('.sql')) continue
-    const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+  for await (const sql of migrationSql()) {
     for (const seed of sql.matchAll(
       /insert into market\.cron_resource \(position, resource\) values([\s\S]*?)on conflict/g,
     )) {
@@ -1162,9 +1184,7 @@ console.log('\nresource registry — the cron and the function agree')
   // nothing checked the reverse direction.
   {
     const disabled = new Set<string>()
-    for await (const entry of Deno.readDir(migrationsDir)) {
-      if (!entry.isFile || !entry.name.endsWith('.sql')) continue
-      const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+    for await (const sql of migrationSql()) {
       for (const m of sql.matchAll(
         /update market\.cron_resource set enabled = false[\s\S]*?in \(([^)]*)\)/g,
       )) {
@@ -1174,9 +1194,7 @@ console.log('\nresource registry — the cron and the function agree')
     const orphaned: string[] = []
     for (const name of disabled) {
       let scheduled = false
-      for await (const entry of Deno.readDir(migrationsDir)) {
-        if (!entry.isFile || !entry.name.endsWith('.sql')) continue
-        const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+      for await (const sql of migrationSql()) {
         if (sql.includes(`cron_post('${name}')`)) { scheduled = true; break }
       }
       if (!scheduled) orphaned.push(name)
@@ -1951,11 +1969,8 @@ console.log('\nevery source_code written by a function is seeded by a migration'
     [...fnText.matchAll(/source_code:\s*'([a-z0-9_-]+)'/g)].map((m) => m[1]),
   )
 
-  const migDir = new URL('../../migrations/', import.meta.url)
   let migText = ''
-  for await (const f of Deno.readDir(migDir)) {
-    if (f.isFile && f.name.endsWith('.sql')) migText += await Deno.readTextFile(new URL(f.name, migDir))
-  }
+  for await (const sql of migrationSql()) migText += sql
   // Only the data_source inserts, so a source merely MENTIONED in a comment cannot vouch for itself.
   const seeded = new Set<string>()
   for (const m of migText.matchAll(/insert\s+into\s+market\.data_source[\s\S]{0,2000}?;/gi)) {
@@ -2104,18 +2119,37 @@ console.log('\nsecurity-share-stats')
 // database container; in CI Postgres is a service container that cannot see the repo at all.
 console.log('\nmigration filenames sort numerically')
 {
-  const dir = new URL('../../migrations/', import.meta.url)
+  // THE LEGACY DIRECTORY, because that is where the zero-padded convention lives and where the
+  // defect it guards against happened. `migrations/` uses Supabase's `<timestamp>_name.sql`
+  // convention, which the CLI orders and which is checked separately below — asserting `^\d{3}-`
+  // there would fail on the baseline for being correctly named.
+  const dir = new URL('../../migrations-legacy/', import.meta.url)
   const names: string[] = []
   for await (const e of Deno.readDir(dir)) {
     if (e.isFile && e.name.endsWith('.sql')) names.push(e.name)
   }
-  check(names.length > 50, `the migrations directory was found (${names.length} files)`)
+  check(names.length > 50, `the legacy migrations directory was found (${names.length} files)`)
 
   const bad = names.filter((n) => !/^\d{3}-/.test(n))
   check(
     bad.length === 0,
-    'every migration filename starts with a THREE-DIGIT zero-padded number',
+    'every legacy migration filename starts with a THREE-DIGIT zero-padded number',
     bad.length ? `not padded: ${bad.slice(0, 5).join(', ')}` : '',
+  )
+
+  // AND THE NEW CONVENTION GETS THE SAME TREATMENT. `supabase db push` orders by the leading
+  // timestamp, so a file that does not carry one is applied in an order nobody chose — the same
+  // class of defect as the unpadded prefix, in the naming scheme that replaces it.
+  const newNames: string[] = []
+  for await (const e of Deno.readDir(new URL('../../migrations/', import.meta.url))) {
+    if (e.isFile && e.name.endsWith('.sql')) newNames.push(e.name)
+  }
+  check(newNames.length > 0, `the migrations directory was found (${newNames.length} files)`)
+  const misnamed = newNames.filter((n) => !/^\d{14}_/.test(n))
+  check(
+    misnamed.length === 0,
+    'every migration filename carries a 14-digit timestamp, as the Supabase CLI expects',
+    misnamed.length ? `not timestamped: ${misnamed.slice(0, 5).join(', ')}` : '',
   )
 
   // The property itself, asserted rather than inferred from the naming rule: sorting the names as
