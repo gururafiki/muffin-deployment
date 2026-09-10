@@ -196,6 +196,21 @@
         src: "{{ muffin_template_dir }}/supabase/migrations/"
         dest: /home/ubuntu/supabase/migrations/
 
+    - name: Ensure the Dagster config directory exists
+      # `copy`/`template` DO NOT CREATE PARENT DIRECTORIES, and this is the second task to learn it
+      # the expensive way — the note on /home/ubuntu/proxy above says as much and calls itself "the
+      # first task here that needs it spelled out", which is a rule written at one call site.
+      # PR #343 added a task copying two NAMED FILES into /home/ubuntu/dagster and the deploy died
+      # eighteen minutes in with "Destination directory /home/ubuntu/dagster does not exist".
+      #
+      # The distinction that hides it: a `copy:` whose `src:` is a DIRECTORY (supabase/migrations/,
+      # supabase/functions/) creates its destination, so most staging tasks here need nothing. Only
+      # a copy of individual files does. `quality.yml` now checks this offline for every task.
+      file:
+        path: /home/ubuntu/dagster
+        state: directory
+        mode: "0755"
+
     - name: Stage the Dagster instance config
       copy:
         src: "{{ muffin_template_dir }}/dagster/{{ item }}"
