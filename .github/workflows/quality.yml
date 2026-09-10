@@ -64,6 +64,123 @@ jobs:
           print(f"ok  {len(services)} services parsed")
           PY
 
+  # BOOT THE ORCHESTRATOR, DO NOT MERELY PARSE IT.
+  #
+  # Six defects reached production in PR #343 and its follow-ups, and every one was the FIRST
+  # EXECUTION of a new task or a new container. Because Ansible halts at the first failure, each
+  # deploy could reveal exactly ONE of them: three failed deploys, 19 + 28 + 17 minutes, one bug
+  # each. Two more sat PAST the failure point, so no deploy would ever have reported them — they
+  # surfaced only when someone drove Dagster by hand afterwards.
+  #
+  # Nothing here could have caught them, and the reason is uniform: every gate checks SHAPE.
+  # `compose` parses the template, `ansible` runs --syntax-check, `terraform` runs validate,
+  # `migrations` applies SQL — and the three services, their commands and their read-only config
+  # mount were executed for the first time on the node.
+  #
+  # This job starts them. It would have caught:
+  #   * `dagster-daemon run` with no `-w`, which exits 1 with "no [tool.dagster] block in
+  #     pyproject.toml" — a message that points at the image and means the daemon has no code
+  #     location
+  #   * Dagster's telemetry writing `.telemetry` into a DAGSTER_HOME that is mounted READ-ONLY,
+  #     which crash-looped the daemon
+  #   * `dagster-webserver` missing from the image entirely (also now checked in muffin-ingest CI)
+  #
+  # WHAT IT DELIBERATELY DOES NOT REPRODUCE: `postgres` being a NON-SUPERUSER, which is what made
+  # `create database dagster owner dagster` fail with `must be able to SET ROLE "dagster"`. That is
+  # a property of the `supabase/postgres` image, and pulling it here would add gigabytes to every
+  # PR for one statement. The static check in the `ansible` job covers that pairing instead. Said
+  # out loud because a job that implies coverage it does not have is worse than a missing one.
+  dagster-boots:
+    # ARM64 IS NOT OPTIONAL. `muffin-ingest` is built linux/arm64 only, because the Oracle node is
+    # aarch64 — an ubuntu-latest runner cannot execute the image at all.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Take the commands from the stack template, never from a copy of them
+        # The whole point is to run what the node runs. Restating the commands here would make
+        # this a test of a second copy, and the copy that drifts is always the one nobody reads.
+        run: |
+          python - <<'PY' > /tmp/boot.sh
+          import re, yaml
+          raw = open('stack/docker-compose.yaml').read()
+          rendered = re.sub(r'\{%.*?%\}', '', re.sub(r'\{\{.*?\}\}', 'PLACEHOLDER', raw, flags=re.S), flags=re.S)
+          doc = yaml.safe_load(rendered)
+          image = 'ghcr.io/gururafiki/muffin-ingest:latest'
+          lines = ['set -euo pipefail']
+          for name in ('muffin-ingest', 'dagster-daemon', 'dagster-webserver'):
+              svc = doc['services'][name]
+              cmd = ' '.join(svc['command'])
+              mount = [v for v in svc['volumes'] if v.endswith(':ro')][0]
+              # The mount is the STAGED directory on the node; here it is the repo's copy of the
+              # same two files, still read-only — which is the condition telemetry died on.
+              mount = mount.replace('/home/ubuntu/dagster', '$PWD/stack/dagster')
+              lines.append(
+                  f'docker run -d --name {name} --network muffin-ci '
+                  f'-e DAGSTER_HOME=/opt/dagster/home -e DAGSTER_PG_PASSWORD=ci-password '
+                  f'-e INGEST_DATABASE_URL=postgresql://postgres:ci-password@supabase-db:5432/postgres '
+                  f'-v {mount} {image} {cmd}'
+              )
+          print('\n'.join(lines))
+          PY
+          cat /tmp/boot.sh
+      - name: A database for Dagster to store its runs in
+        # Plain postgres, NOT supabase/postgres — see the note above about what this does not
+        # reproduce. `dagster.yaml` names the host `supabase-db`, so the container is named for it.
+        run: |
+          docker network create muffin-ci
+          docker run -d --name supabase-db --network muffin-ci \
+            -e POSTGRES_PASSWORD=ci-password postgres:17-alpine
+          # `pg_isready` REPORTS TRUE DURING INIT — the image runs a temporary server on the same
+          # socket — so wait on a real query, exactly as the local harness had to learn to.
+          for i in $(seq 1 40); do
+            docker exec supabase-db psql -U postgres -tAc 'select 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec supabase-db psql -U postgres -v ON_ERROR_STOP=1 \
+            -c "create role dagster login password 'ci-password'" \
+            -c "create database dagster owner dagster"
+      - name: Boot all three, and stay booted
+        run: |
+          bash /tmp/boot.sh
+          # FORTY-FIVE SECONDS, because a crash loop looks like a healthy service for the first
+          # few. Swarm reported `1/1` for both of these while they were restarting every ten.
+          sleep 45
+          bad=0
+          for c in muffin-ingest dagster-daemon dagster-webserver; do
+            running=$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)
+            restarts=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo 0)
+            echo "  $c running=$running restarts=$restarts"
+            if [ "$running" != "true" ] || [ "$restarts" != "0" ]; then
+              bad=1
+              echo "::error::$c did not stay up — last 30 lines:"
+              docker logs --tail 30 "$c" 2>&1 | sed 's/^/    /'
+            fi
+          done
+          [ "$bad" = 0 ] || exit 1
+          echo "  ok  all three stayed up for 45s with no restart"
+      - name: The webserver serves, and the code location actually loaded
+        # Being up is not the same as working: the webserver stays up perfectly well while the
+        # gRPC code location behind it is failing to import, and then every asset is missing.
+        run: |
+          docker run --rm --network muffin-ci curlimages/curl:8.11.1 -sf \
+            http://dagster-webserver:3000/server_info > /dev/null
+          echo "  ok  webserver answers /server_info"
+          body='{"query":"{repositoriesOrError{... on RepositoryConnection{nodes{location{name}}}}}"}'
+          out=$(docker run --rm --network muffin-ci curlimages/curl:8.11.1 -sf \
+            -H 'Content-Type: application/json' -d "$body" \
+            http://dagster-webserver:3000/graphql)
+          echo "$out"
+          echo "$out" | grep -q 'muffin_ingest' || {
+            echo "::error::the webserver is up but the code location did not load"; exit 1; }
+          echo "  ok  code location muffin_ingest loaded"
+      - name: Logs, whatever happened
+        if: always()
+        run: for c in muffin-ingest dagster-daemon dagster-webserver; do echo "=== $c ==="; docker logs --tail 40 "$c" 2>&1 || true; done
+
   # Every provider the edge functions reach must have a `location` in the cache config.
   #
   # WHY THIS IS A CI GATE AND NOT A COMMENT. `origins.ts` defaults to the REAL origin, so a
@@ -467,6 +584,43 @@ jobs:
                   print('  ' + b)
               sys.exit(1)
           print("  ok  no psql -c string relies on variable interpolation")
+          PYCHK
+      # `create database … owner <role>` NEEDS TO BE ABLE TO SET ROLE, AND `postgres` IS NOT A
+      # SUPERUSER HERE.
+      #
+      # PostgreSQL 16 requires the creating role to be a member of the owner it names. A superuser
+      # bypasses that — and on the `supabase/postgres` image `pg_roles` reports `rolsuper = f` for
+      # `postgres` (it has createdb and createrole; `supabase_admin` is the superuser). So the
+      # obvious statement failed a deploy with a message that mentions neither databases nor
+      # privileges:
+      #
+      #     ERROR:  must be able to SET ROLE "dagster"
+      #
+      # `dagster-boots` deliberately runs plain postgres and so cannot reproduce this; a static
+      # pairing rule is the proportionate cover. It fires on the OWNER form only: `create database
+      # x` with no owner is unaffected, and that is the common case.
+      - name: Offline check — creating a database for another owner grants that role first
+        run: |
+          python3 - <<'PYCHK'
+          import re, sys, glob
+          bad = []
+          for path in sorted(glob.glob('ansible/*.yml')):
+              lines = open(path).read().splitlines()
+              starts = [i for i, l in enumerate(lines) if re.match(r'\s*- name:', l)]
+              for n, i in enumerate(starts):
+                  end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                  code = '\n'.join(l for l in lines[i:end] if not l.lstrip().startswith('#'))
+                  for m in re.finditer(r'create\s+database\s+\S+\s+owner\s+([A-Za-z_][A-Za-z0-9_]*)', code, re.I):
+                      role = m.group(1)
+                      if not re.search(rf'grant\s+{re.escape(role)}\s+to\s+postgres', code, re.I):
+                          bad.append(f"{path}:{i+1}  {lines[i].strip()}  (owner {role!r})")
+          if bad:
+              print('::error::`create database … owner X` without `grant X to postgres` — postgres '
+                    'is not a superuser on supabase/postgres and cannot SET ROLE to X')
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print('  ok  every database created for another owner grants that role first')
           PYCHK
       # THE COLLECTORS ARE REAL FILES, AND THEY MUST COMPILE. `muffin-service-metrics.py` was once
       # an inline `copy: content:` block and its `{{json .}}` format string killed a deploy, because
