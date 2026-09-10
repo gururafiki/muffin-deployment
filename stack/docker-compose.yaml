@@ -1197,7 +1197,12 @@ services:
   # Schedules, sensors and the run queue. NOT replicable — Dagster supports one daemon.
   dagster-daemon:
     image: "{{ image_ingest | default('ghcr.io/gururafiki/muffin-ingest:latest') }}"
-    command: ["dagster-daemon", "run"]
+    # `-w` IS NOT OPTIONAL FOR THE DAEMON, THOUGH ITS ABSENCE READS AS A PACKAGING PROBLEM.
+    # Bare `dagster-daemon run` exits 1 with "No arguments given and no [tool.dagster] block in
+    # pyproject.toml found" — the daemon needs to know the code location to run schedules and
+    # sensors against, exactly as the webserver does. The message points at pyproject.toml, which
+    # sends you to the image; the fix is the same workspace file the webserver already loads.
+    command: ["dagster-daemon", "run", "-w", "/opt/dagster/home/workspace.yaml"]
     labels:
       - "muffin.config-hash={{ cfg_hash_dagster | default('none') }}"
     environment:
