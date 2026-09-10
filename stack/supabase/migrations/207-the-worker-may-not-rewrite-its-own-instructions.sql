@@ -99,10 +99,11 @@ begin
         select $1, n.subject, n.security_id, n.priority,
                -- `round` is a smallint. A filer with more than 32,767 outstanding filings would
                -- wrap; clamping parks it at the back of the queue, which is where it belongs.
+               -- MUTATION: the count of what this entity already holds is dropped, so a round is
+               -- computed only over the NEW rows — which is the renumbering defect.
                least(32767,
-                     coalesce(h.n, 0)
-                     + row_number() over (partition by n.security_id
-                                              order by n.entity_rank, n.subject))::smallint
+                     row_number() over (partition by n.security_id
+                                            order by n.entity_rank, n.subject))::smallint
           from new n
           left join held h on h.security_id is not distinct from n.security_id
         on conflict (facet, subject) do nothing
