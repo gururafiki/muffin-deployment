@@ -368,9 +368,15 @@ jobs:
             docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
               pg_dump -h localhost -U postgres "$@"
           }
+          # NORMALISED, and the two rules live in `sqlnorm.py` because the extractor needs the
+          # identical pair. Both are round-trip artifacts rather than differences in meaning: the
+          # `\restrict` token is random per dump session, and `pg_get_viewdef` re-renders an
+          # unaliased union-arm literal WITH the default alias once the view is recreated from its
+          # own text. Without them this check compares a schema against itself and reports a diff.
           dump() {  # schema only, ours only, and stable enough to diff
             pgdump --schema-only --no-owner --no-privileges \
               --schema=market --schema=api --schema=ingest "$1" \
+              | python3 .github/scripts/sqlnorm.py \
               | grep -vE '^(--|SET |SELECT pg_catalog|$)'
           }
           dump postgres > /tmp/from-legacy.sql
