@@ -1202,7 +1202,7 @@ services:
     # pyproject.toml found" — the daemon needs to know the code location to run schedules and
     # sensors against, exactly as the webserver does. The message points at pyproject.toml, which
     # sends you to the image; the fix is the same workspace file the webserver already loads.
-    command: ["dagster-daemon", "run", "-w", "/opt/dagster/home/workspace.yaml"]
+    command: ["dagster-daemon", "run"]
     labels:
       - "muffin.config-hash={{ cfg_hash_dagster | default('none') }}"
     environment:
