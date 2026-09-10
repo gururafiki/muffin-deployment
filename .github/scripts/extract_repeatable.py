@@ -66,9 +66,9 @@ depth as (
     from v join edge e on e.dependent = v.oid join depth d on d.oid = e.depends_on
    where d.level < 32
 )
-select v.kind, v.schema, v.name, coalesce(max(d.level), 0) as level
+select v.kind, v.schema, v.name, coalesce(max(d.level), 0) as level, v.oid::text
   from v left join depth d on d.oid = v.oid
- group by v.kind, v.schema, v.name
+ group by v.kind, v.schema, v.name, v.oid
 union all
 -- FUNCTIONS FIRST, at level -1, and the ordering among them does not matter.
 --
@@ -78,8 +78,15 @@ union all
 -- direction is a real dependency and the other is not, and functions-first satisfies both.
 --
 -- The signature, not the name: `security_id uuid` and `security_id text` are different functions
--- and `pg_get_functiondef` needs the regprocedure to tell them apart.
-select 'function', n.nspname, p.oid::regprocedure::text, -1
+-- and the oid is what tells them apart; the rendered name is for the FILENAME only.
+-- THE OID, NOT THE SIGNATURE. Round-tripping `oid::regprocedure::text` back through
+-- `'…'::regprocedure` fails on real signatures — `expected a right parenthesis` on
+-- `market.aggregate_performance(...)` — because re-parsing a rendered signature is a quoting
+-- problem with no upside. An oid is an integer and cannot be misread. The NAME is carried
+-- separately, for the filename only.
+select 'function', n.nspname,
+       p.proname || '(' || coalesce(pg_get_function_identity_arguments(p.oid), '') || ')',
+       -1, p.oid::text
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
  where n.nspname = any(%(schemas)s)
    and p.prokind = 'f'
@@ -107,10 +114,8 @@ def psql(dsn: str, sql: str, *, params: dict[str, object] | None = None) -> str:
     return out.stdout
 
 
-def definition(dsn: str, kind: str, schema: str, name: str) -> str:
-    # For a function the query already returned `schema.name(argtypes)`; re-qualifying it would
-    # produce `market.market.f(...)`.
-    ident = name if kind == "function" else f"{schema}.{name}"
+def definition(dsn: str, kind: str, schema: str, name: str, oid: str) -> str:
+    ident = f"{schema}.{name}"
     if kind == "function":
         # `create or replace`, NOT drop-then-create. Dropping would fail for any function a view
         # depends on, and the bundle drops views AFTER this point. The ACL caveat this repo records
@@ -118,20 +123,21 @@ def definition(dsn: str, kind: str, schema: str, name: str) -> str:
         # privilege — is handled by the explicit `revoke ... from public` the definitions carry,
         # not by dropping. A signature CHANGE still needs a versioned migration to drop first,
         # which is the same rule as today.
-        body = psql(dsn, f"select pg_get_functiondef('{ident}'::regprocedure)")
+        body = psql(dsn, f"select pg_get_functiondef({oid}::oid)")
         return body.strip() + ";\n"
 
-    body = psql(dsn, f"select pg_get_viewdef('{ident}'::regclass, true)").strip()
+    body = psql(dsn, f"select pg_get_viewdef({oid}::oid, true)").strip()
     # `IF EXISTS` DOES NOT PROTECT AGAINST A RELKIND MISMATCH: `drop view if exists` on a
     # materialized view raises `"x" is not a view`, and the converse raises too — so NEITHER
     # ordering of the two is safe and the object survives both. A relkind-aware block is the only
     # form that works, and it is why two deploys died before this was understood.
+    relname = name.split("(")[0]
     drop = (
         f"do $$\n"
         f"declare k char;\n"
         f"begin\n"
         f"  select c.relkind into k from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
-        f"   where n.nspname = '{schema}' and c.relname = '{name}';\n"
+        f"   where n.nspname = '{schema}' and c.relname = '{relname}';\n"
         f"  if k = 'm' then execute 'drop materialized view if exists {ident} cascade';\n"
         f"  elsif k = 'v' then execute 'drop view if exists {ident} cascade';\n"
         f"  end if;\n"
@@ -154,14 +160,14 @@ def main() -> int:
     rows = [r for r in psql(args.dsn, OBJECTS_SQL, params={"schemas": SCHEMAS}).splitlines() if r]
     written = 0
     for position, row in enumerate(rows, start=1):
-        kind, schema, name, _level = row.split("|")
+        kind, schema, name, _level, oid = row.split("|")
         # The FILENAME carries the order, so `psql -f` over a sorted glob is the whole applier and
         # there is no manifest to drift. Zero-padded to four digits because `| sort` is
         # LEXICOGRAPHIC: the moment a 100th object existed, unpadded names would sort it between
         # 02 and 29 and it would be created before what it reads. That exact defect broke a deploy.
         safe = re.sub(r"[^a-z0-9_.]+", "_", name.lower()).strip("_")
         path = args.out / f"{position:04d}-{safe}.sql"
-        path.write_text(definition(args.dsn, kind, schema, name))
+        path.write_text(definition(args.dsn, kind, schema, name, oid))
         written += 1
 
     print(f"  ok  extracted {written} objects in dependency order into {args.out}")
