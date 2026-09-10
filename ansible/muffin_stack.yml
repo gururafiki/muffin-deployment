@@ -635,6 +635,26 @@
     # DYNAMICALLY LINKED against glibc — `interpreter /lib/ld-linux-aarch64.so.1` — so it cannot run
     # in an alpine image; `supabase/postgres` is Debian, is the database's own image, and is
     # therefore guaranteed present on the node.
+    # THE PASSWORD IS STAGED TO A ROOT-ONLY FILE, AND `no_log` GOES HERE AND NOWHERE ELSE.
+    #
+    # The first cutover attempt put `no_log: true` on the tasks that USE the DSN, and the baseline
+    # task failed with exactly this and nothing else:
+    #
+    #   fatal: [...]: FAILED! => {"censored": "the output has been hidden due to the fact that
+    #   no_log: true was specified for this result"}
+    #
+    # which is the trap already recorded for the vault-secret deploy: `no_log` on a task hides the
+    # error that diagnoses it. It goes on the task whose ONLY job is to stage the secret; the tasks
+    # that use it then contain no secret and stay loggable.
+    - name: Stage the database password (root-only)
+      copy:
+        content: "{{ supabase_db_password }}"
+        dest: /root/.muffin-db-pw
+        mode: "0600"
+        owner: root
+        group: root
+      no_log: true
+
     # BASELINE THE EXISTING DATABASE, ONCE.
     #
     # Production already HAS the schema those 204 files build, so the baseline must be recorded as
@@ -648,6 +668,7 @@
       shell: |
         set -euo pipefail
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        pw=$(cat /root/.muffin-db-pw)
         version=$(basename /home/ubuntu/supabase/migrations/*_baseline.sql | cut -d_ -f1)
         recorded=$(docker exec "$db" psql -U postgres -tAc \
           "select count(*) from supabase_migrations.schema_migrations where version = '$version'" \
@@ -659,7 +680,8 @@
             --entrypoint /usr/local/bin/supabase \
             supabase/postgres:17.6.1.136 \
             migration repair --status applied "$version" \
-            --db-url "postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres"
+            --db-url "postgresql://postgres:$pw@supabase-db:5432/postgres" 2>&1 \
+            | sed "s|:$pw@|:REDACTED@|g"
           echo BASELINED
         else
           echo ALREADY_BASELINED
@@ -668,7 +690,6 @@
         executable: /bin/bash
       register: _supabase_baseline
       changed_when: "'BASELINED' in _supabase_baseline.stdout and 'ALREADY' not in _supabase_baseline.stdout"
-      no_log: true          # the DSN carries the database password
 
     - name: Apply pending migrations (supabase db push)
       shell: |
@@ -688,12 +709,15 @@
         # quoted region there even inside a comment. One unmatched apostrophe fails the WHOLE PLAY
         # at parse time with `failed at splitting arguments, either an unbalanced jinja2 block or
         # quotes`, and it points at the first line of the block rather than at the word.)
+        pw=$(cat /root/.muffin-db-pw)
         run_cli --version >/dev/null
-        run_cli db push --db-url "postgresql://postgres:{{ supabase_db_password }}@supabase-db:5432/postgres"
+        # REDACTED RATHER THAN HIDDEN. The password can appear in a connection error, and this is a
+        # public repository, so the output is filtered instead of the whole task being censored.
+        run_cli db push --db-url "postgresql://postgres:$pw@supabase-db:5432/postgres" 2>&1 \
+          | sed "s|:$pw@|:REDACTED@|g"
       args:
         executable: /bin/bash
       changed_when: true
-      no_log: true          # the DSN carries the database password
 
     # THE DELIBERATELY REPEATABLE HALF, and it must run after `db push` because it grants on tables
     # the migrations may just have created. One transaction, so a reader never sees a partial state.
