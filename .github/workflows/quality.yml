@@ -380,38 +380,33 @@ jobs:
 
       # AND APPLYING IT MUST BE A NO-OP AGAINST THE SCHEMA THE MIGRATIONS BUILT.
       #
-      # Extraction proves the bundle SAYS the same thing. This proves it DOES: applied over the
-      # migrated schema, in one transaction exactly as the deploy will, every definition comes back
-      # byte-identical. A bundle that reproduces its own text but changes a view is the failure
-      # mode that would be invisible until an app query returned a different shape.
+      # Extraction proves the bundle SAYS what the migrations say. This proves it DOES: applied
+      # over the migrated schema, in one transaction exactly as the deploy will, re-extracting
+      # afterwards must produce the identical files. A bundle that reproduces its own text while
+      # changing a view would otherwise be invisible until an app query returned a different shape.
+      #
+      # Expressed as a re-extraction rather than a hash of definitions, because a hash tells you
+      # THAT something moved and never WHAT — and the first version of this check reported exactly
+      # that, leaving the actual difference to be reconstructed out of a truncated log.
       - name: Applying the bundle changes nothing
         env:
           PGPASSWORD: postgres
         run: |
           set -euo pipefail
-          defs() {
-            psql -h localhost -U postgres -tAc "select n.nspname || '.' || c.relname || E'\t' || md5(pg_get_viewdef(c.oid, true)) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('market','api') and c.relkind in ('v','m') order by 1"
-          }
-          defs > /tmp/before.txt
           # `check_function_bodies = off` is what lets functions be created before the views they
-          # read, which is how `pg_dump` orders a restore for the same reason.
+          # read — the same ordering `pg_dump` uses, and for the same reason.
           { echo "set check_function_bodies = off;"; cat stack/supabase/repeatable/*.sql; } \
             | psql -h localhost -U postgres -q --single-transaction -v ON_ERROR_STOP=1 > /tmp/b.out 2>&1 \
             || { echo "::error::the bundle failed to apply: $(grep -m1 ERROR /tmp/b.out)"; cat /tmp/b.out; exit 1; }
-          defs > /tmp/after.txt
-          if ! diff -u /tmp/before.txt /tmp/after.txt > /tmp/defs.diff; then
-            echo "::error::applying the bundle CHANGED these view definitions:"
-            grep -E "^[-+][a-z]" /tmp/defs.diff | head -20
-            # The definition itself, for the first one that moved — a hash tells you THAT it
-            # changed and never WHAT, and this check is worthless without the what.
-            name=$(grep -E "^\+[a-z]" /tmp/defs.diff | head -1 | cut -c2- | cut -f1)
-            if [ -n "$name" ]; then
-              echo "--- $name now reads:"
-              psql -h localhost -U postgres -tAc "select pg_get_viewdef('$name'::regclass, true)" | head -40
-            fi
+
+          python3 .github/scripts/extract_repeatable.py \
+            --dsn "postgresql://postgres@localhost:5432/postgres" --out /tmp/reextracted
+          if ! diff -ru stack/supabase/repeatable /tmp/reextracted > /tmp/after.diff; then
+            echo "::error::applying the bundle CHANGED an object definition:"
+            head -80 /tmp/after.diff
             exit 1
           fi
-          echo "  ok  every view definition is byte-identical after applying the bundle"
+          echo "  ok  applying the bundle leaves every definition identical"
 
       - name: Behaviour — every backlog is satisfiable
         env:
