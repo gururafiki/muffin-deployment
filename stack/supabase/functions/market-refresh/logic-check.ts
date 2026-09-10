@@ -1143,11 +1143,25 @@ console.log('\nresource registry — the cron and the function agree')
   // this guard report a correctly-scheduled resource as unscheduled. That is the "anchored on one
   // file" shape that has already cost this repo a guard reading the wrong `while` loop: the fix
   // for "the pattern matched somewhere else" is not a better pattern, it is the right SCOPE.
-  const migrationsDir = new URL('../../migrations/', import.meta.url)
+  // BOTH DIRECTORIES, AND `migrations-legacy/` IS WHERE THE SEEDS ACTUALLY ARE. The historical
+  // files were retired from the deploy in favour of a baseline, but they remain the only place a
+  // `insert into market.data_source …` statement is written as TEXT — the baseline carries the same
+  // rows as a pg_dump COPY block, which no grep for a seed statement can match. Reading only
+  // `migrations/` would make every one of these checks silently pass on an empty search.
+  const migrationDirs = [
+    new URL('../../migrations/', import.meta.url),
+    new URL('../../migrations-legacy/', import.meta.url),
+  ]
+  async function* migrationSql(): AsyncGenerator<string> {
+    for (const dir of migrationDirs) {
+      for await (const entry of Deno.readDir(dir)) {
+        if (!entry.isFile || !entry.name.endsWith('.sql')) continue
+        yield await Deno.readTextFile(new URL(entry.name, dir))
+      }
+    }
+  }
   const cronResources: string[] = []
-  for await (const entry of Deno.readDir(migrationsDir)) {
-    if (!entry.isFile || !entry.name.endsWith('.sql')) continue
-    const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+  for await (const sql of migrationSql()) {
     for (const seed of sql.matchAll(
       /insert into market\.cron_resource \(position, resource\) values([\s\S]*?)on conflict/g,
     )) {
@@ -1162,9 +1176,7 @@ console.log('\nresource registry — the cron and the function agree')
   // nothing checked the reverse direction.
   {
     const disabled = new Set<string>()
-    for await (const entry of Deno.readDir(migrationsDir)) {
-      if (!entry.isFile || !entry.name.endsWith('.sql')) continue
-      const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+    for await (const sql of migrationSql()) {
       for (const m of sql.matchAll(
         /update market\.cron_resource set enabled = false[\s\S]*?in \(([^)]*)\)/g,
       )) {
@@ -1174,9 +1186,7 @@ console.log('\nresource registry — the cron and the function agree')
     const orphaned: string[] = []
     for (const name of disabled) {
       let scheduled = false
-      for await (const entry of Deno.readDir(migrationsDir)) {
-        if (!entry.isFile || !entry.name.endsWith('.sql')) continue
-        const sql = await Deno.readTextFile(new URL(entry.name, migrationsDir))
+      for await (const sql of migrationSql()) {
         if (sql.includes(`cron_post('${name}')`)) { scheduled = true; break }
       }
       if (!scheduled) orphaned.push(name)

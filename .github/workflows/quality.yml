@@ -404,8 +404,16 @@ jobs:
           # they differ on every dump — committed, they would make the baseline look changed every
           # time it was regenerated. They are also psql META-COMMANDS, and this job's psql is a
           # version behind the server. Dropped; the rest is plain SQL.
+          # SCHEMA **AND DATA**, and the reason is specific to this job: in CI the database holds
+          # ONLY what the migrations put there — no ingested securities, prices or filings — so a
+          # full dump captures exactly the SEED DATA of the control tables and nothing else.
+          #
+          # A schema-only baseline would come up with `countries`, `exchange`, `metric`,
+          # `filing_form`, `cron_resource` and the rest EMPTY, so a rebuilt node would have no
+          # control surface at all. That capability exists today (a fresh `terraform apply` replays
+          # the 204 files and gets a seeded database) and must survive baselining.
           docker run --rm --network host -e PGPASSWORD=postgres postgres:17-alpine \
-            pg_dump -h localhost -U postgres --schema-only --no-owner --no-privileges \
+            pg_dump -h localhost -U postgres --no-owner --no-privileges \
             --schema=market --schema=api --schema=ingest postgres \
             | grep -vE '^\\(un)?restrict ' \
             > /tmp/baseline/candidate_baseline.sql || true
