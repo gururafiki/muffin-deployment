@@ -13,6 +13,15 @@ FLOAT32. Stored through two different paths the same number reads as 1010.260009
 1010.260009765625 — identical to the provider, different to `=`. Comparing exactly reported 36 of 48
 rows as disagreeing when almost all of them agreed; 1e-6 relative is the honest line.
 
+ASKED WITH THE FETCH SYMBOL, NEVER THE DISPLAY ONE, AND THE FIRST VERSION GOT THAT WRONG. Running
+the baseline over Gulf and Latin American holdings reported 48% of them "unanswered" — which read as
+a striking fact about the data and was a fact about the probe. `ALMARAI.SR` is what the app SHOWS;
+yfinance wants `2280.SR`, because Saudi tickers are numeric there. Every one of those securities had
+bars dated the day before, written by the old pipeline asking correctly.
+
+"A wrong name is not a missing security" is the most repeated correction in this codebase, and a
+tool that asks with the wrong name manufactures exactly the absence it is looking for.
+
 AND THE BASELINE IS ITSELF SUSPECT, WHICH IS WHY `adjudicate` EXISTS. Measured 2026-09-11 on three
 symbols where the two tables disagreed, with the sessions long closed, the provider supported the
 NEW value every time — and for QIBK.QA the old table held the NEXT DAY's close. So "matches the old
@@ -63,10 +72,13 @@ with paired as (
     join market.security_price sp
       on sp.security_id = pb.security_id and sp.date = pb.trade_date and sp.grain = 'daily'
 )
-select sym.symbol, p.trade_date, p.new_close, p.old_close, p.rel, s.country_iso2
+select coalesce(ps.symbol, sym.symbol), p.trade_date, p.new_close, p.old_close, p.rel,
+       s.country_iso2
   from paired p
   join market.security_symbol sym on sym.security_id = p.security_id
   join market.security s on s.security_id = p.security_id
+  left join market.security_provider_symbol ps
+    on ps.security_id = p.security_id and ps.provider_code = 'yfinance'
  where p.rel > %s
  order by p.rel desc
  limit %s
@@ -75,14 +87,16 @@ select sym.symbol, p.trade_date, p.new_close, p.old_close, p.rel, s.country_iso2
 #: A weight-ordered sample of what the OLD table holds, to ask the provider about directly. Nothing
 #: to do with the new pipeline — this measures whether `security_price` can serve as a baseline.
 BASELINE_SAMPLE = """
-select sym.symbol, sp.date, sp.close, s.country_iso2
+select coalesce(ps.symbol, sym.symbol), sp.date, sp.close, s.country_iso2
   from market.security_price sp
   join market.security_symbol sym on sym.security_id = sp.security_id
   join market.security s on s.security_id = sp.security_id
+  left join market.security_provider_symbol ps
+    on ps.security_id = sp.security_id and ps.provider_code = 'yfinance'
   left join market.fund_holding_current h on h.security_id = sp.security_id
  where sp.grain = 'daily' and sp.date between %s and %s
- group by sym.symbol, sp.date, sp.close, s.country_iso2
- order by max(coalesce(h.weight, 0)) desc, sym.symbol
+ group by coalesce(ps.symbol, sym.symbol), sp.date, sp.close, s.country_iso2
+ order by max(coalesce(h.weight, 0)) desc, 1
  limit %s
 """
 
