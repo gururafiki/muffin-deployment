@@ -143,6 +143,29 @@ jobs:
           docker exec supabase-db psql -U postgres -v ON_ERROR_STOP=1 \
             -c "create role dagster login password 'ci-password'" \
             -c "create database dagster owner dagster"
+      # CREATE DAGSTER'S OWN SCHEMA ONCE, BEFORE ANYTHING RACES FOR IT.
+      #
+      # The daemon and the webserver both initialise run storage on startup, and `boot.sh` starts
+      # them back to back — so whichever loses the race dies with
+      #
+      #     sqlalchemy.exc.ProgrammingError: (psycopg2.errors.DuplicateObject)
+      #     type "runs" already exists
+      #
+      # and this job goes red on a change that has nothing to do with it. Measured on #368: it
+      # failed, and a bare re-run passed. A FLAKY REQUIRED CHECK IS ONE PEOPLE LEARN TO RE-RUN
+      # RATHER THAN READ, which is how a real failure gets waved through — this repo has already
+      # watched market-verify sit red for six days and hide a four-day outage behind it.
+      #
+      # The node does not have this problem because Swarm starts services seconds apart and the
+      # schema has existed for weeks; it is a cold-start race, so it belongs to CI and is fixed
+      # here rather than by changing what the node runs.
+      - name: Create Dagster's storage schema before the race for it
+        run: |
+          docker run --rm --network muffin-ci \
+            -e DAGSTER_HOME=/opt/dagster/home -e DAGSTER_PG_PASSWORD=ci-password \
+            -v "$PWD/stack/dagster:/opt/dagster/home:ro" \
+            ghcr.io/gururafiki/muffin-ingest:latest dagster instance migrate
+          echo "  ok  run storage initialised once, by one process"
       - name: Boot all three, and stay booted
         run: |
           bash /tmp/boot.sh
