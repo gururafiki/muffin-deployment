@@ -24,6 +24,7 @@ on:
           - migrate-docker-root
           - reclaim-old-docker-root
           - roll-ingest
+          - prune-images
         default: checkpoint-report
       thread_id:
         description: Thread UUID (prune-thread only)
@@ -123,6 +124,44 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=40 \
             -n ubuntu@"$NODE_IP" \
             'chmod +x /tmp/muffin-roll-ingest.sh && /tmp/muffin-roll-ingest.sh'
+
+      # RECLAIM THE BOOT VOLUME, because image pulls land on it and nothing else collects them.
+      #
+      # `data-root` is `/mnt/data/docker` and DOES NOT CONTROL WHERE IMAGES LIVE: this node uses
+      # containerd's image store, whose root has no override and defaults to `/var/lib/containerd`
+      # on the 45 GB boot volume. Measured 2026-09-11 — eight `roll-ingest` runs in one afternoon
+      # took `/` to **100% (368K free)** with containerd at 38 GB, while `/mnt/data` sat at 29% of
+      # 98 GB. A dangling-only prune returned 10.13 GB and `/` to 79%.
+      #
+      # The failure it prevents is not "the disk is full". It is that a pull then fails with
+      # `no space left on device`, `docker service update` resolves the tag to the digest already
+      # present, and the roll reports success while the node keeps running old code. Three rolls
+      # were reported successful that way before an import error gave it away.
+      #
+      # DANGLING ONLY, never `system prune -a`. This stack holds images that are pulled and not
+      # currently running, and re-pulling them onto a 45 GB root is how it fills again.
+      - name: Reclaim image space on the boot volume
+        if: inputs.action == 'prune-images'
+        run: |
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=40 \
+            -n ubuntu@"$NODE_IP" '
+              set -euo pipefail
+              echo "== before =="; df -h / | tail -1
+              echo "containerd: $(sudo du -sh /var/lib/containerd 2>/dev/null | cut -f1)"
+              echo "dangling images: $(sudo docker images -f dangling=true -q | wc -l)"
+              sudo docker image prune -f | tail -1
+              echo "== after =="; df -h / | tail -1
+              # A FLOOR, NOT A REPORT. Under ~5 GB the next image pull is the one that fails
+              # silently, so the job has to go red while there is still time to act.
+              free_gb=$(df -BG --output=avail / | tail -1 | tr -dc "0-9")
+              echo "free: ${free_gb}G"
+              if [ "$free_gb" -lt 5 ]; then
+                echo "::error::only ${free_gb}G free on / after pruning — the next image pull will"
+                echo "::error::fail with no space left on device, and a roll will silently no-op"
+                exit 1
+              fi
+            '
 
       - name: Checkpoint storage report (read-only)
         if: inputs.action == 'checkpoint-report'
