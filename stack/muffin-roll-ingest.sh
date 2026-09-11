@@ -54,6 +54,35 @@ running_image() {
   docker inspect "$cid" --format '{{.Image}}' 2>/dev/null || echo ""
 }
 
+# PULL FIRST, AND FAIL IF IT FAILS — because `docker service update` DOES NOT TELL YOU.
+#
+# On 2026-09-11 eight rolls in an afternoon filled `/` (containerd's root has no `data-root`
+# override and lives on the 45 GB boot volume, not on /mnt/data). The ninth pull died with
+#
+#     failed to copy: ... no space left on device
+#
+# and `docker service update --force --image :latest` then resolved the tag to the digest the node
+# ALREADY HAD, recreated the tasks, and succeeded. This script reported
+# `muffin_muffin-ingest unchanged sha256:99b71a…` — indistinguishable from a roll that was already
+# current. Three rolls were reported as successful while the node kept running old code, and it was
+# only caught because an asset that should have existed could not be imported.
+#
+# A report that cannot tell "already current" from "could not pull" certifies everything. The pull
+# is therefore explicit, its failure is fatal, and the headroom is printed either way.
+log "disk before pull: $(df -h / | awk 'NR==2 {print $4" free ("$5" used)"}')"
+IMAGE_TAG=""
+for svc in "${SERVICES[@]}"; do
+  ref="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
+  IMAGE_TAG="${ref%%@*}"
+done
+if ! pull_output="$(docker pull "$IMAGE_TAG" 2>&1)"; then
+  echo "::error::pull of $IMAGE_TAG failed — the roll would have silently kept the old image"
+  printf '%s\n' "$pull_output" | tail -5
+  df -h / | tail -1
+  exit 1
+fi
+log "pulled $IMAGE_TAG"
+
 declare -A BEFORE
 for svc in "${SERVICES[@]}"; do
   ref="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
