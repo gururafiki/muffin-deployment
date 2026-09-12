@@ -49,21 +49,24 @@ scrape_configs:
       - targets: ["postgres-exporter:9187"]
 
   # NOT YET. The ingestion worker will expose its own view of every provider call — requests,
-  # throttles, quota and rows written, counted AT THE CALLER, which `http-cache` cannot see because
-  # calls openbb makes inside its own process never traverse the proxy. The counters exist in
-  # `muffin_ingest.http.client`; nothing calls them yet, and no exporter is started, so this job
-  # scraped a port nothing listens on and sat DOWN from the moment it shipped.
+  # THE WORKER'S OWN PROVIDER COUNTERS, and the one place they can be counted.
   #
-  # A permanently-red target is worse than a missing one: it is the same failure as a permanently
-  # red gate, and the cost is never the ignored target, it is the next real one behind it.
+  # `http-cache` sits in FRONT of openbb-api, and openbb's egress does not pass through it —
+  # yfinance fetches via `curl_cffi` and ignores our base URLs. Importing the hub in-process moved
+  # that blind spot inside our own worker; `muffin_ingest.metrics` closes it.
   #
-  # It comes back with the first facet, together with the piece that is actually missing: a
-  # `prometheus_client` exporter in MULTIPROCESS mode. Each Dagster run is a subprocess of the code
-  # location, so the counters live in short-lived children — one exporter in the parent aggregating
-  # `PROMETHEUS_MULTIPROC_DIR` (already set on the service) is the only shape that works, and it
-  # needs `mark_process_dead` on run exit or the per-PID files grow without bound.
+  # This job shipped COMMENTED OUT because it pointed at a port nothing listened on, and a
+  # permanently-red target is the same failure as a permanently-red gate. It comes back with the
+  # exporter that serves it.
   #
-  # - job_name: muffin-ingest
-  #   static_configs:
-  #     - targets: ["muffin-ingest:9102"]
+  # A CORRECTION TO WHAT THIS COMMENT USED TO SAY. It claimed the exporter "needs
+  # `mark_process_dead` on run exit or the per-PID files grow without bound". That is wrong, read
+  # from the installed package rather than assumed: `mark_process_dead` globs
+  # `gauge_{mode}_{pid}.db` and nothing else, because a counter's value must outlive the process
+  # that produced it. Measured — three children, each calling it on exit, left six files. What
+  # bounds the directory is the exporter CLEARING it at startup, which `prometheus_client`
+  # requires anyway: files surviving a restart are summed and served as current.
+  - job_name: muffin-ingest
+    static_configs:
+      - targets: ["muffin-ingest:9102"]
 
