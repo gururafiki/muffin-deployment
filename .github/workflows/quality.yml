@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install pyyaml
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install pyyaml
@@ -448,7 +448,7 @@ jobs:
             > /tmp/baseline/candidate_baseline.sql || true
       - name: Upload it
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: baseline
           path: /tmp/baseline
@@ -571,7 +571,7 @@ jobs:
       # editing it would reintroduce exactly the drift this check exists to prevent.
       - name: Publish the extraction so a mismatch can be regenerated
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: repeatable-bundle
           path: /tmp/extracted
