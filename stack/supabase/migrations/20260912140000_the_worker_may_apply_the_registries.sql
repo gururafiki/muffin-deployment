@@ -1,0 +1,31 @@
+-- The Dagster worker may call the two registry functions. It could not, and nothing said so.
+--
+-- `market.apply_cik_map` and `market.apply_nse_symbol_map` were granted to `service_role` when
+-- they were written, because the only caller was an edge function reaching them over PostgREST.
+-- The Dagster worker connects as `ingest_rw` and gets
+--
+--   psycopg.errors.InsufficientPrivilege: permission denied for function apply_cik_map
+--
+-- Measured before writing this, rather than inferred from the error:
+--
+--   proname                ingest_rw  service_role  acl
+--   apply_cik_map          f          t             postgres=X/postgres | service_role=X/postgres
+--   apply_nse_symbol_map   f          t             postgres=X/postgres | service_role=X/postgres
+--
+-- THIS IS THE FAILURE THE MIGRATION TESTS STRUCTURALLY CANNOT SEE. They run as SUPERUSER, so a
+-- function can be created, apply cleanly four times, pass every behavioural check, and be
+-- unreachable by the role that actually calls it — exactly as migration 42 created
+-- `security_price`, granted the two views that read it and forgot the table itself, and exactly
+-- as the PGRST205 schema-cache incident before that. It is found by DRIVING it as the real role.
+--
+-- EXECUTE ONLY, AND NAMED ONE BY ONE. `grant execute on all functions in schema market` would
+-- hand the worker every function the schema has, including ones whose whole purpose is to be
+-- callable only by a privileged caller. A list is the shape that rots, but the alternative here
+-- is strictly worse than the rot: the two names below are the two the worker calls, and a third
+-- one arriving unlisted fails loudly at its first run rather than silently gaining access.
+--
+-- These are not `security definer`, so the worker gains exactly what the function itself can do
+-- as `ingest_rw` — which is the write it would otherwise perform row by row, with the precedence
+-- ladder and the ambiguity refusal it must not be able to skip.
+grant execute on function market.apply_cik_map(jsonb)        to ingest_rw;
+grant execute on function market.apply_nse_symbol_map(jsonb) to ingest_rw;

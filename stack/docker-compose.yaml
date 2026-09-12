@@ -1164,7 +1164,29 @@ services:
       # cost four separate defects here, the quietest silently truncating a 5,000-row request.
       INGEST_DATABASE_URL: "postgresql://ingest_rw:{{ ingest_pg_password | default('') }}@supabase-db:5432/postgres"
       PROMETHEUS_MULTIPROC_DIR: /tmp/prom
-      MUFFIN_USER_AGENT: "muffin-market/1.0 (+https://github.com/{{ registry_username | default('gururafiki') }}/muffin)"
+      # SEC ANSWERS 403 TO A User-Agent CARRYING A URL, and this carried the repo's.
+      #
+      # Measured 2026-09-12 against `www.sec.gov/files/company_tickers.json`, two paced rounds,
+      # identical both times:
+      #
+      #   403   1,924 B   muffin-market/1.0 (+https://github.com/gururafiki/muffin)   <- was here
+      #   403   1,924 B   muffin-market/1.0 (+https://github.com/...; ops@example.com)
+      #   200 797,931 B   muffin-market/1.0 (ops@example.com)
+      #   403   1,924 B   muffin-market/1.0 (example.org)
+      #
+      # The second line is the one that matters: adding a contact email does NOT rescue a
+      # User-Agent that also advertises a website. SEC wants to know who to email, not where to
+      # read about you.
+      #
+      # Never caught because nothing called `settings.user_agent()` until the registry lane — the
+      # one HTTP provider sends its own browser string — so the SEC-mandated header was
+      # configured, deployed, and had never been used. `settings.user_agent()` now REFUSES both
+      # shapes at the call, before a request leaves, rather than letting the node discover it as
+      # a 403 whose body explains nothing.
+      #
+      # `acme_email` is reused rather than adding a secret: it is already this deployment's
+      # operator contact (Let's Encrypt expiry notices), which is exactly what SEC is asking for.
+      MUFFIN_USER_AGENT: "muffin-market/1.0 ({{ acme_email }})"
       # Providers, through the cache, exactly as the edge function reaches them. Every default in
       # `settings.py` is the REAL origin, so removing the cache degrades nothing — except DART,
       # which Deno could not reach at all and which is documented as the one exception.
