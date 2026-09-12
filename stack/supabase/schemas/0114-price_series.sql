@@ -14,6 +14,7 @@ SELECT ss.symbol,
     'daily'::text AS grain
    FROM market.price_bar pb
      JOIN market.symbol_security ss ON ss.security_id = pb.security_id
+  WHERE pb.trade_date > (CURRENT_DATE - 400)
 UNION ALL
  SELECT w.symbol,
     w.date,

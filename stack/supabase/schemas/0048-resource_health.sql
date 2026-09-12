@@ -19,7 +19,7 @@ SELECT resource,
           WHERE l.resource = r.resource) AS ttl_hours,
     (EXISTS ( SELECT 1
            FROM market.cron_resource cr
-          WHERE cr.resource = r.resource)) AS scheduled
+          WHERE cr.resource = r.resource AND cr.enabled)) AS scheduled
    FROM market.refresh_run r
   WHERE started_at > (now() - '30 days'::interval)
   GROUP BY resource;

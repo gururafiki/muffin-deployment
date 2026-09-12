@@ -171,7 +171,10 @@ end $$;
 insert into market.price_bar (security_id, trade_date, close, source_code) values
   ('00000000-0000-0000-0000-000000009401', date '2006-03-03', 10, 'yfinance'),
   ('00000000-0000-0000-0000-000000009401', date '2015-07-10', 20, 'yfinance'),
-  ('00000000-0000-0000-0000-000000009401', date '2026-06-05', 30, 'yfinance')
+  -- RELATIVE, NOT FIXED. This is the one bar inside the daily serving window, so a literal date
+  -- turns the assertion below into a time bomb: `2026-06-05` leaves the window in mid-2027 and the
+  -- test then fails for a reason that has nothing to do with what it tests.
+  ('00000000-0000-0000-0000-000000009401', current_date - 30, 30, 'yfinance')
 on conflict (security_id, trade_date) do update set close = excluded.close;
 
 do $$
@@ -182,10 +185,17 @@ begin
     raise exception 'price_series returns % weekly bars for T94A, not 3 — three distinct ISO weeks '
                     'must render three derived points', n;
   end if;
+  -- THE DAILY ARM IS A WINDOW AND THE WEEKLY ARM IS HISTORY — which is exactly what this file's
+  -- closing line has always claimed, and what the assertion here briefly contradicted. When the
+  -- D2 cutover moved this arm from `security_price` (which the old resource only ever filled with
+  -- a rolling ~400 days) onto `price_bar` (everything back to 1980), AAPL went 275 rows -> 11,528
+  -- and the app began making twelve round trips to draw at most 365 days. The assertion was
+  -- updated to expect all three, which recorded the regression as the contract.
   select count(*) into n from market.price_series where symbol = 'T94A' and grain = 'daily';
-  if n <> 3 then
-    raise exception 'price_series returns % daily bars for T94A, not 3 — the daily arm is every '
-                    'bar in `price_bar`, and nothing prunes it', n;
+  if n <> 1 then
+    raise exception 'price_series returns % daily bars for T94A, not 1 — only the bar inside the '
+                    'serving window belongs to the daily arm; the two historical ones are what '
+                    'the weekly arm is for', n;
   end if;
 end $$;
 
