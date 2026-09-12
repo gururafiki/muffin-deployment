@@ -21,8 +21,25 @@ insert into market.countries (iso2, name, flag, drillable) values ('ZD','Defectl
   on conflict (iso2) do nothing;
 
 insert into market.security (security_id, name, security_type_code, country_iso2) values
-  ('00000000-0000-0000-0000-0000000d0001','T134 One','equity','ZD')
+  ('00000000-0000-0000-0000-0000000d0001','T134 One','equity','ZD'),
+  ('00000000-0000-0000-0000-0000000d0002','T134 A','equity','ZD'),
+  ('00000000-0000-0000-0000-0000000d0003','T134 Frozen','equity','ZD'),
+  ('00000000-0000-0000-0000-0000000d0004','T134 Roundtrip','equity','ZD')
 on conflict (security_id) do nothing;
+
+-- `market.performance` IS A VIEW SINCE THE D2 CUTOVER, so a fixture can no longer insert into it.
+-- Its instrument arm is `security_return` joined to `security_symbol`, which resolves a symbol from
+-- the security's own identifiers — so a synthetic instrument now needs a security and a ticker,
+-- and its numbers go in at the source of truth. That is the point of the cutover rather than a
+-- cost of it: there is one place a return is written.
+insert into market.identifier_kind (code, name) values ('ticker','Ticker') on conflict do nothing;
+insert into market.data_source (code, name, priority) values ('test','Test fixture',1)
+  on conflict (code) do nothing;
+insert into market.security_identifier (security_id, kind_code, value, source_code) values
+  ('00000000-0000-0000-0000-0000000d0002','ticker','T134-A','test'),
+  ('00000000-0000-0000-0000-0000000d0003','ticker','T134-FROZEN','test'),
+  ('00000000-0000-0000-0000-0000000d0004','ticker','T134-ROUNDTRIP','test')
+on conflict do nothing;
 
 -- Baseline: whatever the fixtures already contain.
 create temporary table before_ on commit drop as select defect, n from market.data_defect;
@@ -34,16 +51,16 @@ values ('cusip','000000000','00000000-0000-0000-0000-0000000d0001','sec-nport')
 on conflict do nothing;
 
 -- 2. A FABRICATED TOTAL LOSS: a zero close made every period read exactly -100%.
-insert into market.performance (scope, scope_id, period, change_pct, as_of, stale_after, source)
-values ('instrument','T134-A','1y',-100, now(), now() + interval '1 day','test')
+insert into market.security_return (security_id, period_code, as_of, price_return_pct, source_code)
+values ('00000000-0000-0000-0000-0000000d0002','1y',current_date,-100,'test')
 on conflict do nothing;
 
 -- 3. A FROZEN SERIES — flat on THREE windows at once, which coincidence cannot reach. One or two
 --    zeros are ordinary on a coarse tick grid (Tokyo, Shenzhen, Seoul); three is a dead feed.
-insert into market.performance (scope, scope_id, period, change_pct, as_of, stale_after, source)
-values ('instrument','T134-FROZEN','1d',0, now(), now() + interval '1 day','test'),
-       ('instrument','T134-FROZEN','1w',0, now(), now() + interval '1 day','test'),
-       ('instrument','T134-FROZEN','1m',0, now(), now() + interval '1 day','test')
+insert into market.security_return (security_id, period_code, as_of, price_return_pct, source_code)
+values ('00000000-0000-0000-0000-0000000d0003','1d',current_date,0,'test'),
+       ('00000000-0000-0000-0000-0000000d0003','1w',current_date,0,'test'),
+       ('00000000-0000-0000-0000-0000000d0003','1m',current_date,0,'test')
 on conflict do nothing;
 
 do $$
@@ -79,9 +96,9 @@ do $$
 declare before_n bigint; after_n bigint;
 begin
   select n into before_n from market.data_defect where defect = 'frozen_series';
-  insert into market.performance (scope, scope_id, period, change_pct, as_of, stale_after, source)
-  values ('instrument','T134-ROUNDTRIP','1d',0, now(), now() + interval '1 day','test'),
-         ('instrument','T134-ROUNDTRIP','1w',0, now(), now() + interval '1 day','test')
+  insert into market.security_return (security_id, period_code, as_of, price_return_pct, source_code)
+  values ('00000000-0000-0000-0000-0000000d0004','1d',current_date,0,'test'),
+         ('00000000-0000-0000-0000-0000000d0004','1w',current_date,0,'test')
   on conflict do nothing;
   select n into after_n from market.data_defect where defect = 'frozen_series';
 
