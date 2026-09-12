@@ -1191,8 +1191,26 @@ console.log('\nresource registry — the cron and the function agree')
         for (const q of m[1].matchAll(/'([a-z][a-z-]+)'/g)) disabled.add(q[1])
       }
     }
+    // RETIREMENT IS NOT ORPHANING, AND THE GUARD COULD NOT TELL THEM APART. A resource moved to
+    // its own job is disabled-and-scheduled; a resource RETIRED by a family cutover is
+    // disabled-and-gone, which is the intent rather than the bug. Without this the ten price and
+    // performance resources failed a check that was working perfectly — and a guard that cries
+    // wolf on correct data is one somebody deletes, taking the real case with it.
+    //
+    // The migration says which it is, in the migration, so the two cannot drift: a retirement
+    // declares `-- RETIRES: <name>` beside the update that disables it.
+    const retired = new Set<string>()
+    for await (const sql of migrationSql()) {
+      for (const m of sql.matchAll(/--\s*RETIRES:\s*([a-z][a-z0-9 ,-]*)/g)) {
+        for (const name of m[1].split(',')) {
+          const n = name.trim()
+          if (n) retired.add(n)
+        }
+      }
+    }
     const orphaned: string[] = []
     for (const name of disabled) {
+      if (retired.has(name)) continue
       let scheduled = false
       for await (const sql of migrationSql()) {
         if (sql.includes(`cron_post('${name}')`)) { scheduled = true; break }

@@ -63,12 +63,14 @@ insert into market.fund_holding (fund_id, security_id, as_of, weight, source_cod
    current_date, 5.0, 'sec-nport')
 on conflict do nothing;
 
-insert into market.performance (scope, scope_id, period, change_pct, total_return_pct, as_of, stale_after, source)
-select 'instrument', sym.symbol, '1y', 12.5, 15.0, now(), now() + interval '1 day', 'yfinance'
-  from market.security_symbol sym
- where sym.security_id = '00000000-0000-0000-0000-000000007601'
-on conflict (scope, scope_id, period) do update
-  set change_pct = excluded.change_pct, total_return_pct = excluded.total_return_pct;
+-- `market.performance` IS A VIEW SINCE THE D2 CUTOVER, so the fixture writes at the source of
+-- truth: `security_return`, keyed on `security_id` rather than the display symbol the view
+-- resolves. The securities above already carry listings with these symbols, so the view renders
+-- them unchanged and every assertion below is asking the same question of the same numbers.
+insert into market.security_return (security_id, period_code, as_of, price_return_pct, total_return_pct, source_code)
+values ('00000000-0000-0000-0000-000000007601','1y',current_date,12.5,15.0,'yfinance')
+on conflict (security_id, period_code) do update
+  set price_return_pct = excluded.price_return_pct, total_return_pct = excluded.total_return_pct;
 
 -- 1. THE SECURITY MUST APPEAR. Under the old `coalesce(ticker, ...)` join it contributed nothing,
 --    because performance is stored under `T76LOCAL`, not `T76USOTC`.
@@ -118,11 +120,10 @@ insert into market.fund_holding (fund_id, security_id, as_of, weight, source_cod
   ('00000000-0000-0000-0000-000000007600', '00000000-0000-0000-0000-000000007602',
    current_date, 5.0, 'sec-nport')
 on conflict do nothing;
-insert into market.performance (scope, scope_id, period, change_pct, total_return_pct, as_of, stale_after, source)
-select 'instrument', sym.symbol, '1y', 100.0, null, now(), now() + interval '1 day', 'yfinance'
-  from market.security_symbol sym where sym.security_id = '00000000-0000-0000-0000-000000007602'
-on conflict (scope, scope_id, period) do update
-  set change_pct = excluded.change_pct, total_return_pct = excluded.total_return_pct;
+insert into market.security_return (security_id, period_code, as_of, price_return_pct, total_return_pct, source_code)
+values ('00000000-0000-0000-0000-000000007602','1y',current_date,100.0,null,'yfinance')
+on conflict (security_id, period_code) do update
+  set price_return_pct = excluded.price_return_pct, total_return_pct = excluded.total_return_pct;
 
 do $$
 declare tr numeric; trk integer; k integer;

@@ -50,7 +50,13 @@ declare
                       '00000000-0000-0000-0000-000000008003','00000000-0000-0000-0000-000000008004']::uuid[];
   iso text[]  := array['ZG','ZG','ZH','ZG'];
   cap numeric[] := array[30e9, 10e9, 20e9, 40e9];
-  sym text[] := array['AAA','BBB','CCC','DDD'];
+  -- PREFIXED, BECAUSE `CCC` AND `DDD` ARE REAL LISTED TICKERS. `market.performance` used to be a
+  -- table whose PRIMARY KEY (scope, scope_id, period) made a symbol collision impossible; as a
+  -- view over `security_return` joined to `security_symbol` there is no such guarantee, so a
+  -- fixture that borrows a real ticker renders TWO rows for one scope_id and the aggregate under
+  -- test silently averages a stranger in. Production has no collisions — measured, 0 symbols
+  -- shared — and `a-display-symbol-is-unique.sql` now keeps it that way.
+  sym text[] := array['T80AAA','T80BBB','T80CCC','T80DDD'];
   i integer;
 begin
   for i in 1..4 loop
@@ -66,13 +72,17 @@ begin
   end loop;
 end $$;
 
-insert into market.performance (scope, scope_id, period, change_pct, total_return_pct, as_of, stale_after, source) values
-  ('instrument','AAA','1y',  10.0,  12.0, now(), now() + interval '1 day','yfinance'),
-  ('instrument','BBB','1y',  20.0,  null, now(), now() + interval '1 day','yfinance'),
-  ('instrument','CCC','1y',  -5.0,  -5.0, now(), now() + interval '1 day','yfinance')
-  -- DDD deliberately has NO performance row.
-on conflict (scope, scope_id, period) do update
-  set change_pct = excluded.change_pct, total_return_pct = excluded.total_return_pct;
+-- `market.performance` IS A VIEW SINCE THE D2 CUTOVER, so the fixture writes at the source of
+-- truth: `security_return`, keyed on `security_id` rather than the display symbol the view
+-- resolves. The securities above already carry listings with these symbols, so the view renders
+-- them unchanged and every assertion below is asking the same question of the same numbers.
+insert into market.security_return (security_id, period_code, as_of, price_return_pct, total_return_pct, source_code) values
+  ('00000000-0000-0000-0000-000000008001','1y',current_date, 10.0, 12.0,'yfinance'),
+  ('00000000-0000-0000-0000-000000008002','1y',current_date, 20.0, null,'yfinance'),
+  ('00000000-0000-0000-0000-000000008003','1y',current_date, -5.0, -5.0,'yfinance')
+  -- DDD (…8004) deliberately has NO return row.
+on conflict (security_id, period_code) do update
+  set price_return_pct = excluded.price_return_pct, total_return_pct = excluded.total_return_pct;
 
 -- THE SPINE IS A SNAPSHOT (migration 80). Fixtures inserted in this transaction are not in it
 -- until it is rebuilt, so every assertion below would read an empty view and "pass" or fail for
@@ -226,7 +236,7 @@ begin
   select top_contributor, top_contributor_share, weight_covered into who, share, wc
     from market.aggregate_performance(p_period => '1y', p_group_by => 'sector_id')
    where bucket = 'financials';
-  if who is distinct from 'AAA' then
+  if who is distinct from 'T80AAA' then
     raise exception 'top_contributor is % (expected AAA, |30bn*10| = 300, the largest influence)', coalesce(who,'<null>');
   end if;
   if share is distinct from 0.5000 then
@@ -284,11 +294,11 @@ select sid, node_id, 'yfinance', now()
                ('00000000-0000-0000-0000-000000008013'::uuid)) as v(sid)
  where taxonomy_id = 'muffin' and level = 1 and code = 'energy'
 on conflict do nothing;
-insert into market.performance (scope, scope_id, period, change_pct, total_return_pct, as_of, stale_after, source) values
-  ('instrument','WHALE','1y',   1.0, null, now(), now() + interval '1 day','yfinance'),
-  ('instrument','RISER','1y',  30.0, null, now(), now() + interval '1 day','yfinance'),
-  ('instrument','CRASH','1y', -50.0, null, now(), now() + interval '1 day','yfinance')
-on conflict (scope, scope_id, period) do update set change_pct = excluded.change_pct;
+insert into market.security_return (security_id, period_code, as_of, price_return_pct, source_code) values
+  ('00000000-0000-0000-0000-000000008011','1y',current_date,   1.0,'yfinance'),
+  ('00000000-0000-0000-0000-000000008012','1y',current_date,  30.0,'yfinance'),
+  ('00000000-0000-0000-0000-000000008013','1y',current_date, -50.0,'yfinance')
+on conflict (security_id, period_code) do update set price_return_pct = excluded.price_return_pct;
 
 refresh materialized view market.security_facets;
 

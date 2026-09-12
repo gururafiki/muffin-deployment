@@ -153,18 +153,39 @@ begin
     raise exception 'a security with a symbol and no weekly history is NOT queued (% rows) — the backfill would never reach it', n;
   end if;
 
-  -- 8. THE SERVING VIEW LETS A READER PICK A RESOLUTION. The two grains overlap by design, so a
-  --    view that cannot be filtered hands the chart two bars for the same day — and a 20-year
-  --    weekly series is 1,077 rows, above PGRST_DB_MAX_ROWS, so a reader that cannot narrow to one
-  --    grain silently gets a truncated answer instead of an error.
-  select count(*) into n from market.price_series
-   where symbol = 'T94A' and grain = 'weekly';
+end $$;
+
+-- 8. THE SERVING VIEW LETS A READER PICK A RESOLUTION — AND SINCE THE D2 CUTOVER IT READS
+--    `price_bar`, SO THIS PART SEEDS THERE.
+--
+--    Everything above is about `security_price` and the prune that once threatened to wipe twenty
+--    years of weekly history; that table is still written and still worth protecting until it is
+--    dropped, so those assertions stay where they are. But `price_series` no longer reads it: the
+--    daily arm comes from `price_bar` and the WEEKLY arm is DERIVED from the same bars, one point
+--    per ISO week. Splitting the fixture is the honest expression of that — the two concerns were
+--    only ever in one test because one table served both.
+--
+--    THREE DISTINCT WEEKS, NOT THREE ROWS. A derived weekly series takes the last close of each
+--    week, so three bars inside one week would render as ONE point and the assertion would fail
+--    for a reason that has nothing to do with the view.
+insert into market.price_bar (security_id, trade_date, close, source_code) values
+  ('00000000-0000-0000-0000-000000009401', date '2006-03-03', 10, 'yfinance'),
+  ('00000000-0000-0000-0000-000000009401', date '2015-07-10', 20, 'yfinance'),
+  ('00000000-0000-0000-0000-000000009401', date '2026-06-05', 30, 'yfinance')
+on conflict (security_id, trade_date) do update set close = excluded.close;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from market.price_series where symbol = 'T94A' and grain = 'weekly';
   if n <> 3 then
-    raise exception 'price_series returns % weekly bars for T94A, not 3 — the app cannot ask for one resolution', n;
+    raise exception 'price_series returns % weekly bars for T94A, not 3 — three distinct ISO weeks '
+                    'must render three derived points', n;
   end if;
   select count(*) into n from market.price_series where symbol = 'T94A' and grain = 'daily';
-  if n <> 1 then
-    raise exception 'price_series returns % daily bars for T94A, not 1 (the stale one was pruned)', n;
+  if n <> 3 then
+    raise exception 'price_series returns % daily bars for T94A, not 3 — the daily arm is every '
+                    'bar in `price_bar`, and nothing prunes it', n;
   end if;
 end $$;
 
