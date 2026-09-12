@@ -113,6 +113,16 @@ grant select on market.performance, market.price_series to anon, authenticated, 
 --
 -- Unconditional rather than one-shot: this is a RETIREMENT, so a re-enabled row is drift to be
 -- corrected on the next deploy, not a choice to be preserved.
+--
+-- RETIRES: security-prices, security-daily-history, security-price-history, security-performance
+-- RETIRES: instrument-prices, instrument-performance, sector-performance, country-performance
+-- RETIRES: group-performance, fx-rates
+--
+-- The marker is read by `logic-check.ts`. Its rotation guard requires a disabled resource to have
+-- its own pg_cron job, because migration 137 moved four pure-SQL resources that way and a
+-- disabled-and-unscheduled resource is normally a resource that silently stopped running. A
+-- RETIRED one is disabled-and-gone on purpose, and without saying so these ten failed a check that
+-- was working correctly.
 update market.cron_resource set enabled = false
  where resource in ('security-prices','security-daily-history','security-price-history',
                     'security-performance','instrument-prices','instrument-performance',
