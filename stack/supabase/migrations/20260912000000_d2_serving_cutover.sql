@@ -45,14 +45,24 @@ begin
     return;
   end if;
 
-  -- CAPTURE BEFORE THE CASCADE, which does not give them back.
+  -- CAPTURE BEFORE THE CASCADE, which does not give them back — the DEFINITION *and* the ACL.
+  -- `drop` loses the grants, and CI said so on the first run: `anon cannot read 4 serving view(s)`.
+  -- Emitted from `relacl` rather than from a list of expected roles, because `anon`,
+  -- `authenticated`, `service_role`, `metrics_ro` and `ingest_rw` do not hold the same privileges
+  -- on the same objects, and a hand-written list is the shape that rots.
+  --
+  -- `distinct on` because pg_depend carries a row per REFERENCED COLUMN: the five dependents
+  -- arrive as eighteen rows, which made the notice below report eighteen rebuilds. Deduped on the
+  -- name rather than with a bare `distinct`, since `aclitem[]` has no btree opclass to sort on.
   create temp table saved_defs on commit drop as
-  select dependent.relname::text as name, pg_get_viewdef(dependent.oid, true) as def,
-         dependent.relkind as rk
+  select distinct on (dependent.relname)
+         dependent.relname::text as name, pg_get_viewdef(dependent.oid, true) as def,
+         dependent.relkind as rk, dependent.relacl as acl
     from pg_depend d
     join pg_rewrite rw on rw.oid = d.objid
     join pg_class dependent on dependent.oid = rw.ev_class
-   where d.refobjid = 'market.performance'::regclass and dependent.relname <> 'performance';
+   where d.refobjid = 'market.performance'::regclass and dependent.relname <> 'performance'
+   order by dependent.relname;
 
   drop table market.performance cascade;
 
@@ -102,6 +112,19 @@ begin
   if remaining > 0 then
     raise exception 'could not rebuild % dependent(s) of market.performance: %', remaining, last_err;
   end if;
+
+  -- RE-ISSUE THE CAPTURED GRANTS. A rebuilt view with no ACL is unreadable by the app while
+  -- looking perfectly correct to a superuser probe — the same shape as the PGRST205 schema-cache
+  -- incident, and as `security_facets` coming back without the UNIQUE index that lets it refresh
+  -- concurrently.
+  for r in select s.name, a.grantee, a.privilege_type
+             from saved_defs s, lateral aclexplode(s.acl) a
+            where s.acl is not null loop
+    execute format('grant %s on market.%I to %s', r.privilege_type, r.name,
+                   case when r.grantee = 0 then 'public'
+                        else quote_ident((select rolname from pg_roles where oid = r.grantee)) end);
+  end loop;
+
   raise notice 'performance converted to a view and % dependent(s) rebuilt',
                (select count(*) from saved_defs);
 end $$;
