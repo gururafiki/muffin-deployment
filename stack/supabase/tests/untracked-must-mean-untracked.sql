@@ -39,7 +39,9 @@ insert into market.security_provider_symbol (security_id, provider_code, symbol)
   ('00000000-0000-0000-0000-0000000062a2', 'yfinance', 'T62PROV.KS')
 on conflict (security_id, provider_code) do nothing;
 
-insert into market.exchange_listing
+-- `untracked_listing` now reads `venue_listing` (the serving cutover), so the fixture feeds THAT
+-- base — a fixture for a view must feed the view's actual source.
+insert into market.venue_listing
   (figi, composite_figi, exch_code, ticker, name, country_iso2, provider_symbol) values
   ('BBG00T62L001', 'BBG00T62FIGI', 'KS', 'T62F',   'T62 By figi listing',     'KR', 'T62F.KS'),
   ('BBG00T62L002', 'BBG00T62X002', 'KS', 'T62P',   'T62 By provider listing', 'KR', 'T62PROV.KS'),
