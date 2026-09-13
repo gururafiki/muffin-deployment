@@ -30,7 +30,10 @@ insert into market.security (security_id, name, security_type_code) values
   ('00000000-0000-0000-0000-000000008401', 'ALREADY HELD PLC', 'equity')
 on conflict (security_id) do nothing;
 
-insert into market.exchange_listing (figi, composite_figi, exch_code, ticker, name, country_iso2, provider_symbol) values
+-- The serving cutover moved `untracked_listing` onto `venue_listing` (the directory the discovery
+-- sweep writes), so the fixture seeds THAT base — a fixture for a view must feed the view's actual
+-- source, or it proves nothing about the view.
+insert into market.venue_listing (figi, composite_figi, exch_code, ticker, name, country_iso2, provider_symbol) values
   -- The SAME company, cross-listed. A different composite FIGI, so untracked_listing cannot see it.
   ('BBGZZZ0001','BBGZZZ0001','ZCROSS','AHP','ALREADY HELD PLC','ZX','AHP.ZX'),
   -- A genuinely new company on the cross-listing venue.
