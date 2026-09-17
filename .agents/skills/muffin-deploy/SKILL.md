@@ -57,8 +57,8 @@ gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f ac
   (`dagster/_grpc/server.py`, `StartRun`). The roll only *warns* (`::warning::N run(s) in flight`)
   and goes ahead anyway. Wait for long runs (`muffin-dagster-operations`), and afterwards look for
   runs left `STARTED`.
-- **Read the roll's log.** A good roll prints `pulled <tag>`, `gRPC SERVING`, then `== images ==` with
-  `<service> <old> -> <new>` for all three services. `unchanged` is right only if nothing new was
+- **Read the roll's log.** A good roll prints `pulled <tag>`, `gRPC SERVING`, `muffin_ingest: LOADED`,
+  then `== images ==` with `<service> <old> -> <new>` for all three services. `unchanged` is right only if nothing new was
   pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
   `cannot say what is running`.
 - It logs free disk before pulling. If `/` is low, run `-f action=prune-images` first; that job fails
