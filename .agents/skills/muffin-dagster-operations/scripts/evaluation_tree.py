@@ -7,6 +7,11 @@
 
 Each line is one sub-condition: its label and whether it held. For a partitioned subset it prints
 the time windows or how many key ranges it covers instead of the raw subset.
+
+READ THE FIRST FALSE OPERAND OF AN AND, NOT THE LAST. An AND evaluates each operand only over what the
+operands before it left true, so once one is false every later sibling prints false (or an empty
+subset) whatever it would have said alone. On 2026-09-17 a `~any_deps_in_progress: false` sat beside
+`any_deps_in_progress: false` for exactly this reason.
 """
 
 import datetime as dt
