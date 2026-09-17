@@ -1,0 +1,92 @@
+---
+name: muffin-deploy
+description:
+  Use when shipping a change to the deployed muffin stack — merging a PR in muffin-ingest,
+  muffin-deployment, muffin-ui, muffin-agent or a docker repo, rolling the ingest image, running the
+  Oracle deploy, or checking that what merged is what is running.
+license: GPL-3.0
+metadata:
+  author: muffin
+  version: '1.0.0'
+---
+
+# Ship a change to production
+
+**Deployable repos ship only through a PR: open it → checks green → merge.** The umbrella (docs,
+skills, submodule re-pins) pushes directly. Never repair the node by hand; fix the repo and ship
+again, or the next deploy proves nothing.
+
+## 1. Merge only on green, and check what "green" means
+
+```bash
+gh pr create -R gururafiki/<repo> --base main --head <branch> --title "…" --body-file -
+gh pr view <n> -R gururafiki/<repo> --json statusCheckRollup,mergeStateStatus \
+  --jq '{merge: .mergeStateStatus, checks: [.statusCheckRollup[] | {name: (.name // .context), status, conclusion}]}'
+gh pr merge <n> -R gururafiki/<repo> --squash --delete-branch
+```
+
+- **Compare the check set with a known-good PR on the same repo.** muffin-ingest shows `checks` and
+  `definitions` SUCCESS and `image` SKIPPED (the image job runs on `main` only). A PR with merge
+  conflicts runs no `pull_request` workflow at all, so it reads green with fewer checks.
+- `gh pr merge` merges whatever the checks said, and a watcher's exit code is not their verdict.
+  Read the rollup first.
+- A squash merge orphans the umbrella's pin, so re-pin the submodule and push the umbrella.
+- `muffin-ingest` has no ruleset; nothing but this procedure gates its `main`.
+
+## 2. Pick the path
+
+| Change | Path | Measured |
+|---|---|---|
+| muffin-ingest code | `quality.yml` on `main` builds the arm64 image → `maintenance.yml` `roll-ingest` | build + image ~1.5 min, roll ~1.5 min (2026-09-16/17) |
+| schema, compose, nginx, `dagster.yaml`, Grafana provisioning, Ansible, Terraform | `deploy.yml` | 9–11 min (2026-09-12/13) |
+| muffin-ui, muffin-agent, docker-wrapper images | their image build dispatches `deploy` | muffin-ui image ~11 min (2026-09-13) |
+
+### Roll the ingest image
+
+```bash
+SHA=$(gh api repos/gururafiki/muffin-ingest/commits/main --jq .sha)
+RUN=$(gh run list -R gururafiki/muffin-ingest --workflow quality.yml --branch main \
+      --json databaseId,headSha --jq ".[] | select(.headSha==\"$SHA\") | .databaseId" | head -1)
+gh run watch -R gururafiki/muffin-ingest "$RUN" --interval 30 --exit-status   # THIS sha's image
+gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f action=roll-ingest
+```
+
+- Select the build by `headSha`: for ~20 s after a merge, the newest run is still the previous
+  commit's.
+- **A roll kills in-flight runs.** Each run is a `multiprocessing` child of the code server
+  (`dagster/_grpc/server.py`, `StartRun`). The roll only *warns* (`::warning::N run(s) in flight`)
+  and goes ahead anyway. Wait for long runs (`muffin-dagster-operations`), and afterwards look for
+  runs left `STARTED`.
+- **Read the roll's log.** A good roll prints `pulled <tag>`, `gRPC SERVING`, then `== images ==` with
+  `<service> <old> -> <new>` for all three services. `unchanged` is right only if nothing new was
+  pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
+  `cannot say what is running`.
+- It logs free disk before pulling. If `/` is low, run `-f action=prune-images` first; that job fails
+  below 5 GB free.
+- Dagster upgrade: compare `dagster/_core/storage/alembic/versions` between the two versions. New
+  revisions need `dagster instance migrate` before the roll.
+
+### Deploy
+
+```bash
+gh workflow run -R gururafiki/muffin-deployment deploy.yml --ref main -f mode=plan    # diff only
+gh workflow run -R gururafiki/muffin-deployment deploy.yml --ref main -f mode=apply
+gh run watch -R gururafiki/muffin-deployment <run-id> --interval 30 --exit-status
+```
+
+- `mode=plan` fails when anything would be REPLACED, because replacing the instance destroys every
+  database.
+- Deploys queue, never cancel (`concurrency: deploy-oracle`). A Galaxy 504 on the runner is
+  transient: dispatch again.
+- Every deploy restarts Grafana; a dashboard left open across it shows "No Data" until refreshed.
+
+## 3. Verify what is running
+
+- **Ingest:** after the roll, the next `ledger_heartbeat` (hourly at :07) must be SUCCESS, and so must
+  the next scheduled run of anything you changed. **Read its counters**
+  (`muffin-dagster-operations`). A LOADED location is not a working lane: every run failed for four
+  days behind one, and the first night after the fix succeeded while publishing half a price day.
+- **Schema:** on the node,
+  `select version, name from supabase_migrations.schema_migrations order by version desc limit 3`,
+  then read the changed view as `anon` (`muffin-reach-deployed-services`).
+- **UI:** fetch the served bundle and grep for a string the change introduced.
