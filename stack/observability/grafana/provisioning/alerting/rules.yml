@@ -427,7 +427,7 @@ groups:
     labels:
       muffin: pipeline
     annotations:
-      summary: '{{ $values.B }} backlog(s) have not moved in 24 hours'
+      summary: '{{ $values.B }} backlog(s) are draining by MARKING rather than by working'
       description: 'The 2026-08-13 signature: `pending_industry` reached zero while ~8,300 securities were being negative-cached as permanently unanswerable, and every count read as progress. A backlog
         whose depth falls while its matching `*_missing_at` population rises at a comparable rate is not draining — it is being emptied by exclusion. Its depth curve is identical to a healthy drain, so
         this is the only way to tell them apart.
@@ -473,7 +473,7 @@ groups:
     labels:
       muffin: pipeline
     annotations:
-      summary: '{{ $values.B }} backlog(s) have not moved in 24 hours'
+      summary: '{{ $values.B }} non-empty backlog(s) have been FLAT for a week'
       description: 'The stall signature, seven occurrences. `security-statements` returned `written: 240, remaining: 8668` byte-identical on five consecutive runs while reporting ok, and `security-eps-history`
         sat at 300 re-asking an exhausted quota. Both were found by eye.
 
@@ -518,7 +518,7 @@ groups:
     labels:
       muffin: pipeline
     annotations:
-      summary: '{{ $values.B }} backlog(s) have not moved in 24 hours'
+      summary: market-verify has not recorded a run in 36 hours
       description: 'The nightly correctness gate runs in GitHub Actions and NOTHING notices when it silently does not. Measured 2026-08-28: the last run was 08-27 13:47 — 26 hours earlier — against a daily
         03:30 schedule. That is the same unreliability the warm-up was moved off (19 runs against 32 expected, gaps to 13.3 hours), and market-verify deliberately STAYS there because it must read as anon
         over HTTP: run inside the database it would bypass the anon key, RLS, grants, the 3-second anon timeout and PostgREST''s schema cache, which is the whole point of it.
