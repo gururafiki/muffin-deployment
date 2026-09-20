@@ -22,7 +22,7 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 | Run storage | database `dagster`: `runs`, `run_tags`, `event_logs`, `asset_daemon_asset_evaluations`, `job_ticks`, `instigators` |
 | Raw Parquet | `/var/lib/muffin-ingest/raw/<asset>/<partition>.parquet` in the `muffin_muffin-ingest` container |
 | Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run` |
-| Nightly schedules (UTC) | `daily_fx`, `daily_indices`, `daily_prices` at 00:00 (serialised by the `sql` pool); `ledger_heartbeat` at :07 hourly; pruning at 03:40 |
+| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool); `ledger_heartbeat` at :07 hourly. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; `daily_prices_schedule` is defined and STOPPED, and is the rollback. |
 
 ## Last night, in order
 
