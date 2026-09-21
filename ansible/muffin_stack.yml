@@ -337,6 +337,40 @@
         group: "10001"
         mode: "0750"
 
+    # SAME VOLUME, SAME OWNER, DIFFERENT LIFETIME. Compute logs are a step's raw stdout/stderr and
+    # are pruned by `maintenance.yml`; raw is the provider's answer and is kept. Without this
+    # directory Dagster falls back to `$DAGSTER_HOME/storage`, which is mounted read-only, and
+    # every step logs `OSError: [Errno 30] Read-only file system` and captures nothing.
+    - name: Ensure the Dagster compute-log store exists on the data volume
+      file:
+        path: /mnt/data/ingest/compute-logs
+        state: directory
+        owner: "10001"
+        group: "10001"
+        mode: "0750"
+
+    # RETENTION LIVES HERE, NOT IN A MAINTENANCE ACTION SOMEONE HAS TO REMEMBER.
+    # `LocalComputeLogManager` never prunes, and this is the node whose boot volume reached 100%
+    # from image layers in one afternoon. A deploy-time `find -delete` is idempotent by
+    # construction — unlike a data repair, which is why `market.one_shot` exists and this does not
+    # need it — so the rule is re-asserted every deploy and cannot rot. Thirty days is far longer
+    # than any diagnosis has ever needed and still bounds the directory.
+    - name: Prune Dagster compute logs older than 30 days
+      ansible.builtin.find:
+        paths: /mnt/data/ingest/compute-logs
+        age: 30d
+        recurse: true
+        file_type: file
+      register: _stale_compute_logs
+
+    - name: Delete the stale compute logs
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _stale_compute_logs.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
     - name: Stage Supabase edge-function sources (main/ is the upstream router)
       ansible.posix.synchronize:
         src: "{{ muffin_template_dir }}/supabase/functions/"

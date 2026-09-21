@@ -1213,6 +1213,10 @@ services:
       # location's gRPC server, so the runs that write raw live in THIS container; the daemon and
       # the webserver never touch the files.
       - /mnt/data/ingest/raw:/var/lib/muffin-ingest/raw
+      # COMPUTE LOGS ARE THE OPPOSITE: written here, READ BY THE WEBSERVER, which is what renders
+      # the stdout/stderr tab. So this one mount appears twice, and the daemon — which executes no
+      # steps — is deliberately left out.
+      - /mnt/data/ingest/compute-logs:/var/lib/muffin-ingest/compute-logs
     networks:
       - muffin-net
     deploy:
@@ -1272,6 +1276,15 @@ services:
       DAGSTER_PG_PASSWORD: "{{ dagster_pg_password | default('') }}"
     volumes:
       - /home/ubuntu/dagster:/opt/dagster/home:ro
+      # THE WEBSERVER ONLY RENDERS THESE AND STILL NEEDS TO WRITE, WHICH IS NOT OBVIOUS AND WAS
+      # CHECKED RATHER THAN ASSUMED. This mount was `:ro` first — the honest expression of "this
+      # service reads, the code location writes". But tailing a LIVE step calls
+      # `LocalComputeLogSubscriptionManager.watch()`, which does `ensure_dir(directory)` before
+      # scheduling its observer, and a step that has not written yet has no directory. Read-only
+      # would therefore raise `Errno 30` the moment someone opened the log tab on a running step:
+      # the exact defect this whole block exists to fix, reproduced one service over by the fix
+      # for it. (Dagster 1.13.22, `local_compute_log_manager.py:315`.)
+      - /mnt/data/ingest/compute-logs:/var/lib/muffin-ingest/compute-logs
     networks:
       - muffin-net
     deploy:
