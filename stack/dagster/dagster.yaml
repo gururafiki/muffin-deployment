@@ -17,6 +17,27 @@ storage:
       db_name: dagster
       port: 5432
 
+# A STEP'S RAW STDOUT AND STDERR, WHICH UNTIL 2026-09-21 WENT NOWHERE.
+#
+# Unconfigured, Dagster uses `LocalComputeLogManager` under `$DAGSTER_HOME/storage` — and that
+# mount is read-only on purpose (see the telemetry note below), so EVERY step logged
+#
+#     OSError: [Errno 30] Read-only file system: '/opt/dagster/home/storage'
+#
+# and captured nothing. Structured logging was unaffected: `context.log.info(...)` is an event row
+# in the `dagster` database, which is why the lanes still looked fully instrumented. What was lost
+# is the one channel that carries a failure nobody raised — an uncaught library traceback, and the
+# dying output of a process the supervisor killed. This deployment's own history is the argument:
+# the three supervisor kills (memory, wall clock, CPU) are distinguishable IN THE LOG AND NOWHERE
+# ELSE, and a resource died on every invocation for two days before that was read.
+#
+# A second writable mount rather than loosening the first, for the same reason raw has one.
+compute_logs:
+  module: dagster._core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
+    base_dir: /var/lib/muffin-ingest/compute-logs
+
 # OFF, AND IT IS NOT A PREFERENCE — IT WAS CRASH-LOOPING THE DAEMON. Dagster OSS reports anonymous
 # usage telemetry by default and writes its state under `$DAGSTER_HOME`, which is bind-mounted
 # READ-ONLY into all three services (the config is staged by Ansible and its hash restarts them):
