@@ -31,15 +31,24 @@ log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # A roll restarts the code location, and a run executes as a subprocess OF the code location — so
 # anything in flight dies with it. Report rather than refuse: the count is what tells you whether to
 # care, and blocking on it would make the roll unusable exactly when a bad build needs replacing.
-inflight() {
+#
+# THE IDS, NOT A COUNT, because what the roll kills it must also FAIL. A killed run's row stays
+# `STARTED`, and with `granularity: run` it keeps its pool slot for ever, so every later run in that
+# pool queues behind a process that no longer exists. Dagster's run monitoring cannot notice:
+# `DefaultRunLauncher` does not support worker health checks (`supports_check_run_worker_health` is
+# the base class's False). Measured 2026-09-24: after the muffin-ingest#75 roll, `6c99d13c` held the
+# `sql` slot, with the symbology backfill's runs queued behind it, until it was failed by hand.
+inflight_ids() {
   docker exec "$(docker ps -qf name=muffin_supabase-db | head -1)" \
     psql -U postgres -d dagster -tAc \
-    "select count(*) from runs where status in ('STARTED','STARTING','CANCELING')" </dev/null 2>/dev/null || echo "?"
+    "select run_id from runs where status in ('STARTED','STARTING','CANCELING')" </dev/null 2>/dev/null
 }
 
-running="$(inflight)"
-if [ "$running" != "0" ] && [ "$running" != "?" ]; then
-  echo "::warning::${running} run(s) in flight; rolling the code location interrupts them"
+if ids="$(inflight_ids)"; then
+  running="$(printf '%s' "$ids" | grep -c . || true)"
+  if [ "$running" != "0" ]; then
+    echo "::warning::${running} run(s) in flight; the roll interrupts them, then reports them failed"
+  fi
 fi
 
 # THE RUNNING CONTAINER'S IMAGE, NOT THE SPEC'S — and the first version of this script got it
@@ -83,6 +92,19 @@ if ! pull_output="$(docker pull "$IMAGE_TAG" 2>&1)"; then
 fi
 log "pulled $IMAGE_TAG"
 
+# WHICH RUNS THIS ROLL IS ABOUT TO KILL — read as late as possible, after the pull, so a run started
+# in between is a matter of seconds rather than of however long the pull took.
+if ! interrupted="$(inflight_ids)"; then
+  interrupted=""
+  echo "::warning::could not list the runs in flight; any this roll interrupts must be failed by hand"
+fi
+# Said on every exit after this point, including the failures below: the runs are dead whether or
+# not the new build loads, and the operator dealing with a broken build should not also have to
+# discover that the queue is stuck.
+still_held() {
+  [ -z "$interrupted" ] || echo "::error::interrupted and still holding their pool slots: $(printf '%s' "$interrupted" | tr '\n' ' ')"
+}
+
 declare -A BEFORE
 for svc in "${SERVICES[@]}"; do
   ref="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
@@ -100,7 +122,7 @@ log "waiting for the code location to serve"
 deadline=$((SECONDS + 180))
 until docker exec "$(docker ps -qf name=muffin_dagster-daemon | head -1)" \
         dagster api grpc-health-check -h "$CODE_LOCATION_HOST" -p "$CODE_LOCATION_PORT" </dev/null >/dev/null 2>&1; do
-  [ "$SECONDS" -lt "$deadline" ] || { echo "::error::gRPC server never reported SERVING"; exit 1; }
+  [ "$SECONDS" -lt "$deadline" ] || { echo "::error::gRPC server never reported SERVING"; still_held; exit 1; }
   sleep 5
 done
 log "gRPC SERVING"
@@ -144,7 +166,7 @@ PY
   then
     break
   fi
-  [ "$SECONDS" -lt "$deadline" ] || { echo "::error::code location did not load"; exit 1; }
+  [ "$SECONDS" -lt "$deadline" ] || { echo "::error::code location did not load"; still_held; exit 1; }
   sleep 10
 done
 
@@ -166,3 +188,38 @@ done
 # rolling when nothing new has been pushed — but it has to be a thing this script observed rather
 # than a thing it failed to observe.
 [ "$unknown" -eq 0 ] || { echo "::error::the roll cannot say what is running"; exit 1; }
+
+# FAIL WHAT THE ROLL KILLED. Only runs recorded before the update and still live now: a run that
+# finished before the container went was never interrupted, and one started since belongs to the
+# new code location, so neither is touched. CANCELING becomes CANCELED, since that is what was
+# asked for. A failure here is an error, not a warning — the roll itself worked, but the queue
+# behind these runs will not move until someone does this by hand.
+if [ -n "$interrupted" ]; then
+  echo
+  echo "== interrupted runs =="
+  # shellcheck disable=SC2086  # one argument per run id; they are UUIDs
+  if ! docker exec -i "$(docker ps -qf name=muffin_dagster-webserver | head -1)" python - $interrupted <<'PY'
+import sys
+
+from dagster import DagsterInstance, DagsterRunStatus
+
+WHY = "interrupted by an image roll: its process was a child of the code location the roll replaced"
+instance = DagsterInstance.get()
+for run_id in sys.argv[1:]:
+    run = instance.get_run_by_id(run_id)
+    if run is None:
+        print(f"{run_id[:8]}  no longer exists")
+    elif run.status in (DagsterRunStatus.STARTING, DagsterRunStatus.STARTED):
+        instance.report_run_failed(run, message=WHY)
+        print(f"{run_id[:8]}  {run.job_name}: {run.status.value} -> FAILURE")
+    elif run.status == DagsterRunStatus.CANCELING:
+        instance.report_run_canceled(run, message=WHY)
+        print(f"{run_id[:8]}  {run.job_name}: CANCELING -> CANCELED")
+    else:
+        print(f"{run_id[:8]}  {run.job_name}: {run.status.value}, finished before the roll, left alone")
+PY
+  then
+    still_held
+    exit 1
+  fi
+fi
