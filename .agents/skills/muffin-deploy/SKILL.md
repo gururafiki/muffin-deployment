@@ -59,12 +59,15 @@ gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f ac
   2026-09-24 that pipeline was still waiting ten minutes after a roll that had finished in ninety
   seconds; which half hung was not established. The polling loop returned as soon as the run did.
 - **A roll kills in-flight runs.** Each run is a `multiprocessing` child of the code server
-  (`dagster/_grpc/server.py`, `StartRun`). The roll only *warns* (`::warning::N run(s) in flight`)
-  and goes ahead anyway. Wait for long runs (`muffin-dagster-operations`), and afterwards look for
-  runs left `STARTED`.
+  (`dagster/_grpc/server.py`, `StartRun`). The roll warns (`::warning::N run(s) in flight`), goes
+  ahead, and since muffin-deployment#387 reports the runs it killed as failed once the new location
+  has loaded (`== interrupted runs ==`). Wait for long runs anyway (`muffin-dagster-operations`) —
+  a failed run is still lost work. If the roll exits early it prints `::error::interrupted and still
+  holding their pool slots: <ids>`, and those must be failed by hand.
 - **Read the roll's log.** A good roll prints `pulled <tag>`, `gRPC SERVING`, `muffin_ingest: LOADED`,
-  then `== images ==` with `<service> <old> -> <new>` for all three services. `unchanged` is right only if nothing new was
-  pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
+  then `== images ==` with `<service> <old> -> <new>` for all three services, and
+  `== interrupted runs ==` when something was in flight. `unchanged` is right only if nothing new
+  was pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
   `cannot say what is running`.
 - It logs free disk before pulling. If `/` is low, run `-f action=prune-images` first; that job fails
   below 5 GB free.

@@ -79,10 +79,11 @@ The daemon stores an evaluation whenever the result changes:
   failed. Measured 2026-09-24: two failed ranges of 200 sat unrequested while ~120 later runs
   drained around them. After fixing the cause, backfill the partitions whose upstream is
   materialised and whose own is not — nothing else will.
-- **After a roll, look for runs left `STARTED`.** A roll kills in-flight runs, the killed run stays
-  `STARTED`, and with `granularity: run` it holds its pool slot for ever — run monitoring cannot
-  see it, because `DefaultRunLauncher` does not support worker health checks. Fail it with
-  `instance.report_run_failed(instance.get_run_by_id(<id>))` inside the webserver container.
+- **A run left `STARTED` after a roll holds its pool slot for ever.** The roll killed its process,
+  and run monitoring cannot see that, because `DefaultRunLauncher` does not support worker health
+  checks. The roll fails such runs itself since muffin-deployment#387. When it could not — it
+  exited early, or could not list them — fail each one inside the webserver container with
+  `instance.report_run_failed(instance.get_run_by_id(<id>))`.
 
 ## Launch
 
