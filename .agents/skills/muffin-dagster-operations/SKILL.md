@@ -22,7 +22,7 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 | Run storage | database `dagster`: `runs`, `run_tags`, `event_logs`, `asset_daemon_asset_evaluations`, `job_ticks`, `instigators` |
 | Raw Parquet | `/var/lib/muffin-ingest/raw/<asset>/<partition>.parquet` in the `muffin_muffin-ingest` container |
 | Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run` |
-| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool); `ledger_heartbeat` at :07 hourly. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; `daily_prices_schedule` is defined and STOPPED, and is the rollback. |
+| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool); `ledger_heartbeat` at :07 hourly. Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; `daily_prices_schedule` is defined and STOPPED, and is the rollback. |
 
 ## Last night, in order
 
@@ -47,9 +47,8 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    select as_of, count(*) from market.security_return group by 1 order by 1;
    ```
    Expect ~11.6k price bars on a weekday, ~41 FX rates, 549 index rows plus 77 sector rows, and
-   `security_return` at the newest trading day. (Until
-   `docs/deferred/2026-09-17-security-return-never-auto-materialises.md` closes, that last one needs a
-   hand-run.)
+   `security_return` at the newest trading day — it rebuilds itself after `nightly_prices` (the
+   note that said it needed a hand-run closed 2026-09-19). Launch it by hand only to recover a night.
 
 ## Why a run failed
 
@@ -63,8 +62,28 @@ The daemon stores an evaluation whenever the result changes:
 - `asset_daemon_asset_evaluations`, keyed `asset_key = '["<asset>"]'`, with `num_requested`.
 - Print the tree with `scripts/evaluation_tree.py`; the false branch is the reason. For
   `security_return` it was `any_deps_missing: true` (one `price_bar` day and unfilled history keys).
-- Sensor ticks: `job_ticks` joined to `instigators` where `instigator_body like '%<sensor>%'`.
-  `SKIPPED` every 30 s is a healthy sensor with nothing to do.
+- Sensor ticks: `job_ticks`, with the sensor's name at `tick_body::json->>'job_name'`. `SKIPPED`
+  every 30 s is a healthy sensor with nothing to do. An automation sensor requests on its FIRST
+  tick and skips while that backfill is in progress, so read the OLDEST tick after a change — the
+  newest three all read SKIPPED on a sensor that has just launched 6,984 partitions.
+- **No evaluation row at all, for an asset that has a condition, means the daemon never received
+  the condition.** A condition containing any Python subclass of `AutomationCondition` is not
+  serialisable, so the code location ships the daemon a display snapshot and `None`
+  (`external_data.resolve_automation_condition_args`); the UI still shows the condition. Measured
+  2026-09-24: the symbology rungs requested nothing over 1,807 ticks. Such an asset must be targeted
+  by a `use_user_code_server=True` sensor — here `symbology_rungs`, type `AUTOMATION` — and
+  `tests/test_automation_is_evaluable.py` fails the build when one is not.
+- **A failed request is "handled".** `since_last_handled` counts `newly_requested() |
+  newly_updated() | initial_evaluation()` (`automation_condition.py`, 1.13.22), so the REQUEST
+  satisfies it whatever the run then does, and `eager()` never re-requests a partition whose run
+  failed. Measured 2026-09-24: two failed ranges of 200 sat unrequested while ~120 later runs
+  drained around them. After fixing the cause, backfill the partitions whose upstream is
+  materialised and whose own is not — nothing else will.
+- **A run left `STARTED` after a roll holds its pool slot for ever.** The roll killed its process,
+  and run monitoring cannot see that, because `DefaultRunLauncher` does not support worker health
+  checks. The roll fails such runs itself since muffin-deployment#387. When it could not — it
+  exited early, or could not list them — fail each one inside the webserver container with
+  `instance.report_run_failed(instance.get_run_by_id(<id>))`.
 
 ## Launch
 

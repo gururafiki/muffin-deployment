@@ -25,13 +25,15 @@ gh pr view <n> -R gururafiki/<repo> --json statusCheckRollup,mergeStateStatus \
 gh pr merge <n> -R gururafiki/<repo> --squash --delete-branch
 ```
 
-- **Compare the check set with a known-good PR on the same repo.** muffin-ingest shows `checks` and
-  `definitions` SUCCESS and `image` SKIPPED (the image job runs on `main` only). A PR with merge
-  conflicts runs no `pull_request` workflow at all, so it reads green with fewer checks.
+- **Compare the check set with a known-good PR on the same repo.** muffin-ingest shows `checks`,
+  `definitions` and `image` SUCCESS (`image` has built on every PR since 2026-09-19 and pushes only
+  from `main`), plus CodeQL's three. A PR with merge conflicts runs no `pull_request` workflow at
+  all, so it reads green with fewer checks.
 - `gh pr merge` merges whatever the checks said, and a watcher's exit code is not their verdict.
   Read the rollup first.
 - A squash merge orphans the umbrella's pin, so re-pin the submodule and push the umbrella.
-- `muffin-ingest` has no ruleset; nothing but this procedure gates its `main`.
+- `muffin-ingest` joined Tier 1 on 2026-09-19: ruleset 23699949 requires `checks`, `definitions`
+  and `image`.
 
 ## 2. Pick the path
 
@@ -53,13 +55,19 @@ gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f ac
 
 - Select the build by `headSha`: for ~20 s after a merge, the newest run is still the previous
   commit's.
+- **Poll `gh run view <id> --json status` rather than piping `gh run watch` into `--log`.** On
+  2026-09-24 that pipeline was still waiting ten minutes after a roll that had finished in ninety
+  seconds; which half hung was not established. The polling loop returned as soon as the run did.
 - **A roll kills in-flight runs.** Each run is a `multiprocessing` child of the code server
-  (`dagster/_grpc/server.py`, `StartRun`). The roll only *warns* (`::warning::N run(s) in flight`)
-  and goes ahead anyway. Wait for long runs (`muffin-dagster-operations`), and afterwards look for
-  runs left `STARTED`.
+  (`dagster/_grpc/server.py`, `StartRun`). The roll warns (`::warning::N run(s) in flight`), goes
+  ahead, and since muffin-deployment#387 reports the runs it killed as failed once the new location
+  has loaded (`== interrupted runs ==`). Wait for long runs anyway (`muffin-dagster-operations`) —
+  a failed run is still lost work. If the roll exits early it prints `::error::interrupted and still
+  holding their pool slots: <ids>`, and those must be failed by hand.
 - **Read the roll's log.** A good roll prints `pulled <tag>`, `gRPC SERVING`, `muffin_ingest: LOADED`,
-  then `== images ==` with `<service> <old> -> <new>` for all three services. `unchanged` is right only if nothing new was
-  pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
+  then `== images ==` with `<service> <old> -> <new>` for all three services, and
+  `== interrupted runs ==` when something was in flight. `unchanged` is right only if nothing new
+  was pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
   `cannot say what is running`.
 - It logs free disk before pulling. If `/` is low, run `-f action=prune-images` first; that job fails
   below 5 GB free.
