@@ -45,7 +45,7 @@
         num=$(cat "/sys/class/block/$(basename "$part")/partition")
         [ "$(findmnt -no FSTYPE /)" = "ext4" ] || { echo "root is not ext4; not growing"; exit 0; }
         before=$(df --output=size -B1G / | tail -1 | tr -d ' ')
-        # OCI's documented rescan for a paravirtualized volume: one direct read, then rescan.
+        # The rescan OCI documents for a paravirtualized volume: one direct read, then rescan.
         dd iflag=direct if="$disk" of=/dev/null count=1 status=none
         echo 1 > "/sys/class/block/$(basename "$disk")/device/rescan"
         growpart "$disk" "$num" || [ $? -eq 1 ]
