@@ -82,6 +82,15 @@ gh workflow run -R gururafiki/muffin-deployment deploy.yml --ref main -f mode=ap
 gh run watch -R gururafiki/muffin-deployment <run-id> --interval 30 --exit-status
 ```
 
+- **A Terraform change to the instance: plan on the BRANCH before merging**
+  (`--ref <branch> -f mode=plan`), then read the instance's own line in the log, not only the
+  replacement list, e.g. `# oci_core_instance.node[0] will be updated in-place` and
+  `boot_volume_size_in_gbs = "47" -> "95"`. That is how the 2026-09-25 boot-volume grow was cleared
+  before merge.
+- **An Ansible change: run `ansible-playbook --syntax-check ansible/muffin_stack.yml` locally
+  first.** The repo's offline guards do not parse the playbook. On 2026-09-25 an apostrophe in a
+  bash comment inside a `shell:` body failed CI's syntax check: Ansible splits the body with its own
+  argument splitter, which reads the apostrophe as an unbalanced quote.
 - `mode=plan` fails when anything would be REPLACED, because replacing the instance destroys every
   database.
 - Deploys queue, never cancel (`concurrency: deploy-oracle`). A Galaxy 504 on the runner is
