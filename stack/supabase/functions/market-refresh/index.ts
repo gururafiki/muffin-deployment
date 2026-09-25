@@ -240,6 +240,34 @@ async function writeCurrencyFor(
   return { written: true, overruled }
 }
 
+/**
+ * RESOURCES THE D2 CUTOVER RETIRED (2026-09-12), refused before anything else is decided.
+ *
+ * Their handlers are still in this file and their `cron_resource` rows are disabled, which stops
+ * the SCHEDULE and nothing else. A direct call still reached them: an admin pressing Refresh in the
+ * app would have spent a provider request on a family Dagster now owns, and `fx-rates` would have
+ * written spot rates into `market.fx_rate` beside the lane that owns that table — two writers for
+ * one key. Measured 2026-09-25: the app still asked for `instrument-performance` on every Markets
+ * load, and was stopped only because the visitor was not an admin.
+ *
+ * 410, not 200 with `ok: false`: nothing failed, the request names something that no longer
+ * exists here. The value says where the data comes from now, so the answer is actionable.
+ *
+ * Kept equal to the migrations' `-- RETIRES:` markers by `logic-check.ts`, in both directions.
+ */
+const RETIRED: Record<string, string> = {
+  'security-prices': 'Dagster price lane (price_bar) — read market.price_series',
+  'security-daily-history': 'Dagster price history lane (price_bar_history) — read market.price_series',
+  'security-price-history': 'Dagster price history lane (price_bar_history) — read market.price_series',
+  'instrument-prices': 'Dagster price lane (price_bar) — read market.price_series',
+  'security-performance': 'Dagster security_return — read market.performance',
+  'instrument-performance': 'Dagster security_return — read market.performance',
+  'sector-performance': 'Dagster daily_indices (index_return) — read market.performance',
+  'country-performance': 'Dagster daily_indices (index_return) — read market.performance',
+  'group-performance': 'Dagster daily_indices (index_return) — read market.performance',
+  'fx-rates': 'Dagster daily_fx — read market.fx_rate',
+}
+
 async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok')
 
@@ -556,6 +584,14 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // collapse the pair into one sample and the "what did this sweep drain" reading would be lost.
     [OBSERVABILITY_RESOURCE]: 10,
   }
+  if (Object.hasOwn(RETIRED, resource)) {
+    return json({
+      resource,
+      error: `'${resource}' was retired on 2026-09-12`,
+      replacedBy: RETIRED[resource],
+    }, 410)
+  }
+
   const EXTRA = Object.keys(EXTRA_TTL_MINUTES)
   const spec = RESOURCES[resource]
   if (!spec && !EXTRA.includes(resource)) {
@@ -5534,23 +5570,11 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
 
       const out: Record<string, unknown> = { resource, symbol: wanted }
 
-      // 1. Returns.
-      try {
-        const perf = await loadEquityReturns(fetcher, [fetchSymbol], new Date(), SEC_PERF_TTL_MINUTES, 15_000)
-        const rowsOut = perf.map((r) => ({ ...r, scope_id: wanted }))
-        if (rowsOut.length > 0) {
-          const { error } = await market
-            .from('performance')
-            .upsert(dedupeBy(rowsOut, (r) => `${r.scope}|${r.scope_id}|${r.period}`),
-            { onConflict: 'scope,scope_id,period' })
-          if (error) throw new Error(`performance upsert failed: ${error.message}`)
-        }
-        out.returns = rowsOut.length
-      } catch (e) {
-        out.returnsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
-      }
+      // Returns are not refreshed here. Since D2 they come from Dagster's security_return, and
+      // `market.performance` is a VIEW over it, so recomputing one symbol here spent a provider
+      // request and up to 15 s of the user's wait on an upsert that could only fail.
 
-      // 2. Profile: market cap, and the sector if it is still missing.
+      // 1. Profile: market cap, and the sector if it is still missing.
       try {
         const prof = await fetcher(
           `/api/v1/equity/profile?symbol=${encodeURIComponent(fetchSymbol)}&provider=yfinance`,
@@ -5569,7 +5593,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         out.profileError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
       }
 
-      // 3. Fundamentals — keyless, and it covers the non-US listings that defeated every provider
+      // 2. Fundamentals — keyless, and it covers the non-US listings that defeated every provider
       //    we hold a key for. Fetched by the PROVIDER symbol, like prices.
       try {
         const f = await fetchFundamentals(fetcher, fetchSymbol, 15_000)
@@ -5625,7 +5649,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         out.fundamentalsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
       }
 
-      // 4. STATEMENTS, because on demand is the only route that reaches them in a useful time.
+      // 3. STATEMENTS, because on demand is the only route that reaches them in a useful time.
       //
       // `security-statements` fetches ONE security at a time — three calls each, and the endpoints
       // do not accept several symbols (measured: `symbolsAsked 50, symbolsAnswered 0`). At 60 a run
