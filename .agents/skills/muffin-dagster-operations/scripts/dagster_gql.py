@@ -8,14 +8,17 @@ Commands (arguments are plain tokens, so they survive the ssh single quotes):
     backfill        --assets a,b --partitions 2026-09-11,2026-09-12 --reason <tag> [--dry-run]
     materialize     --assets a --reason <tag> [--dry-run]      unpartitioned assets, one run
     backfill-status --id <backfillId>
+    schedule-dry-run --schedule <name> --at 2026-09-26T00:00:00      read-only: what a tick would ask
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 
 URL = "http://127.0.0.1:3000/graphql"
 LOCATION = "muffin_ingest"
@@ -54,7 +57,14 @@ def main() -> None:
             p.add_argument("--partitions", required=True)
     status = sub.add_parser("backfill-status")
     status.add_argument("--id", required=True)
+    dry = sub.add_parser("schedule-dry-run")
+    dry.add_argument("--schedule", required=True)
+    dry.add_argument("--at", required=True, help="the tick time, ISO, read as UTC")
     args = parser.parse_args()
+
+    if args.command == "schedule-dry-run":
+        schedule_dry_run(args.schedule, args.at)
+        return
 
     if args.command == "repos":
         query = "{ repositoriesOrError { __typename ... on RepositoryConnection { nodes { name location { name } } } ... on Error { message } } }"
@@ -104,6 +114,49 @@ def main() -> None:
         print(json.dumps(variables, indent=1))
         return
     print(json.dumps(gql(mutation, variables), indent=1))
+
+
+def schedule_dry_run(schedule: str, at: str) -> None:
+    """Evaluate one tick of a schedule with the DEPLOYED code, against production's run storage.
+
+    Launches nothing. It shows what the tick will request before it fires, which is the only way to
+    check a schedule that reads state (the price sweep resumes from its own previous runs) before
+    the night it matters. It returns the RunRequests' own tags only: tags a job carries in its
+    `run_tags` (e.g. `dagster/priority`) are merged in when the run is created and do not appear.
+    """
+    when = datetime.fromisoformat(at).replace(tzinfo=UTC).timestamp()
+    query = """mutation($s: ScheduleSelector!, $t: Float) { scheduleDryRun(selectorData: $s, timestamp: $t) {
+        __typename
+        ... on DryRunInstigationTick { evaluationResult { skipReason error { message }
+              runRequests { runKey jobName tags { key value } } } }
+        ... on PythonError { message } ... on ScheduleNotFoundError { message } } }"""
+    selector = {
+        "repositoryLocationName": LOCATION,
+        "repositoryName": REPOSITORY,
+        "scheduleName": schedule,
+    }
+    result = gql(query, {"s": selector, "t": when})
+    tick = (result.get("data") or {}).get("scheduleDryRun") or {}
+    if tick.get("__typename") != "DryRunInstigationTick":
+        print(json.dumps(result, indent=1)[:3000])
+        return
+    evaluation = tick["evaluationResult"]
+    if evaluation.get("error") or evaluation.get("skipReason"):
+        print(json.dumps(evaluation, indent=1)[:3000])
+        return
+    requests = evaluation["runRequests"]
+    print(f"{schedule} at {at} UTC: {len(requests)} run request(s)")
+    if not requests:
+        return
+    print(f"  run keys: {requests[0]['runKey']} .. {requests[-1]['runKey']}")
+    values: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    for request in requests:
+        for tag in request["tags"]:
+            values[tag["key"]][tag["value"]] += 1
+    for key, counter in sorted(values.items()):
+        shown = ", ".join(f"{v} x{n}" for v, n in counter.most_common(3))
+        more = f" (+{len(counter) - 3} more)" if len(counter) > 3 else ""
+        print(f"  {key}: {len(counter)} distinct — {shown}{more}")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 | Run storage | database `dagster`: `runs`, `run_tags`, `event_logs`, `asset_daemon_asset_evaluations`, `job_ticks`, `instigators` |
 | Raw Parquet | `/var/lib/muffin-ingest/raw/<asset>/<partition>.parquet` in the `muffin_muffin-ingest` container |
 | Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run` |
-| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool); `ledger_heartbeat` at :07 hourly. Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; `daily_prices_schedule` is defined and STOPPED, and is the rollback. |
+| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool; the two short lanes carry `dagster/priority: 1` and go first, since 2026-09-25). `nightly_prices` resumes after the last key the previous night asked for (`muffin/sweep_last` on every run); `ledger_heartbeat` at :07 hourly. Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; `daily_prices_schedule` is defined and STOPPED, and is the rollback. |
 
 ## Last night, in order
 
@@ -107,6 +107,26 @@ ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 - **Do not roll while a long run is in flight.** The roll kills it (`muffin-deploy`).
 - **A lane fetched through http-cache** (FX spot) can receive the previous day's body. Check
   `docker service logs muffin_http-cache --since 1h` for `STALE`, and check the table, not the run.
+
+## Before a schedule fires
+
+A schedule that reads state (the price sweep reads its own previous runs) can be checked against
+the deployed code before its tick, read-only:
+
+```bash
+ssh muffin "$G schedule-dry-run --schedule nightly_prices --at 2026-09-26T00:00:00" < scripts/dagster_gql.py
+```
+
+It prints the request count, the run-key range, and every tag with its distinct values. For
+`nightly_prices`, expect ~100 requests, one `muffin/sweep_night`, and one `muffin/sweep_last`.
+
+- **It shows the RunRequest's own tags only.** A job's `run_tags` (`dagster/priority` on
+  `daily_fx` and `daily_indices`) are merged in when the run is created. Check those on the runs
+  themselves, or by importing the definitions in the `muffin_muffin-ingest` container.
+- **To check a change before merging it,** exec the new module's source in the webserver container
+  and call the schedule with
+  `dg.build_schedule_context(instance=dg.DagsterInstance.get(), scheduled_execution_time=…)`. That
+  is how muffin-ingest#78 was evaluated against production's run storage before its PR.
 
 ## Replay stage 2 on the stored files
 
