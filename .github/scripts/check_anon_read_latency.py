@@ -41,6 +41,14 @@ QUERIES = [
     ("stock chart, local listing", "price_series?select=date,close&symbol=eq.SAP.DE&grain=eq.daily&order=date"),
     ("stock statements", "security_statement_current?select=period_ending,reporting_currency,data&symbol=eq.AAPL&statement=eq.income&order=period_ending.desc&limit=4"),
     ("markets donut", "fund_sector_weight?select=sector_id,weight&limit=100"),
+    # The sector page's stock list, exactly as `useSectorConstituents` sends it — and the drill-down
+    # from a country, which adds the second filter. Missing from this list until 2026-09-25, when the
+    # page had been answering 57014 for about two weeks: its weight was a lateral over
+    # `fund_holding_current`, whose per-fund `max(as_of)` aggregate the planner re-ran per
+    # constituent (14.2 s for Information Technology). Every probe here passed throughout, because
+    # none of them was this query.
+    ("sector page stocks", "sector_constituents?select=security_id,name,symbol,industry,country_iso2,weight,fund_symbol,market_cap,as_of&sector_id=eq.information-technology&order=weight.desc.nullslast,market_cap.desc.nullslast,name.asc&offset=0&limit=20"),
+    ("sector page stocks, from a country", "sector_constituents?select=security_id,name,symbol,industry,country_iso2,weight,fund_symbol,market_cap,as_of&sector_id=eq.financials&country_iso2=eq.KR&order=weight.desc.nullslast,market_cap.desc.nullslast,name.asc&offset=0&limit=20"),
     ("screener, two filters", "security_facets?select=security_id&msci_tier=eq.developed&sector_id=eq.information-technology&limit=50"),
     ("country macro panel", "macro_current?select=code,name,value,as_of&country_iso2=eq.US"),
     # The ratio series range-joins 3.4M price bars to 2.1M metric rows, so it is the biggest join
