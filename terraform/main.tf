@@ -151,6 +151,10 @@ resource "oci_core_instance" "node" {
   source_details {
     source_id   = data.oci_core_images.os.images[0].id
     source_type = "image"
+    # GROWN IN PLACE, NEVER A REPLACEMENT — see the variable. The image default was 46.6 GB and
+    # containerd's image store reached 32 GB of it: measured 2026-09-25, `/` at 89% with 5.3 GB free
+    # while every ingest roll pulls ~1 GB.
+    boot_volume_size_in_gbs = var.boot_volume_size_in_gbs
   }
 
   shape_config {

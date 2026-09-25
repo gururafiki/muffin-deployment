@@ -90,9 +90,19 @@ rather than merely leaving it recoverable.
 
 `terraform/storage.tf` creates a 100 GB `oci_core_volume` (`prevent_destroy`, paravirtualized
 attachment) and `ansible/roles/block_storage` formats it ext4, mounts it at `/mnt/data` **by UUID**
-with `nofail`, and points Docker's `data-root` at `/mnt/data/docker`. Images, every named volume,
-container layers and swarm state all live there together, so a replaced instance reattaches the
-volume and finds everything already present — nothing to restore.
+with `nofail`, and points Docker's `data-root` at `/mnt/data/docker`. Every named volume and the
+swarm state live there, so a replaced instance reattaches the volume and finds its data already
+present — nothing to restore.
+
+**Images and container layers do not.** Under the containerd image store
+(`driver-type: io.containerd.snapshotter.v1`) they live in containerd's root, `/var/lib/containerd`,
+which `data-root` does not move and which sits on the **boot** volume; a replaced node re-pulls
+them. So `/` grows with every image pull, and the boot volume is sized in Terraform too:
+`boot_volume_size_in_gbs` in `terraform/prod.auto.tfvars`, 95 GB since 2026-09-25, when `/` reached
+89% at the image default of 46.6 GB. Terraform grows the volume in place (`UpdateBootVolume`, no
+replacement — `deploy.yml`'s plan mode refuses one anyway), and the first pre_task in
+`ansible/muffin_stack.yml` rescans the disk and grows the root partition and filesystem online.
+`maintenance.yml` `prune-images` reclaims dangling images and fails below 5 GB free.
 
 Three things here are load-bearing and easy to undo by accident:
 
@@ -532,12 +542,7 @@ venues.
 
 | Resource | Writes | Upstream | TTL |
 |---|---|---|---|
-| `sector-performance` | `performance` (sectors) | finviz — **US-listed only** | 1 day |
-| `country-performance` | `performance` (countries) | yfinance, per-country ETF | 1 day |
-| `group-performance` | `performance` (tiers) | yfinance, per-group ETF | 1 day |
-| `instrument-performance` | `performance` (35 curated) | yfinance | 1 day |
 | `instrument-profile` | `instruments` sector/industry/cap | yfinance | 1 week |
-| `instrument-prices` | `prices` (~400-day window) | yfinance, batched 12 | 1 day |
 | `fund-holdings` | `security`, `issuer`, `fund_holding` | **SEC EDGAR** | 1 month |
 | `derive-classifications` | `security_taxonomy`, country | none — a SQL join | 1 month |
 | `security-tickers` | ticker identifiers | **OpenFIGI** | 1 day |
@@ -545,13 +550,27 @@ venues.
 | `security-yahoo-symbols` | `security_provider_symbol`, `listing` | **Yahoo search, by ISIN** | 1 day |
 | `security-profiles` | `security_taxonomy` (sector) | yfinance | 1 day |
 | `security-industries` | `taxonomy_node` level 2, `security.market_cap` | yfinance | 1 day |
-| `security-performance` | `performance` (whole universe) | yfinance | 1 day |
-| `security-prices` | `security_price` (~400-day daily window) | yfinance, **incremental** | 1 day |
 | `security-fundamentals` | `security_fundamentals` | yfinance | 1 week |
 | `security-statements` | `security_statement` | yfinance | 1 week |
 | `exchange-listings` | `exchange_listing` (venue sweep) | **OpenFIGI** | 1 month |
-| `security-refresh` | one security, on demand | yfinance | none |
+| `security-refresh` | one security on demand: market cap, fundamentals, statements | yfinance | none |
 | `promote-listing` | promotes an untracked listing | none | none |
+
+**Retired by the D2 cutover (2026-09-12).** Prices, returns and FX moved to Dagster (`muffin-ingest`),
+and `market.performance` became a view over `security_return` and `index_return`. The rotation rows
+are disabled, and since 2026-09-25 the function also refuses a direct call with **410** and the lane
+that replaced it — before the admin gate, so the answer does not depend on who asks. Until then an
+admin's call still reached the old handlers, and `fx-rates` would have written `market.fx_rate`
+beside the lane that owns it. `logic-check.ts` holds this list equal to the migrations'
+`-- RETIRES:` markers.
+
+| Retired | Now |
+|---|---|
+| `security-prices`, `instrument-prices` | Dagster `price_bar` — read `market.price_series` |
+| `security-daily-history`, `security-price-history` | Dagster `price_bar_history` — read `market.price_series` |
+| `security-performance`, `instrument-performance` | Dagster `security_return` — read `market.performance` |
+| `sector-performance`, `country-performance`, `group-performance` | Dagster `daily_indices` (`index_return`) — read `market.performance` |
+| `fx-rates` | Dagster `daily_fx` — read `market.fx_rate` |
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both
@@ -563,10 +582,6 @@ learned the hard way:
 - **A whole batch failing is an OUTAGE, not a batch of bad symbols.** If every symbol also fails
   alone, nothing is negative-cached. Draining aggressively once tripped a rate limit and marked
   1,369 perfectly good securities unanswerable for 30 days.
-
-`security-prices` is incremental in a second sense: it fetches from the newest bar already stored
-rather than a fixed window, so a daily refresh asks for one day (20 rows, ~1s) where a first pass
-asks for four hundred (73,542 rows, ~52s).
 
 **TTLs are pre-launch values — deliberately long.** Nobody is watching these numbers yet and every
 refresh spends someone's free-tier quota. Tightening them at launch is tracked in `todos.md`.

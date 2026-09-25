@@ -1220,6 +1220,33 @@ console.log('\nresource registry — the cron and the function agree')
     check(orphaned.length === 0,
       'a resource taken out of the rotation has its own pg_cron job',
       orphaned.length ? `disabled but never scheduled: ${orphaned.join(', ')}` : `${disabled.size} checked`)
+
+    // …AND THE FUNCTION REFUSES EXACTLY WHAT THE MIGRATIONS RETIRED. A disabled cron row stops the
+    // SCHEDULE and nothing else: until 2026-09-25 a direct call still reached every retired
+    // handler, and `fx-rates` would have written `market.fx_rate` beside the Dagster lane that owns
+    // it. The two lists live in different files, so they are held equal here in both directions —
+    // a retirement the function still serves, and a refusal no migration declared.
+    const retiredBlock = index.match(/const RETIRED: Record<string, string> = \{[\s\S]*?\n\}/)?.[0] ?? ''
+    const refused = new Set([...retiredBlock.matchAll(/^\s{2}'([a-z][a-z0-9-]+)':/gm)].map((m) => m[1]))
+    const stillServed = [...retired].filter((n) => !refused.has(n))
+    const neverRetired = [...refused].filter((n) => !retired.has(n))
+    check(refused.size > 0 && stillServed.length === 0 && neverRetired.length === 0,
+      'the function refuses exactly the resources a migration retired',
+      refused.size === 0
+        ? 'no RETIRED map found in index.ts'
+        : stillServed.length || neverRetired.length
+        ? `retired but still served: ${stillServed.join(', ') || '-'}; refused but never retired: ${neverRetired.join(', ') || '-'}`
+        : `${refused.size} refused`)
+
+    // The refusal must come before anything that acts on the name: the admin gate (so the answer
+    // does not depend on who asks) and `begin_refresh` (so a retired name takes no lock and records
+    // no attempt as its own run). Positions are read inside `handle`, not the whole file.
+    const handleSrc = index.slice(index.indexOf('async function handle('))
+    const at = (needle: string) => handleSrc.indexOf(needle)
+    const gate = at('Object.hasOwn(RETIRED, resource)')
+    check(gate > 0 && gate < at('if (!isAdmin(req))') && gate < at("rpc('begin_refresh'"),
+      'a retired resource is refused before the admin gate and the claim',
+      gate > 0 ? `gate at ${gate}, admin at ${at('if (!isAdmin(req))')}, claim at ${at("rpc('begin_refresh'")}` : 'gate not found')
   }
 
   // `observability-sample` is scheduled by its OWN pg_cron job rather than the rotation (it costs

@@ -175,6 +175,20 @@ variable "ssh_private_key_path" {
   type        = string
 }
 
+variable "boot_volume_size_in_gbs" {
+  description = <<-EOT
+    Size of the node's boot volume; null keeps the image's default (46.6 GB). It holds the OS and
+    containerd's image store, which Docker's data-root does NOT move (the containerd snapshotter keeps
+    images under /var/lib/containerd). Resized IN PLACE: the OCI provider (8.26.0) sends
+    UpdateBootVolume for a size change as long as source_id is unchanged, which the instance's
+    ignore_changes guarantees, and deploy.yml's plan mode refuses any run that would replace the
+    node. It can only grow. The filesystem is grown to match by the first pre_task in
+    ansible/muffin_stack.yml.
+  EOT
+  type        = number
+  default     = null
+}
+
 variable "data_volume_size_in_gbs" {
   description = "Size of the persistent data volume holding Docker's data-root. Can only GROW in place — shrinking forces replacement, so size generously."
   type        = number

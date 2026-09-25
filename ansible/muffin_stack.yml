@@ -29,6 +29,34 @@
   # can fill the Always-Free boot volume and brick the whole run
   # ("No space left on device" from apt).
   pre_tasks:
+    # THE BOOT VOLUME CAN BE GROWN BY TERRAFORM, BUT THE PARTITION ON IT DOES NOT FOLLOW.
+    #
+    # `boot_volume_size_in_gbs` resizes the block device online; the kernel sees the new size only
+    # after a rescan, and the root partition and ext4 filesystem stay at their old size until grown.
+    # cloud-init does this at FIRST boot only, so a volume grown under a running node needs it here.
+    # Idempotent: on a disk already filled, growpart answers NOCHANGE (exit 1, which is success
+    # here; exit 2 is its failure code) and resize2fs has nothing to do. The device is discovered
+    # from the mount rather than named, so a node whose root is not /dev/sda1 is still right.
+    - name: Grow the root partition and filesystem to the boot volume's size
+      ansible.builtin.shell: |
+        set -euo pipefail
+        part=$(findmnt -no SOURCE /)
+        disk=/dev/$(lsblk -no PKNAME "$part")
+        num=$(cat "/sys/class/block/$(basename "$part")/partition")
+        [ "$(findmnt -no FSTYPE /)" = "ext4" ] || { echo "root is not ext4; not growing"; exit 0; }
+        before=$(df --output=size -B1G / | tail -1 | tr -d ' ')
+        # OCI's documented rescan for a paravirtualized volume: one direct read, then rescan.
+        dd iflag=direct if="$disk" of=/dev/null count=1 status=none
+        echo 1 > "/sys/class/block/$(basename "$disk")/device/rescan"
+        growpart "$disk" "$num" || [ $? -eq 1 ]
+        resize2fs "$part"
+        after=$(df --output=size -B1G / | tail -1 | tr -d ' ')
+        echo "root: ${before}G -> ${after}G"
+      args:
+        executable: /bin/bash
+      register: grow_root
+      changed_when: "'CHANGED' in grow_root.stdout"
+
     # A DEAD APT MIRROR LOOKS LIKE A TRANSIENT NETWORK FAULT AND IS PERMANENT.
     #
     # Oracle's cloud-init pins a REGIONAL Ubuntu mirror in the image
