@@ -8,7 +8,19 @@ begin
   end if;
 end $$;
 create view market.sector_constituents as
-SELECT DISTINCT ON (tn.code, s.security_id) tn.code AS sector_id,
+WITH sector_weight AS MATERIALIZED (
+         SELECT DISTINCT ON (tf.represents_code, h_1.security_id) tf.represents_code,
+            h_1.security_id,
+            h_1.weight,
+            h_1.market_value,
+            h_1.as_of,
+            fi.value AS fund_symbol
+           FROM market.fund_holding_current h_1
+             JOIN market.security_identifier fi ON fi.security_id = h_1.fund_id AND fi.kind_code = 'ticker'::text
+             JOIN market.tracked_fund tf ON tf.symbol = fi.value
+          ORDER BY tf.represents_code, h_1.security_id, h_1.weight DESC NULLS LAST
+        )
+ SELECT DISTINCT ON (tn.code, s.security_id) tn.code AS sector_id,
     s.security_id,
     s.name,
     sym.symbol,
@@ -30,13 +42,5 @@ SELECT DISTINCT ON (tn.code, s.security_id) tn.code AS sector_id,
              JOIN market.taxonomy_node n ON n.node_id = st2.node_id AND n.taxonomy_id = 'muffin'::text AND n.level = 2 AND n.parent_id = tn.node_id
           WHERE st2.security_id = s.security_id
          LIMIT 1) ind ON true
-     LEFT JOIN LATERAL ( SELECT h_1.weight,
-            h_1.market_value,
-            h_1.as_of,
-            fi.value AS fund_symbol
-           FROM market.fund_holding_current h_1
-             JOIN market.security_identifier fi ON fi.security_id = h_1.fund_id AND fi.kind_code = 'ticker'::text
-             JOIN market.tracked_fund tf ON tf.symbol = fi.value AND tf.represents_code = tn.code
-          WHERE h_1.security_id = s.security_id
-         LIMIT 1) h ON true
+     LEFT JOIN sector_weight h ON h.security_id = s.security_id AND h.represents_code = tn.code
   ORDER BY tn.code, s.security_id, ds.priority DESC, st.as_of DESC;
