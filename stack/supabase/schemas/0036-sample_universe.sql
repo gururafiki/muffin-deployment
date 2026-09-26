@@ -147,7 +147,7 @@ begin
     union all select 'identifiers.ticker', count(*) from market.security_identifier where kind_code = 'ticker'
     union all select 'identifiers.cusip',  count(*) from market.security_identifier where kind_code = 'cusip'
     union all select 'tracked_funds.enabled',  count(*) from market.tracked_fund where enabled = true
-    union all select 'tracked_funds.ingested', count(*) from market.tracked_fund where last_report_date is not null
+    union all select 'tracked_funds.ingested', count(*) from market.tracked_fund_latest where last_report_date is not null
   ) s
   on conflict do nothing;
 
