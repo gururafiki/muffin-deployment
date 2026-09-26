@@ -241,7 +241,8 @@ async function writeCurrencyFor(
 }
 
 /**
- * RESOURCES THE D2 CUTOVER RETIRED (2026-09-12), refused before anything else is decided.
+ * RESOURCES A FAMILY CUTOVER RETIRED, refused before anything else is decided: the price and
+ * performance family on 2026-09-12 (D2), the universe family on 2026-09-26 (Phase 3).
  *
  * Their handlers are still in this file and their `cron_resource` rows are disabled, which stops
  * the SCHEDULE and nothing else. A direct call still reached them: an admin pressing Refresh in the
@@ -266,6 +267,16 @@ const RETIRED: Record<string, string> = {
   'country-performance': 'Dagster daily_indices (index_return) — read market.performance',
   'group-performance': 'Dagster daily_indices (index_return) — read market.performance',
   'fx-rates': 'Dagster daily_fx — read market.fx_rate',
+  'fund-holdings': 'Dagster N-PORT discovery (fund_holding, discovered_security) — read market.fund_holdings',
+  'exchange-listings': 'Dagster venue sweep (venue_listing) — read market.untracked_listing',
+  'security-tickers': 'Dagster symbology ladder (raw_figi_ticker → security_symbology)',
+  'security-local-symbols': 'Dagster symbology ladder (raw_figi_local_symbol → security_symbology)',
+  'security-yahoo-symbols': 'Dagster symbology ladder (raw_yahoo_symbol → security_symbology)',
+  'security-symbol-repair': 'Dagster symbology ladder (security_symbology)',
+  'promote-wave': 'the market.promote_listing RPC; waves move to Dagster (Phase 3 stage 4)',
+  'promote-listing': 'the market.promote_listing RPC — the Track button calls it directly',
+  'sec-cik-map': 'Dagster registries (raw_sec_cik_map → security_cik) — read market.security.cik',
+  'in-symbols': 'Dagster registries (raw_nse_equity_list → security_nse_filer)',
 }
 
 async function handle(req: Request): Promise<Response> {
@@ -587,7 +598,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
   if (Object.hasOwn(RETIRED, resource)) {
     return json({
       resource,
-      error: `'${resource}' was retired on 2026-09-12`,
+      error: `'${resource}' was retired; its family moved to Dagster`,
       replacedBy: RETIRED[resource],
     }, 410)
   }

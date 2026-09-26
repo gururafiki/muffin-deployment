@@ -207,7 +207,8 @@ jobs:
 
           # 4. The funds are actually being tracked and were ingested.
           check_min "enabled tracked funds" "$(count 'tracked_fund?select=symbol&enabled=eq.true')" 30
-          check_min "funds ingested"        "$(count 'tracked_fund?select=symbol&last_report_date=not.is.null')" 30
+          # Derived from the holdings since the edge resource that stamped `last_report_date` retired.
+          check_min "funds ingested"        "$(count 'tracked_fund_latest?select=symbol&last_report_date=not.is.null')" 30
 
           # 5. The SERVING VIEWS the app reads. A view can exist in Postgres and still be
           #    invisible over the API — PostgREST caches the schema, and a missing grant or a
