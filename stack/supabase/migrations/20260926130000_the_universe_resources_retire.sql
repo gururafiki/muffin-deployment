@@ -1,3 +1,72 @@
+-- THE UNIVERSE FAMILY'S EDGE RESOURCES RETIRE.
+--
+-- Phase 3 moved the universe onto Dagster: N-PORT discovery and the OpenFIGI venue sweep went live
+-- on 2026-09-21, the symbology ladder on 09-24, the CIK and NSE registries on 09-21. The edge
+-- resources they replaced kept running beside them. Measured from `refresh_run` over the seven
+-- days to 2026-09-26:
+--
+--   * `exchange-listings` ran 68 times and wrote 112,451 rows into `market.exchange_listing`, which
+--     has had no reader since `untracked_listing` moved to `venue_listing` — spending the same
+--     OpenFIGI `/v3/filter` allowance the Dagster sweep needs.
+--   * `security-local-symbols` failed all 68 of its runs, on `(provider_code, symbol)`: the
+--     one-listing-one-security key the Dagster ladder handles by refusing, not by crashing.
+--   * `security-tickers`, `security-yahoo-symbols` and `security-symbol-repair` ran 67-68 times each
+--     and wrote nothing; `fund-holdings`, `sec-cik-map` and `in-symbols` skipped every run on
+--     their TTLs; `promote-wave` ran 14 times from its own job and promoted nothing.
+--   * `promote-listing` has no recorded run since run history began (2026-08-27). The Track button
+--     calls `market.promote_listing` directly.
+
+-- The parity gate for `fund-holdings` shipped first (muffin-ingest#81): the Dagster lane now writes
+-- the bond debt terms and learns the lookup codes it used to be the only writer of.
+--
+-- RETIRES: fund-holdings, exchange-listings, security-tickers, security-local-symbols
+-- RETIRES: security-yahoo-symbols, security-symbol-repair, promote-wave, promote-listing
+-- RETIRES: sec-cik-map, in-symbols
+--
+-- The same ten names are in `index.ts`'s `RETIRED` map, which answers 410 before the admin gate;
+-- `logic-check.ts` holds the two lists equal. Unconditional, like D2's: a re-enabled row is drift
+-- to be corrected on the next deploy, not a choice to be preserved.
+
+update market.cron_resource set enabled = false
+ where resource in ('fund-holdings','exchange-listings','security-tickers','security-local-symbols',
+                    'security-yahoo-symbols','security-symbol-repair','promote-wave',
+                    'sec-cik-map','in-symbols');
+
+-- `promote-wave` ran from its own job, not the rotation, so disabling its row stopped nothing.
+--
+-- GUARDED ON THE RELATION, NOT WITH `exception when others`. The migration tests run on plain
+-- Postgres with no pg_cron, where `cron.job` does not exist and even PLANNING a query that names it
+-- fails — so the check is `to_regclass` and the statement is dynamic. The older migrations swallow
+-- every error instead, which would also hide a real failure on the node; this skips only the one
+-- case it means to. Selecting by name unschedules nothing when the job is already gone.
+do $$
+begin
+  if to_regclass('cron.job') is null then
+    raise notice '  --  no pg_cron here (the migration tests): nothing to unschedule';
+    return;
+  end if;
+  execute $q$ select cron.unschedule(jobid) from cron.job where jobname = 'muffin-promote' $q$;
+end $$;
+
+-- "FUNDS INGESTED" IS DERIVED, NOT A CURSOR. Two readers — `sample_universe`'s
+-- `tracked_funds.ingested` and market-verify's "funds ingested" floor — counted
+-- `tracked_fund.last_report_date`, a column only the retired resource wrote. Left alone they would
+-- freeze, and a fund added later would never count as ingested. The newest report is already a fact
+-- in `fund_holding`, so it is read from there.
+create or replace view market.tracked_fund_latest as
+select tf.symbol,
+       i.security_id as fund_id,
+       max(h.as_of) as last_report_date
+  from market.tracked_fund tf
+  left join market.security_identifier i
+    on i.kind_code = 'ticker' and i.value = tf.symbol
+  left join market.fund_holding h
+    on h.fund_id = i.security_id
+ group by tf.symbol, i.security_id;
+
+grant select on market.tracked_fund_latest to anon, authenticated, service_role;
+
+-- `sample_universe`, unchanged but for `tracked_funds.ingested`, which now reads the view above.
 CREATE OR REPLACE FUNCTION market.sample_universe()
  RETURNS integer
  LANGUAGE plpgsql
