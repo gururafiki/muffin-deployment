@@ -50,15 +50,15 @@ WITH base AS MATERIALIZED (
             gg.security_id IS NOT NULL AS has_segment_geography,
             wi.security_id IS NOT NULL AS has_weighted_industry
            FROM market.security_facets f
-             LEFT JOIN ( SELECT DISTINCT security_price.security_id
-                   FROM market.security_price
-                  WHERE security_price.date > (CURRENT_DATE - 30)) p30 USING (security_id)
-             LEFT JOIN ( SELECT DISTINCT security_price.security_id
-                   FROM market.security_price
-                  WHERE security_price.date > (CURRENT_DATE - 7)) p7 USING (security_id)
-             LEFT JOIN ( SELECT DISTINCT security_price.security_id
-                   FROM market.security_price
-                  WHERE security_price.date > (CURRENT_DATE - 3)) p3 USING (security_id)
+             LEFT JOIN ( SELECT DISTINCT price_bar.security_id
+                   FROM market.price_bar
+                  WHERE price_bar.trade_date > (CURRENT_DATE - 30)) p30 USING (security_id)
+             LEFT JOIN ( SELECT DISTINCT price_bar.security_id
+                   FROM market.price_bar
+                  WHERE price_bar.trade_date > (CURRENT_DATE - 7)) p7 USING (security_id)
+             LEFT JOIN ( SELECT DISTINCT price_bar.security_id
+                   FROM market.price_bar
+                  WHERE price_bar.trade_date > (CURRENT_DATE - 3)) p3 USING (security_id)
              LEFT JOIN ( SELECT DISTINCT performance.scope_id AS symbol
                    FROM market.performance
                   WHERE performance.scope = 'instrument'::text) pf ON pf.symbol = f.symbol

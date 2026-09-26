@@ -77,17 +77,20 @@ insert into market.security_metric
   (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values
   ('00000000-0000-0000-0000-000000010503','eps_diluted','ttm',date '2025-01-01', 2, null,'sec-xbrl')
 on conflict do nothing;
-insert into market.security_price (security_id, date, close, grain) values
-  ('00000000-0000-0000-0000-000000010503', date '2025-03-01', 40, 'daily')
-on conflict (security_id, grain, date) do nothing;
+insert into market.price_bar (security_id, trade_date, close, source_code) values
+  ('00000000-0000-0000-0000-000000010503', date '2025-03-01', 40, 'yfinance')
+on conflict (security_id, trade_date) do nothing;
 
--- Price bars either side of the second report, plus one for the ADR.
-insert into market.security_price (security_id, date, close, grain) values
-  ('00000000-0000-0000-0000-000000010501', date '2025-03-01', 40, 'daily'),
-  ('00000000-0000-0000-0000-000000010501', date '2025-06-30', 40, 'daily'),
-  ('00000000-0000-0000-0000-000000010501', date '2025-08-01', 40, 'daily'),
-  ('00000000-0000-0000-0000-000000010502', date '2025-03-01', 40, 'daily')
-on conflict (security_id, grain, date) do nothing;
+-- Price bars either side of the second report, plus one for the ADR. In `price_bar` since
+-- 2026-09-26, the table the view reads. These dates are older than the daily arm's 400-day window,
+-- so the rows asserted below come from the WEEKLY arm — each date is alone in its week, so the
+-- weekly bar is this bar and every ratio is unchanged.
+insert into market.price_bar (security_id, trade_date, close, source_code) values
+  ('00000000-0000-0000-0000-000000010501', date '2025-03-01', 40, 'yfinance'),
+  ('00000000-0000-0000-0000-000000010501', date '2025-06-30', 40, 'yfinance'),
+  ('00000000-0000-0000-0000-000000010501', date '2025-08-01', 40, 'yfinance'),
+  ('00000000-0000-0000-0000-000000010502', date '2025-03-01', 40, 'yfinance')
+on conflict (security_id, trade_date) do nothing;
 
 refresh materialized view market.symbol_security;
 
@@ -193,9 +196,9 @@ begin
   end if;
 
   -- 6. A BAR BEFORE THE FIRST REPORT HAS NO RATIO, rather than borrowing the first one backwards.
-  insert into market.security_price (security_id, date, close, grain)
-  values ('00000000-0000-0000-0000-000000010501', date '2024-06-01', 40, 'daily')
-  on conflict (security_id, grain, date) do nothing;
+  insert into market.price_bar (security_id, trade_date, close, source_code)
+  values ('00000000-0000-0000-0000-000000010501', date '2024-06-01', 40, 'yfinance')
+  on conflict (security_id, trade_date) do nothing;
   select count(*) into n from market.security_ratio_series
    where symbol = 'T105A' and date = date '2024-06-01';
   if n <> 0 then

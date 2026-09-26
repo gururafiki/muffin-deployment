@@ -16,8 +16,8 @@ WITH b AS (
             f.sector_id IS NOT NULL AS has_sector,
             f.industry_code IS NOT NULL AS has_industry,
             (EXISTS ( SELECT 1
-                   FROM market.security_price p
-                  WHERE p.security_id = f.security_id AND p.date > (CURRENT_DATE - 30))) AS has_price,
+                   FROM market.price_bar p
+                  WHERE p.security_id = f.security_id AND p.trade_date > (CURRENT_DATE - 30))) AS has_price,
             (EXISTS ( SELECT 1
                    FROM market.performance pf
                   WHERE pf.scope = 'instrument'::text AND pf.scope_id = f.symbol)) AS has_performance,

@@ -36,9 +36,9 @@ on conflict (security_id) do nothing;
 -- and 67 rather than learned at runtime, so 'yfinance' exists by the time this runs.
 insert into market.security_profile (security_id, source_code) values
   ('00000000-0000-0000-0000-000000017001', 'yfinance') on conflict do nothing;
--- `security_price` is (security_id, date, close, grain) — it carries no source.
-insert into market.security_price (security_id, date, close) values
-  ('00000000-0000-0000-0000-000000017001', current_date - 1, 10)
+-- `price_bar` is what both coverage views read since 2026-09-26; `source_code` is NOT NULL.
+insert into market.price_bar (security_id, trade_date, close, source_code) values
+  ('00000000-0000-0000-0000-000000017001', current_date - 1, 10, 'yfinance')
 on conflict do nothing;
 
 -- `security_facets` is MATERIALIZED: rows inserted in this transaction are invisible until the
