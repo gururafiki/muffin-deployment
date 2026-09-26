@@ -33,11 +33,19 @@ update market.cron_resource set enabled = false
                     'sec-cik-map','in-symbols');
 
 -- `promote-wave` ran from its own job, not the rotation, so disabling its row stopped nothing.
+--
+-- GUARDED ON THE RELATION, NOT WITH `exception when others`. The migration tests run on plain
+-- Postgres with no pg_cron, where `cron.job` does not exist and even PLANNING a query that names it
+-- fails — so the check is `to_regclass` and the statement is dynamic. The older migrations swallow
+-- every error instead, which would also hide a real failure on the node; this skips only the one
+-- case it means to. Selecting by name unschedules nothing when the job is already gone.
 do $$
 begin
-  if exists (select 1 from cron.job where jobname = 'muffin-promote') then
-    perform cron.unschedule('muffin-promote');
+  if to_regclass('cron.job') is null then
+    raise notice '  --  no pg_cron here (the migration tests): nothing to unschedule';
+    return;
   end if;
+  execute $q$ select cron.unschedule(jobid) from cron.job where jobname = 'muffin-promote' $q$;
 end $$;
 
 -- "FUNDS INGESTED" IS DERIVED, NOT A CURSOR. Two readers — `sample_universe`'s
