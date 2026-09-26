@@ -1151,12 +1151,10 @@
             user: root
             job: "docker service update --force --quiet muffin_supabase-functions >> /var/log/muffin-functions-restart.log 2>&1"
 
-        # Fire-and-forget (poll: 0) so it NEVER holds or severs the deploy's SSH
-        # session — a synchronous run once starved the node and knocked services
-        # to 0/1. It also runs niced + checkpoint-light now; verify the object
-        # landed with `oci os object list --bucket-name muffin-db-backups`.
-        - name: Seed one backup now (async)
-          command: /usr/local/bin/muffin-db-backup.sh
-          async: 900
-          poll: 0
-          changed_when: true
+        # NO BACKUP IS SEEDED AT DEPLOY TIME, and that is a decision (2026-09-26), not an omission.
+        # A task here used to start one full `pg_dump | gzip -6` at the end of EVERY deploy. Measured
+        # after the 2026-09-25 22:40 deploy: while it ran (~4.5 minutes) 7 of the 20 reads the anon
+        # latency guard times returned `57014` — the app's own reads competing with a dump for I/O,
+        # CPU and buffer cache. Four deploys that day meant four extra dumps. The nightly cron above
+        # is the backup; a fresh or replaced node gets its first one at the next 03:00 UTC.
+        # To take one by hand: `sudo /usr/local/bin/muffin-db-backup.sh` on the node.
