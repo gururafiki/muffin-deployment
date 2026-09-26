@@ -30,15 +30,32 @@ WITH spans AS (
            FROM market.fx_rate r
         ), bars AS (
          SELECT ss.symbol,
-            sp.security_id,
-            sp.date,
-            sp.close,
-            sp.grain,
+            pb.security_id,
+            pb.trade_date AS date,
+            pb.close,
+            'daily'::text AS grain,
             s.currency_code AS quote_currency,
             s.reporting_currency
-           FROM market.security_price sp
-             JOIN market.symbol_security ss ON ss.security_id = sp.security_id
-             JOIN market.security s ON s.security_id = sp.security_id
+           FROM market.price_bar pb
+             JOIN market.symbol_security ss ON ss.security_id = pb.security_id
+             JOIN market.security s ON s.security_id = pb.security_id
+          WHERE pb.trade_date > (CURRENT_DATE - 400)
+        UNION ALL
+         SELECT w.symbol,
+            w.security_id,
+            w.date,
+            w.close,
+            'weekly'::text AS grain,
+            s.currency_code AS quote_currency,
+            s.reporting_currency
+           FROM ( SELECT DISTINCT ON (ss.symbol, (date_trunc('week'::text, pb.trade_date::timestamp with time zone))) ss.symbol,
+                    pb.security_id,
+                    pb.trade_date AS date,
+                    pb.close
+                   FROM market.price_bar pb
+                     JOIN market.symbol_security ss ON ss.security_id = pb.security_id
+                  ORDER BY ss.symbol, (date_trunc('week'::text, pb.trade_date::timestamp with time zone)), pb.trade_date DESC) w
+             JOIN market.security s ON s.security_id = w.security_id
         ), joined AS (
          SELECT b.symbol,
             b.security_id,

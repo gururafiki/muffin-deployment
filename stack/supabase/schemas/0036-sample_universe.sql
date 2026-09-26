@@ -83,14 +83,16 @@ begin
     end;
   end loop;
 
-  -- The newest price bar. Its own entry because `security_price` keys on `date`, not `as_of`, and
-  -- because it is the single most load-bearing freshness number here. Cheap only since migration
-  -- 130 indexed (date, security_id): this was 9,366 ms before it and is 0.475 ms after.
+  -- The newest price bar, the single most load-bearing freshness number here. From `price_bar`
+  -- since 2026-09-26: `security_price` was retired on 09-12 and this kept reading it for two
+  -- weeks, reporting its frozen 09-11 bar as the newest price in the universe. No index leads on
+  -- `trade_date`, so the window is what keeps it cheap: it prunes to the current partition.
   begin
-    select max(date)::timestamptz into newest from market.security_price;
+    select max(trade_date)::timestamptz into newest from market.price_bar
+     where trade_date > current_date - 30;
     if newest is not null then
       insert into market.universe_sample (sampled_at, metric, value)
-           values (ts, 'fresh_hours.security_price.date',
+           values (ts, 'fresh_hours.price_bar.trade_date',
                    extract(epoch from (ts - newest)) / 3600.0) on conflict do nothing;
       taken := taken + 1;
     end if;

@@ -49,10 +49,10 @@ UNION ALL
     'securities marked as having no returns while holding recent bars that MOVE'::text AS detail
    FROM market.security s
   WHERE s.performance_missing_at IS NOT NULL AND (( SELECT count(DISTINCT p.close) AS count
-           FROM market.security_price p
-          WHERE p.security_id = s.security_id AND p.date > (CURRENT_DATE - 30))) > 1 AND (EXISTS ( SELECT 1
-           FROM market.security_price p
-          WHERE p.security_id = s.security_id AND p.date > (CURRENT_DATE - 7)))
+           FROM market.price_bar p
+          WHERE p.security_id = s.security_id AND p.trade_date > (CURRENT_DATE - 30))) > 1 AND (EXISTS ( SELECT 1
+           FROM market.price_bar p
+          WHERE p.security_id = s.security_id AND p.trade_date > (CURRENT_DATE - 7)))
 UNION ALL
  SELECT 'country_with_no_symbols'::text AS defect,
     count(*) AS n,
