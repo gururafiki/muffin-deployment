@@ -43,7 +43,9 @@ begin
 end $function$;
 
 drop trigger if exists security_provider_symbol_clears_caches on market.security_provider_symbol;
--- MUTATION: the trigger is not created
+create trigger security_provider_symbol_clears_caches
+  after insert or update of symbol on market.security_provider_symbol
+  for each row execute function market.provider_symbol_clears_caches();
 
 -- A SECOND UNIQUE INDEX ON THE PRIMARY KEY'S OWN COLUMNS. Migration 20260913000000 added
 -- `security_provider_symbol_one_per_security (security_id, provider_code)` believing the only
