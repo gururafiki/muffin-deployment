@@ -156,10 +156,10 @@ end $$;
 insert into market.security (security_id, name, security_type_code, country_iso2, performance_missing_at)
 values ('00000000-0000-0000-0000-0000000d0060','T134 Flat Money Market','equity','ZD', now() - interval '2 days')
 on conflict (security_id) do nothing;
-insert into market.security_price (security_id, date, close, grain) values
-  ('00000000-0000-0000-0000-0000000d0060', current_date - 1, 100.00, 'daily'),
-  ('00000000-0000-0000-0000-0000000d0060', current_date - 2, 100.00, 'daily'),
-  ('00000000-0000-0000-0000-0000000d0060', current_date - 3, 100.00, 'daily')
+insert into market.price_bar (security_id, trade_date, close, source_code) values
+  ('00000000-0000-0000-0000-0000000d0060', current_date - 1, 100.00, 'yfinance'),
+  ('00000000-0000-0000-0000-0000000d0060', current_date - 2, 100.00, 'yfinance'),
+  ('00000000-0000-0000-0000-0000000d0060', current_date - 3, 100.00, 'yfinance')
 on conflict do nothing;
 
 do $$
@@ -176,10 +176,10 @@ end $$;
 insert into market.security (security_id, name, security_type_code, country_iso2, performance_missing_at)
 values ('00000000-0000-0000-0000-0000000d0061','T134 Moving And Marked','equity','ZD', now() - interval '2 days')
 on conflict (security_id) do nothing;
-insert into market.security_price (security_id, date, close, grain) values
-  ('00000000-0000-0000-0000-0000000d0061', current_date - 1, 101.50, 'daily'),
-  ('00000000-0000-0000-0000-0000000d0061', current_date - 2, 100.00, 'daily'),
-  ('00000000-0000-0000-0000-0000000d0061', current_date - 3,  99.25, 'daily')
+insert into market.price_bar (security_id, trade_date, close, source_code) values
+  ('00000000-0000-0000-0000-0000000d0061', current_date - 1, 101.50, 'yfinance'),
+  ('00000000-0000-0000-0000-0000000d0061', current_date - 2, 100.00, 'yfinance'),
+  ('00000000-0000-0000-0000-0000000d0061', current_date - 3,  99.25, 'yfinance')
 on conflict do nothing;
 
 do $$
