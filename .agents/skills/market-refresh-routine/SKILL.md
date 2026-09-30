@@ -46,23 +46,22 @@ only — the anon key is public and a public cache-buster is a free way to hamme
 Each one unlocks the next. Running them out of order wastes a pass.
 
 ```
-security-yahoo-symbols    resolves an ISIN to its HOME-market symbol — the GATE.
-security-local-symbols    OpenFIGI, a different provider, so it does not compete for the limit.
 security-profiles         gives a security its SECTOR.
 security-industries       needs a sector, so it only has work after profiles ran.
-security-prices           daily bars, incremental from the last stored date.
-security-performance      returns, computed from the bars.
 security-fundamentals     P/E, margins, market cap.
 security-statements       income/balance/cash — ONE security per call, so it is the slow one.
 ```
+
+Symbols, prices and returns are no longer edge resources: the Dagster symbology ladder resolves a
+security's symbols, and the Dagster price lanes write its bars and returns (`muffin-dagster-operations`).
+The edge function answers **410** for the retired names.
 
 ## Running it
 
 ```bash
 for cycle in 1 2 3 4 5 6; do
   throttled=0
-  for r in security-yahoo-symbols security-local-symbols security-profiles security-industries \
-           security-prices security-performance security-fundamentals security-statements; do
+  for r in security-profiles security-industries security-fundamentals security-statements; do
     out=$(call "$r")
     echo "$r: $out"
     case "$out" in *RateLimit*|*"Too Many Requests"*|*RATE-LIMITING*) throttled=1;; esac
@@ -100,8 +99,7 @@ replaced the body, so the reason never arrived. A bare 502 now means a genuinely
 ## Checking progress
 
 ```bash
-for v in pending_yahoo_symbol pending_local_symbol pending_profile pending_industry \
-         pending_prices pending_performance pending_fundamentals pending_statements; do
+for v in pending_profile pending_industry pending_fundamentals pending_statements; do
   printf '%-24s %s\n' "$v" "$(curl -sS -o /dev/null -D - \
     "$BASE/rest/v1/$v?select=security_id&limit=1" \
     -H "apikey: $SRV" -H "Authorization: Bearer $SRV" \

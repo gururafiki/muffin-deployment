@@ -113,10 +113,10 @@ llm_requests_per_second: 0.3
 #
 # Agent calls are NOT here: LangSmith and Langfuse below already receive every LLM call and trace.
 #
-# A NOTE ON WHY GRAFANA READS SAMPLES. Counting the 26 `pending_*` views costs ~8.4s (measured;
-# `pending_prices` alone is 5.4s, over the PostgREST role's 8s statement timeout). A dashboard on a
-# 30s refresh would run that continuously against the database the app reads. Every panel reads
-# `market.backlog_sample` instead, which is indexed and cheap.
+# A NOTE ON WHY GRAFANA READS SAMPLES. Counting the `pending_*` views cost ~8.4s when there were 26
+# (measured 2026-08-27; `pending_prices` alone was 5.4s, over the PostgREST role's 8s statement
+# timeout). A dashboard on a 30s refresh would run that continuously against the database the app
+# reads. Every panel reads `market.backlog_sample` instead, which is indexed and cheap.
 langsmith_tracing: "true"
 langsmith_endpoint: "https://api.smith.langchain.com"
 langsmith_project: "muffin-prod"

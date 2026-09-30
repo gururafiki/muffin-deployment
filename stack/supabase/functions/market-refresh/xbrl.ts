@@ -14,7 +14,7 @@
  */
 
 /** SEC's stated requirement: a real contact. Not a browser string. */
-import { secWww, secData } from './origins.ts'
+import { secData } from './origins.ts'
 
 const SEC_UA = 'muffin-market-data admin@rafiki.guru'
 
@@ -79,20 +79,6 @@ async function secJson(url: string, timeoutMs: number): Promise<unknown> {
   } finally {
     clearTimeout(timer)
   }
-}
-
-/** ticker -> CIK, from the file SEC publishes for exactly this purpose (776 KB, ~10,400 filers). */
-export async function fetchCikMap(timeoutMs = 30_000): Promise<Map<string, number>> {
-  const d = await secJson(`${secWww()}/files/company_tickers.json`, timeoutMs)
-  const out = new Map<string, number>()
-  if (!d || typeof d !== 'object') return out
-  for (const v of Object.values(d as Record<string, unknown>)) {
-    const row = v as { cik_str?: unknown; ticker?: unknown }
-    const cik = typeof row.cik_str === 'number' ? row.cik_str : Number(row.cik_str)
-    const ticker = String(row.ticker ?? '').toUpperCase()
-    if (ticker && Number.isFinite(cik)) out.set(ticker, cik)
-  }
-  return out
 }
 
 /**

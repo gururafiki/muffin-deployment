@@ -110,8 +110,9 @@ timeout`. That is a performance problem, not RLS.
 
 "The provider has no data for this security" is frequently "we asked using the wrong name".
 OpenFIGI's `ticker` is the Bloomberg spelling: `BRK/B`, `WALMEX*.MX`, `6.HK` (should be `0006.HK`),
-`ESSITYB.ST` (should be `ESSITY-B.ST`). Run `security-yahoo-symbols`, which asks Yahoo for the
-ISIN's home listing, rather than editing by hand.
+`ESSITYB.ST` (should be `ESSITY-B.ST`). The Dagster symbology ladder's Yahoo rung
+(`raw_yahoo_symbol`) asks Yahoo for the ISIN's home listing: backfill the security's
+`symbology_subject` partition rather than editing by hand.
 
 ## The rule underneath all of this
 

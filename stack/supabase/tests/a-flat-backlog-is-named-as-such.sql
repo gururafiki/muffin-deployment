@@ -111,43 +111,4 @@ begin
   raise notice '  ok  draining, FLAT, draining_by_marking and insufficient_history are distinguished';
 end $$;
 
--- AND THE LOCAL-SYMBOL BACKLOG LISTS ONLY WORK THAT CAN BE DONE.
--- It returned 281 securities while the resource reported `no addressable securities pending` on
--- every run: all 281 were in countries with no `market.exchange` row (Cayman 118, Bermuda 56,
--- Luxembourg 20). The rule lived in TypeScript and not in the view.
-insert into market.countries (iso2, name, flag, drillable) values
-  ('ZQ','Offshoria','ZQ',false), ('ZR','Realland','ZR',false)
-on conflict (iso2) do nothing;
-insert into market.exchange (exch_code, country_iso2, suffix) values ('ZRX','ZR','.ZR')
-on conflict (exch_code) do nothing;
-insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
-insert into market.identifier_kind (code, name) values ('isin','ISIN') on conflict do nothing;
-insert into market.security (security_id, name, security_type_code, country_iso2) values
-  ('00000000-0000-0000-0000-00000000e001','No Venue Co','equity','ZQ'),
-  ('00000000-0000-0000-0000-00000000e002','Has Venue Co','equity','ZR')
-on conflict (security_id) do nothing;
-insert into market.security_identifier (kind_code, value, security_id) values
-  ('isin','ZQ0000000001','00000000-0000-0000-0000-00000000e001'),
-  ('isin','ZR0000000001','00000000-0000-0000-0000-00000000e002')
-on conflict (kind_code, value) do nothing;
-
-do $$
-declare n int;
-begin
-  select count(*) into n from market.pending_local_symbol
-   where security_id = '00000000-0000-0000-0000-00000000e001';
-  if n <> 0 then
-    raise exception 'a security in a country with NO exchange is queued for local-symbol '
-                    'resolution (% rows) — the resource cannot address it, so the backlog reports '
-                    'work nobody can do, for ever', n;
-  end if;
-  select count(*) into n from market.pending_local_symbol
-   where security_id = '00000000-0000-0000-0000-00000000e002';
-  if n <> 1 then
-    raise exception 'a security in a country WITH an exchange is not queued (% rows) — the venue '
-                    'filter has emptied the backlog rather than scoping it', n;
-  end if;
-  raise notice '  ok  pending_local_symbol lists only securities with a venue to resolve against';
-end $$;
-
 rollback;
