@@ -63,31 +63,40 @@ insert into market.tracked_fund (symbol, name, kind, represents_code) values
 
 The seed migration uses `on conflict do nothing`, so a Studio edit survives every redeploy.
 
-## Step 3 — ingest it, scoped
+## Step 3 — let Dagster ingest it
+
+There is nothing to call. The edge `fund-holdings` resource retired on 2026-09-26 and answers 410.
+Dagster's `new_nport_filings` sensor finds the fund's newest filing (EDGAR full-text search by
+series; a new fund's CIK and series come from SEC's daily directory) and adds a partition.
+`raw_nport_filing` fetches it at once, and `discovered_security` and `fund_holding` follow in the
+same run. The symbology ladder then resolves the ISINs it introduced.
+
+To classify the new holdings now rather than at the next daily run:
 
 ```bash
 BASE=https://supabase.rafiki.guru
 SRV=<SUPABASE_SERVICE_ROLE_KEY>
-post() { curl -sS --max-time 250 -X POST "$BASE/functions/v1/market-refresh" \
-  -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' -d "$1"; }
-
-post '{"resource":"fund-holdings","fund":"XLE","force":true}'
-post '{"resource":"derive-classifications","force":true}'
+curl -sS --max-time 250 -X POST "$BASE/functions/v1/market-refresh" \
+  -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
+  -d '{"resource":"derive-classifications","force":true}'
 ```
 
-Then let the backlogs do the rest — symbols, sectors, industries, prices, fundamentals all pick the
-new securities up on their own. Use `market-refresh-routine` if you want that sooner than the cron.
+Then let the backlogs do the rest: sectors, industries and fundamentals pick the new securities up
+on their own. Use `market-refresh-routine` if you want that sooner than the cron.
 
 ## Step 4 — confirm it actually landed
 
 ```bash
-curl -sS "$BASE/rest/v1/ingest_run?resource=eq.fund-holdings&scope=eq.XLE&order=started_at.desc&limit=1&select=*" \
-  -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
+curl -sS -D - -o /dev/null "$BASE/rest/v1/fund_holdings?fund_symbol=eq.XLE&select=as_of&limit=1" \
+  -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' \
+  -H 'Prefer: count=exact' | grep -i content-range
 ```
 
-`securities_added` counts genuinely new companies; `holdings_written` counts positions. A style fund
-often adds few securities and many holdings — it mostly deepens coverage of names other funds hold.
-IWM was the exception: 1,922 small caps nothing else held.
+The count after the `/` is the fund's holdings. If it is 0, look at the lane
+(`muffin-dagster-operations`): did the sensor add a `nport_filing` partition for the fund, and did
+its `raw_nport_filing` run succeed? A style fund often adds few securities and many holdings — it
+mostly deepens coverage of names other funds hold. IWM was the exception: 1,922 small caps nothing
+else held.
 
 ## What to expect
 

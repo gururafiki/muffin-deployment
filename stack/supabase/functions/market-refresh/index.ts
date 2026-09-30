@@ -22,67 +22,33 @@
 // real openbb-api with no Supabase running — see ./check.ts.
 
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
-import { ingestFund } from './ingest.ts'
-import {
-  listExchange,
-  mapIsinsToLocalSymbols,
-  mapIsinsToTickers,
-  mapTickers,
-  PAGING_CEILING,
-} from './figi.ts'
 import { fetchFundamentals } from './fundamentals.ts'
-import { hasLocalExchange, venueForSymbol, venuesFromRows } from './exchanges.ts'
-import { SUBUNITS, fetchAlphaVantageEarnings, fetchUsdPerUnit, fetchUsdPerUnitHistory, isPlausibleRate, type FxQuote } from './fx.ts'
-import { pickHomeListing, searchByIsin } from './yahoo.ts'
-import { factsFromCompanyFacts, fetchCikMap, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
+import { fetchAlphaVantageEarnings } from './alpha-vantage.ts'
+import { factsFromCompanyFacts, fetchCompanyFacts, fetchSubmissions, fetchSubmissionsPage, submissionsFrom, type ConceptSpec } from './xbrl.ts'
 import * as dart from './dart.ts'
 import * as nse from './in.ts'
 import * as cninfo from './cn.ts'
 import * as cnPdf from './cn-pdf.ts'
 import { TOO_LARGE, fetchInstance, findInstanceUrl, instanceIsTooLarge, segmentFactsFrom, type SegmentAxisSpec, type SegmentConceptSpec } from './segments.ts'
 import { fetchIndustries, slug } from './wikidata.ts'
-import { candidateSymbols } from './symbol-repair.ts'
 import { corporateActions, TiingoNoSuchTicker } from './tiingo.ts'
-import { loadFundDirectory } from './edgar.ts'
 import {
   BACKLOG_TTL_MINUTES,
   SEC_BACKLOG_TTL_MINUTES,
-  barFrom,
   dedupeBy,
   fetchWithIsolation,
   FINVIZ_SECTOR_IDS,
-  loadEquityReturns,
-  loadPricesBatched,
   loadProfiles,
   extractMacroPoints,
   openbbFetcher,
-  planPriceFetches,
   NEWS_RETENTION_DAYS,
-  PRICE_HISTORY_YEARS,
-  DAILY_HISTORY_START,
-  DAILY_HISTORY_BATCH,
-  PRICE_WINDOW_DAYS,
-  PRICES_TTL_MINUTES,
+  DAILY_TTL_MINUTES,
   PROFILE_TTL_MINUTES,
-  REFERENCE_TTL_MINUTES,
   noDataForSymbol,
-  RESOURCES,
-  SEC_PERF_TTL_MINUTES,
   symbolList,
   throttled,
-  TICKERS_TTL_MINUTES,
   sha256Hex,
-  type PerfRow,
 } from './resources.ts'
-
-/**
- * The symbol that proves yfinance is answering at all.
- *
- * `fetchWithIsolation` defaults its own control to AAPL for the same reason: an empty answer about
- * a symbol is only evidence about that symbol once the provider is known to be talking to us, and
- * yfinance signals a throttle with an empty 200 rather than an error.
- */
-const PERF_CONTROL_SYMBOL = 'AAPL'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -166,7 +132,7 @@ function isAdmin(req: Request): boolean {
  */
 const TAIL_RESERVE_MS = 10_000
 
-/** The schema-scoped client, spelled the same way `ingest.ts` does. */
+/** The schema-scoped client. */
 type MarketClient = ReturnType<SupabaseClient['schema']>
 
 /**
@@ -282,11 +248,8 @@ const RETIRED: Record<string, string> = {
 async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok')
 
-  let resource = 'sector-performance'
-  let fundScope: string | undefined
-  let figiScope: string | undefined
+  let resource = ''
   let symbolScope: string | undefined
-  let exchScope: string | undefined
   let force = false
   // Caps how much a backlog resource attempts in one run. Added as a BISECT tool: when
   // `security-industries` died in 3.8s with a bare 502, nothing distinguished "too much work"
@@ -308,11 +271,7 @@ async function handle(req: Request): Promise<Response> {
   try {
     const body = await req.json()
     if (body?.resource) resource = String(body.resource)
-    if (body?.fund) fundScope = String(body.fund).toUpperCase()
-    if (body?.figi) figiScope = String(body.figi).trim()
     if (body?.symbol) symbolScope = String(body.symbol).trim()
-    // Which venue a promoted ticker lives on. Defaults to US, where the ADRs are.
-    if (body?.exchange) exchScope = String(body.exchange).trim()
     if (Number.isFinite(body?.limit)) scopeLimit = Math.max(1, Math.min(1000, Number(body.limit)))
     // `force` bypasses the TTL, NOT the in-flight lock — two concurrent forced
     // refreshes must still collapse into one upstream fetch. Requires the
@@ -320,25 +279,17 @@ async function handle(req: Request): Promise<Response> {
     // free way to hammer the provider.
     force = body?.force === true && isServiceRole(req)
   } catch {
-    // No body / not JSON — fall back to the default resource.
+    // No body / not JSON — `resource` stays empty and is refused below.
   }
 
   const PROFILE_RESOURCE = 'instrument-profile'
-  const PRICES_RESOURCE = 'instrument-prices'
-  const HOLDINGS_RESOURCE = 'fund-holdings'
-  const TICKERS_RESOURCE = 'security-tickers'
   const DERIVE_RESOURCE = 'derive-classifications'
   const FACETS_RESOURCE = 'facets-refresh'
   const OBSERVABILITY_RESOURCE = 'observability-sample'
   const MACRO_RESOURCE = 'macro-indicators'
-  const PROMOTE_WAVE_RESOURCE = 'promote-wave'
   const DIVIDENDS_RESOURCE = 'security-dividends'
   const SEC_PROFILE_RESOURCE = 'security-profiles'
   const INDUSTRY_RESOURCE = 'security-industries'
-  const SEC_PERF_RESOURCE = 'security-performance'
-  const LOCAL_SYM_RESOURCE = 'security-local-symbols'
-  const LISTINGS_RESOURCE = 'exchange-listings'
-  const PROMOTE_RESOURCE = 'promote-listing'
   const ONE_SECURITY_RESOURCE = 'security-refresh'
   const FUNDAMENTALS_RESOURCE = 'security-fundamentals'
   /**
@@ -357,10 +308,8 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
-const SYMBOL_REPAIR_RESOURCE = 'security-symbol-repair'
 const NEWS_RESOURCE = 'security-news'
 const SHARE_STATS_RESOURCE = 'security-share-stats'
-const CIK_RESOURCE = 'sec-cik-map'
 const XBRL_RESOURCE = 'security-xbrl'
 const SEGMENTS_RESOURCE = 'security-segments'
 const KR_FILINGS_RESOURCE = 'kr-filings'
@@ -368,7 +317,6 @@ const KR_SEGMENTS_RESOURCE = 'security-kr-segments'
 /** DART's own name for the Korean annual report, and the `filing_form` row seeded by migration 172. */
 const KR_ANNUAL_FORM = '사업보고서'
 const CN_SEGMENTS_RESOURCE = 'security-cn-segments'
-const IN_SYMBOLS_RESOURCE = 'in-symbols'
 const IN_FILINGS_RESOURCE = 'in-filings'
 const IN_SEGMENTS_RESOURCE = 'security-in-segments'
 /** NSE labels every annual results filing `Annual`; it is the `filing_form` code seeded for `nse`. */
@@ -449,8 +397,6 @@ const SEGMENT_METRICS = [
   // segment because that is where impairment is tested. 722 and 3,347 filers respectively.
   'long_lived_assets', 'goodwill',
 ]
-const PRICE_HISTORY_RESOURCE = 'security-price-history'
-const DAILY_HISTORY_RESOURCE = 'security-daily-history'
 const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
@@ -463,9 +409,6 @@ const MANAGEMENT_RESOURCE = 'security-management'
 const EPS_HISTORY_RESOURCE = 'security-eps-history'
 const PRICE_TARGETS_RESOURCE = 'security-price-targets'
   const ACTIONS_RESOURCE = 'security-corporate-actions'
-  const YAHOO_SYMBOL_RESOURCE = 'security-yahoo-symbols'
-  const SEC_PRICES_RESOURCE = 'security-prices'
-  const FX_RESOURCE = 'fx-rates'
   // EVERY RESOURCE DECLARES ITS TTL HERE, AND THERE IS NO DEFAULT.
   //
   // This was a ternary chain ending in `: PROFILE_TTL_MINUTES`, with the set of known resources
@@ -495,18 +438,12 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // A completion-shaped TTL here does not slow the resource down, it stalls the backlog for the
     // length of the TTL.
     [SEC_PROFILE_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [SEC_PERF_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [LOCAL_SYM_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [LISTINGS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [INDUSTRY_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [PROMOTE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [SYMBOL_REPAIR_RESOURCE]: BACKLOG_TTL_MINUTES,
     [NEWS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [PRICE_TARGETS_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [CIK_RESOURCE]: REFERENCE_TTL_MINUTES,
     [XBRL_RESOURCE]: BACKLOG_TTL_MINUTES,
     // NOT `BACKLOG_TTL_MINUTES`: these two have their own five-minute pg_cron jobs, and a
     // ten-minute TTL made every other firing a no-op — measured in production, half the runs came
@@ -521,9 +458,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // discovery walks one company per call and is bounded by the shared provider budget.
     [IN_SEGMENTS_RESOURCE]: 4,
     [IN_FILINGS_RESOURCE]: 14,
-    // NSE's equity list is reference data that changes when a company lists or renames, so it is
-    // paced like the CIK map rather than like a backlog.
-    [IN_SYMBOLS_RESOURCE]: REFERENCE_TTL_MINUTES,
     // Links only, and a company's annual reports change once a year — this is the least urgent
     // thing on the cron and is paced accordingly.
     [CN_FILINGS_RESOURCE]: 29,
@@ -532,8 +466,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     [CN_SEGMENTS_RESOURCE]: 9,
     [FILING_HISTORY_RESOURCE]: SEC_BACKLOG_TTL_MINUTES,
     [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [PRICE_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [DAILY_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [EARNINGS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
     [METRICS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [STATEMENTS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -542,22 +474,15 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // NOT the backlog TTL: this resource has no slice to permit. It re-reads the whole
     // forward window every time, so the TTL is the real cadence of the underlying data —
     // dates get rescheduled and consensus is revised, but not many times a day.
-    [EARNINGS_RESOURCE]: PRICES_TTL_MINUTES,
+    [EARNINGS_RESOURCE]: DAILY_TTL_MINUTES,
     [INSIDER_RESOURCE]: BACKLOG_TTL_MINUTES,
     [FILINGS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [MANAGEMENT_RESOURCE]: BACKLOG_TTL_MINUTES,
     [EPS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [YAHOO_SYMBOL_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [SEC_PRICES_RESOURCE]: BACKLOG_TTL_MINUTES,
     [ACTIONS_RESOURCE]: BACKLOG_TTL_MINUTES,
-    // Whole-universe passes that FINISH what they start in one run, so the TTL is the real
+    // A whole-universe pass that FINISHES what it starts in one run, so the TTL is the real
     // cadence of the underlying data rather than a permit for the next slice.
-    [TICKERS_RESOURCE]: TICKERS_TTL_MINUTES,
-    [PRICES_RESOURCE]: PRICES_TTL_MINUTES,
     [PROFILE_RESOURCE]: PROFILE_TTL_MINUTES,
-    // Reference data: N-PORT is quarterly, so a short TTL would just re-ask SEC for last
-    // quarter's answer.
-    [HOLDINGS_RESOURCE]: REFERENCE_TTL_MINUTES,
     // NOT the 30-day reference TTL any more. This resource has a DAILY pg_cron job (migration
     // 137), so a 30-day TTL made it self-skip 29 days in 30 — measured, an ordinary invocation
     // returned `skipped: fresh or in flight` and only `force: true` ran it. Tolerable while it
@@ -576,17 +501,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // daily), and the resource re-reads all of them in one pass. Six hours is well inside the
     // slowest series' publication rhythm and far outside any provider's patience.
     [MACRO_RESOURCE]: 6 * 60,
-    // A BACKLOG, so a backlog-shaped TTL: each run drains a bounded slice of 92,826 candidates and
-    // the TTL only has to permit the next run. A completion-shaped TTL here would not slow the
-    // resource down, it would stall the queue for its length.
-    [PROMOTE_WAVE_RESOURCE]: BACKLOG_TTL_MINUTES,
     // One call PER SYMBOL (the route 400s on a comma list), so this drains like every other
     // per-symbol backlog and needs a backlog-shaped TTL that permits the next slice.
     [DIVIDENDS_RESOURCE]: BACKLOG_TTL_MINUTES,
-    // 41 currencies in one pass, so this FINISHES what it starts — a completion-shaped TTL is
-    // correct here, unlike every backlog resource. Daily, because that is the cadence of the
-    // underlying reference rates.
-    [FX_RESOURCE]: PRICES_TTL_MINUTES,
     // TEN MINUTES, which is shorter than anything else here and is the point. This resource takes
     // a MEASUREMENT; a TTL on a measurement means "the last reading is still true", which is
     // exactly the assumption that makes a gauge useless. It is called twice per sweep — once
@@ -594,6 +511,11 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // between those two calls (~19 minutes of paced sweep). A backlog-length TTL would silently
     // collapse the pair into one sample and the "what did this sweep drain" reading would be lost.
     [OBSERVABILITY_RESOURCE]: 10,
+  }
+  // THERE IS NO DEFAULT RESOURCE. It was `sector-performance`, which the D2 cutover retired, so a
+  // request naming nothing was answered as if it had asked for a family that moved to Dagster.
+  if (!resource) {
+    return json({ error: 'name a resource: {"resource": "<name>"}', known: Object.keys(EXTRA_TTL_MINUTES) }, 400)
   }
   if (Object.hasOwn(RETIRED, resource)) {
     return json({
@@ -604,11 +526,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
   }
 
   const EXTRA = Object.keys(EXTRA_TTL_MINUTES)
-  const spec = RESOURCES[resource]
-  if (!spec && !EXTRA.includes(resource)) {
-    return json({ error: `unknown resource '${resource}'`, known: [...Object.keys(RESOURCES), ...EXTRA] }, 400)
+  if (!EXTRA.includes(resource)) {
+    return json({ error: `unknown resource '${resource}'`, known: EXTRA }, 400)
   }
-  const ttlMinutes = spec ? spec.ttlMinutes : EXTRA_TTL_MINUTES[resource]
+  const ttlMinutes = EXTRA_TTL_MINUTES[resource]
 
   // WRITES ARE ADMIN-ONLY. Reads never come through here — the app reads the tables directly over
   // PostgREST — so refusing a non-admin costs a visitor nothing. Previously any valid JWT (i.e.
@@ -658,38 +579,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     return json(body, status)
   }
 
-  // The venue catalog, read ONCE per request after the claim (so a skipped request costs nothing)
-  // and passed down to every consumer. `market.exchange` is the single source of truth for
-  // exchange code -> country -> provider suffix; it used to be a hardcoded map here AND a second
-  // copy in `exchange_cursor`, which had drifted to 54 rows against 38.
-  const { data: venueRows, error: venueErr } = await market
-    .from('exchange')
-    .select('exch_code,country_iso2,suffix')
-    .eq('enabled', true)
-    .order('preference')
-  if (venueErr) return releaseAnd({ error: `exchange catalog read failed: ${venueErr.message}` }, 500)
-  const venues = venuesFromRows(venueRows ?? [])
-
   const fetcher = openbbFetcher(OPENBB_URL)
-  // `price_symbol` is the symbol the provider knows when it differs from the
-  // display ticker (NESN vs NESN.SW); `symbol` stays the key we write back under.
-  const instrumentUniverse = async () => {
-    // `priced = false` (cash, a bond yield) has no meaningful price return — skip it
-    // so the UI shows no number rather than a misleading one.
-    const { data, error } = await market
-      .from('instruments')
-      .select('symbol,price_symbol')
-      .eq('priced', true)
-    if (error) throw new Error(`instruments read failed: ${error.message}`)
-    return (data ?? []).map((i) => ({
-      scopeId: i.symbol as string,
-      symbol: (i.price_symbol as string | null) ?? (i.symbol as string),
-    }))
-  }
-
   try {
-    // The profile refresh writes market.instruments rather than market.performance,
-    // so it does not go through the RESOURCES table.
+    // The profile refresh writes market.instruments.
     if (resource === PROFILE_RESOURCE) {
       // Equities only: an ETF, a commodity or a coin has no sector/industry to
       // fetch, and a batch of them can come back empty, which reads as a failure.
@@ -712,78 +604,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       return json({ resource, refreshed: updates.length })
     }
 
-    if (resource === HOLDINGS_RESOURCE) {
-      // Scope to one fund so a newly added ETF is ingested in seconds instead of
-      // waiting for the monthly pass or re-running all 40.
-      let symbols: string[]
-      if (fundScope) {
-        symbols = [fundScope]
-      } else {
-        const { data, error } = await market
-          .from('tracked_fund')
-          .select('symbol')
-          .eq('enabled', true)
-          .order('symbol')
-        if (error) throw new Error(`tracked_fund read failed: ${error.message}`)
-        symbols = (data ?? []).map((f) => f.symbol as string)
-      }
-      if (symbols.length === 0) throw new Error('no enabled funds in market.tracked_fund')
-
-      // One shared SEC directory fetch (28k rows) for the whole run.
-      const directory = await loadFundDirectory()
-      const results = []
-      const failures: string[] = []
-      let added = 0
-      let holdings = 0
-      for (const sym of symbols) {
-        try {
-          const r = await ingestFund(market, sym, directory)
-          if (!r) { failures.push(`${sym}: no filing found`); continue }
-          results.push(r)
-          added += r.securitiesAdded
-          holdings += r.holdings
-        } catch (e) {
-          // One fund's filing being malformed must not lose the other 39.
-          failures.push(`${sym}: ${e instanceof Error ? e.message : String(e)}`)
-        }
-      }
-      await market.from('ingest_run').insert({
-        source_code: 'sec-nport',
-        resource,
-        scope: fundScope ?? null,
-        finished_at: new Date().toISOString(),
-        ok: failures.length < symbols.length,
-        securities_added: added,
-        holdings_written: holdings,
-        error: failures.length ? failures.join(' | ').slice(0, 2000) : null,
-      })
-      if (results.length === 0) throw new Error(`every fund failed: ${failures.join(' | ').slice(0, 300)}`)
-      // Classify from the holdings we just landed. A sector SPDR's holdings ARE that sector, so this
-      // needs no provider — but it has to run AFTER the ingest, when the holdings are complete.
-      const { data: classified, error: clsErr } = await market.rpc('derive_classifications')
-      if (clsErr) throw new Error(`derive_classifications failed: ${clsErr.message}`)
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, funds: results.length, securitiesAdded: added, holdings, classified, failures, results })
-    }
-
-    // Standalone so a mapping edited in Studio (tracked_fund.represents_code) takes effect without
-    // re-ingesting 38 filings — and so classification can be re-run when the holdings themselves are
-    // still inside their 7-day TTL, which is what blocked the first production run.
-    // Rebuild the denormalised filter spine. See migration 80: as a plain view it timed out for
-    // anon (57014) the moment two filters were combined, because the planner's estimates collapse
-    // under conjunction. The RPC is SECURITY DEFINER (refresh requires ownership) and refreshes
-    // CONCURRENTLY, so readers are never blocked.
-    // Macro series, driven ENTIRELY by `market.macro_indicator`. There is no hardcoded list here:
-    // adding a series is a row, which is the whole reason that table is a control table. The route,
-    // provider and extra params all come from the row.
-    // Promote a BOUNDED WAVE of listings. `pending_promotion` (migration 84) already applies the
-    // order, the per-venue opt-in and the name dedupe against securities we hold — this resource
-    // only has to spend the budget carefully.
-    //
-    // WHY A CAP AT ALL. Every security promoted here becomes work for `security-profiles`,
-    // `security-prices`, `security-statements`, `security-industries` and `security-fundamentals`,
-    // every one of which is limited by the SAME provider budget. Promoting faster than they drain
-    // does not add coverage, it starves the securities people are already looking at.
     // DIVIDENDS FOR EVERY MARKET, not just the US. `security-corporate-actions` reaches 560 of
     // 12,350 equities because Tiingo must be asked by the US ticker and the backlog therefore
     // requires the priced symbol to BE that ticker. yfinance is asked with the symbol the bars are
@@ -890,91 +710,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       return json({ resource, written, covered, noDividend, failed, lastError })
     }
 
-    if (resource === PROMOTE_WAVE_RESOURCE) {
-      // Default deliberately small, and capped at 100 REGARDLESS of `limit`. The shared
-      // `scopeLimit` already clamps to 1,000, which is the right ceiling for reading a backlog and
-      // the wrong one for CREATING securities: 1,000 new rows is a month of downstream provider
-      // budget committed by one call.
-      const cap = Math.min(scopeLimit ?? 25, 100)
-
-      const { data: queue, error: qErr } = await market
-        .from('pending_promotion')
-        .select('figi,composite_figi,exch_code,ticker,name,country_iso2,provider_symbol')
-        .limit(cap)
-      if (qErr) throw new Error(`pending_promotion read failed: ${qErr.message}`)
-      const rows = queue ?? []
-      if (rows.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({
-          resource, promoted: 0,
-          note: 'nothing eligible — every venue is opt-out by default, see market.exchange.promotion_enabled',
-        })
-      }
-
-      // DEDUPE WITHIN THE WAVE. `pending_promotion` excludes names we already hold, but it cannot
-      // exclude a name appearing TWICE in the same wave — the London and Frankfurt lines of one new
-      // company are two untracked listings of one issuer, and promoting both mints two securities
-      // that then each consume profile, price and statement calls.
-      const seen = new Set<string>()
-      const wave = rows.filter((r) => {
-        const k = String(r.name ?? '').trim().toUpperCase()
-        if (!k || seen.has(k)) return false
-        seen.add(k)
-        return true
-      })
-
-      const securities: Record<string, unknown>[] = []
-      const identifiers: Record<string, unknown>[] = []
-      const providerSymbols: Record<string, unknown>[] = []
-      for (const r of wave) {
-        const id = crypto.randomUUID()
-        securities.push({
-          security_id: id,
-          name: r.name,
-          security_type_code: 'equity',
-          country_iso2: r.country_iso2 ?? null,
-          is_tradeable: true,
-        })
-        identifiers.push({ kind_code: 'figi', value: r.composite_figi ?? r.figi, security_id: id, source_code: 'openfigi' })
-        if (r.ticker) {
-          identifiers.push({ kind_code: 'ticker', value: r.ticker, security_id: id, source_code: 'openfigi' })
-        }
-        if (r.provider_symbol) {
-          providerSymbols.push({ security_id: id, provider_code: 'yfinance', symbol: r.provider_symbol })
-        }
-      }
-
-      const { error: sErr } = await market.from('security').insert(securities)
-      if (sErr) throw new Error(`security insert failed: ${sErr.message}`)
-
-      // FIGI FIRST — it is what stops these listings being offered as untracked again, so a partial
-      // failure after this point leaves the wave promoted rather than duplicated on the next run.
-      // `dedupeBy` because one ticker can appear on two venues in a single wave, and the same key
-      // twice fails the WHOLE statement with 21000.
-      const { error: iErr } = await market.from('security_identifier').upsert(
-        dedupeBy(identifiers, (r) => `${r.kind_code}|${r.value}`),
-        { onConflict: 'kind_code,value', ignoreDuplicates: true },
-      )
-      if (iErr) throw new Error(`identifier insert failed: ${iErr.message}`)
-
-      if (providerSymbols.length > 0) {
-        const { error: pErr } = await market.from('security_provider_symbol').upsert(
-          dedupeBy(providerSymbols, (r) => `${r.security_id}|${r.provider_code}`),
-          { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
-        )
-        if (pErr) throw new Error(`provider symbol insert failed: ${pErr.message}`)
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        promoted: wave.length,
-        skipped_same_name_in_wave: rows.length - wave.length,
-        cap,
-        venues: [...new Set(wave.map((r) => r.exch_code))],
-      })
-    }
-
+    // Macro series, driven ENTIRELY by `market.macro_indicator`. There is no hardcoded list here:
+    // adding a series is a row, which is the whole reason that table is a control table. The route,
+    // provider and extra params all come from the row.
     if (resource === MACRO_RESOURCE) {
       const { data: series, error: sErr } = await market
         .from('macro_indicator')
@@ -1172,6 +910,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // Rebuild the denormalised filter spine. See migration 80: as a plain view it timed out for
+    // anon (57014) the moment two filters were combined, because the planner's estimates collapse
+    // under conjunction. The RPC is SECURITY DEFINER (refresh requires ownership) and refreshes
+    // CONCURRENTLY, so readers are never blocked.
     if (resource === FACETS_RESOURCE) {
       const { data, error } = await market.rpc('refresh_facets')
       if (error) throw new Error(`refresh_facets failed: ${error.message}`)
@@ -1217,6 +959,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // Standalone so a mapping edited in Studio (tracked_fund.represents_code) takes effect without
+    // re-ingesting 38 filings — and so classification can be re-run when the holdings themselves are
+    // still inside their 7-day TTL, which is what blocked the first production run.
     if (resource === DERIVE_RESOURCE) {
       const { data: classified, error } = await market.rpc('derive_classifications')
       if (error) throw new Error(`derive_classifications failed: ${error.message}`)
@@ -1244,26 +989,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       return json({ resource, classified, weighted, sic })
     }
 
-    // Sector for securities NO sector SPDR holds — i.e. everything non-US. Written as a SECOND
-    // source (`yfinance`, priority 100) beside the filing-derived one (`sec-nport`, 300), so a
-    // security XLK holds keeps its filing sector and everything else gains a provider opinion.
-    // Address non-US securities the way the price provider does. This is the root of the whole
-    // non-US gap: without a local symbol there is no ticker, so no profile, so no sector and no
-    // price — Korea had 10 tickers across 467 securities.
-    // Enumerate one exchange per run, resuming from its cursor. A venue is thousands of rows at
-    // 100 per request, so this is the same slice-per-run shape as every other backlog — the
-    // difference is that the slice boundary is OpenFIGI's own cursor rather than our ordering.
-    // Pull one directory listing into the universe. Deliberately creates ONLY identity — the
-    // existing backlogs then classify and price it with no new code, which is the whole reason
-    // they select on "has a symbol, lacks X" rather than on a fixed list.
-    // Everything for ONE security, from the stock page. Scoped rather than universe-wide because
-    // the resources it wraps are budgeted for a backlog and would refuse on their TTL, and because
-    // fundamentals cost one of 25 daily calls — spending those on what someone is looking at is
-    // the only shape that provider supports.
-    // Statements are fetched PER SECURITY, not per batch: each of the three endpoints returns one
-    // row per PERIOD, and a multi-symbol response would interleave periods from different
-    // companies with only a `symbol` field to tell them apart. One symbol at a time keeps the
-    // attribution structural rather than something to get right.
     // Splits and dividends — the only corporate-action data in this pipeline. See `tiingo.ts` for
     // why this provider, what it does not cover (local foreign listings 404), and why the binding
     // constraint here is UNIQUE SYMBOLS rather than requests per unit time.
@@ -1293,8 +1018,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
 
       // Five years, which is what makes a split usable: a 3Y or 5Y return needs every split inside
       // its own window, and asking for less would silently under-adjust the long periods.
-      // Computed inline rather than via `daysBefore`, which is a resources.ts helper this file
-      // does not import.
       const since = new Date(Date.now() - 1900 * 86_400_000).toISOString().slice(0, 10)
       const deadline = Date.now() + 60_000
       // ROWS written, and SECURITIES covered — two different units, kept apart because mixing them
@@ -1397,110 +1120,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         // `unanswered`, which is a different and also useful fact.
         remaining: await backlogSize(market, 'pending_corporate_actions'),
         unanswered: Math.max(0, wanted.length - covered - none - noTicker),
-      })
-    }
-
-    // DERIVING METRICS NEEDS NO PROVIDER, so this resource has none of the machinery the others
-    // do: no batching, no isolation, no negative cache, no deadline arithmetic. The work is a JOIN
-    // over statements we already hold, and `market.derive_security_metrics` does all of it in one
-    // statement — which is why it cannot be throttled and re-running it is free.
-    // TWENTY YEARS OF WEEKLY BARS, ONCE PER SECURITY.
-    //
-    // A one-off backfill, not a refresh: `pending_price_history` empties as it goes and a security
-    // that has weekly bars never comes back. The recent end keeps being extended by the ordinary
-    // daily resource, so this does not need to re-run to stay current at the DAILY grain — but the
-    // weekly series does drift stale at its own end, which is why the resource stays scheduled
-    // rather than being a one-time script someone has to remember.
-    // ONE FILE, EVERY US FILER. `company_tickers.json` is 776 KB and maps ticker -> CIK for
-    // ~10,400 filers, which is the whole input to the XBRL resource below. Reference data, so it
-    // runs on the reference TTL rather than the backlog one.
-    // ONE BATCH OF SYMBOLS, TWO ENDPOINTS. Share statistics and analyst consensus are both
-    // per-security snapshots for the same securities, and both batch — six symbols in 0.48s and
-    // 0.33s measured — so fetching them together halves the requests for what is really two halves
-    // of one row.
-    // A WRONG NAME IS NOT A MISSING SECURITY.
-    if (resource === SYMBOL_REPAIR_RESOURCE) {
-      const deadline = Date.now() + 60_000
-      const { data: pending, error: pErr } = await market
-        .from('pending_symbol_repair')
-        .select('security_id,symbol,fetch_symbol')
-        .limit(scopeLimit ?? 120)
-      if (pErr) throw new Error(`pending_symbol_repair read failed: ${pErr.message}`)
-
-      let examined = 0
-      let repaired = 0
-      let probes = 0
-      let failed = 0
-      let lastError: string | null = null
-      const fixes: string[] = []
-
-      for (const row of pending ?? []) {
-        if (Date.now() > deadline - 8_000) break
-        const current = String(row.fetch_symbol ?? row.symbol)
-        const candidates = candidateSymbols(current)
-        // Stamped even when there is nothing to try, or a security whose spelling is simply right
-        // is re-examined on every run for ever.
-        examined++
-        if (candidates.length === 0) {
-          const { error } = await market.from('security')
-            .update({ symbol_repair_at: new Date().toISOString() })
-            .eq('security_id', row.security_id as string)
-          if (error) throw new Error(`symbol_repair_at update failed: ${error.message}`)
-          continue
-        }
-
-        let adopted: string | null = null
-        for (const candidate of candidates) {
-          if (Date.now() > deadline - 6_000) break
-          probes++
-          try {
-            // ONE SYMBOL, SHORT WINDOW. The question is only "does the provider know this name",
-            // so a year of weekly bars is enough and a 20-year fetch would cost 5x for the same
-            // yes-or-no.
-            const rows = await fetcher(
-              `/api/v1/equity/price/historical?symbol=${encodeURIComponent(candidate)}` +
-                `&provider=yfinance&interval=1W&start_date=2023-01-01`,
-              Math.min(15_000, deadline - Date.now()),
-            )
-            // ADOPTION REQUIRES AN ANSWER. The rules are generated liberally — the Nordic one
-            // matches `SAND.ST` (Sandvik), a company name and not a class share — so a candidate
-            // that returns nothing is simply wrong, and silence is the provider saying so.
-            if (rows.length > 0) { adopted = candidate; break }
-          } catch (e) {
-            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-            lastError = msg
-            // A refusal is about the endpoint, not the candidate: stop probing rather than
-            // concluding every remaining spelling is wrong.
-            if (throttled(msg)) { failed++; break }
-          }
-        }
-
-        if (adopted) {
-          const { error: sErr } = await market.from('security_provider_symbol')
-            .upsert({ security_id: row.security_id, provider_code: 'yfinance', symbol: adopted },
-              { onConflict: 'security_id,provider_code' })
-          if (sErr) throw new Error(`security_provider_symbol upsert failed: ${sErr.message}`)
-          // A CORRECTED SYMBOL INVALIDATES EVERY SYMBOL-KEYED CACHE. Fixing the spelling and
-          // leaving the marks set would keep the security excluded for 30 days by the very flags
-          // that recorded asking under the wrong name.
-          const { error: cErr } = await market.rpc('clear_symbol_caches', {
-            p_security_id: row.security_id,
-          })
-          if (cErr) throw new Error(`clear_symbol_caches failed: ${cErr.message}`)
-          repaired++
-          if (fixes.length < 12) fixes.push(`${current} -> ${adopted}`)
-        }
-
-        const { error } = await market.from('security')
-          .update({ symbol_repair_at: new Date().toISOString() })
-          .eq('security_id', row.security_id as string)
-        if (error) throw new Error(`symbol_repair_at update failed: ${error.message}`)
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource, examined, repaired, probes, failed, lastError, fixes,
-        remaining: await backlogSize(market, 'pending_symbol_repair'),
       })
     }
 
@@ -1612,6 +1231,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // ONE BATCH OF SYMBOLS, TWO ENDPOINTS. Share statistics and analyst consensus are both
+    // per-security snapshots for the same securities, and both batch — six symbols in 0.48s and
+    // 0.33s measured — so fetching them together halves the requests for what is really two halves
+    // of one row.
     if (resource === SHARE_STATS_RESOURCE) {
       const deadline = Date.now() + 60_000
       const { data: pending, error: pErr } = await market
@@ -1911,35 +1534,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         // anything failed, and those are different things.
         resource, actions, batches, batchesFailed, advanced, stoppedEarly, throttledOut, lastError,
         remaining: await backlogSize(market, 'pending_price_targets'),
-      })
-    }
-
-    // ONE FILE, ONE STATEMENT. `company_tickers.json` is 776 KB and maps ticker -> CIK for
-    // ~10,400 filers. The first version applied it row by row and reached 6,645 of ~27,000
-    // identifiers before its deadline — then restarted from zero on the next run, so it could
-    // never reach the rest while reporting 3,516 matches as if that were progress.
-    if (resource === CIK_RESOURCE) {
-      const map = await fetchCikMap(30_000)
-      if (map.size === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: 'empty cik map' })
-        return json({ resource, ok: false, error: 'SEC returned no filers' })
-      }
-
-      // Matched on the US TICKER, which is what SEC lists. A local symbol (`SAP.DE`) is not a
-      // filer id, which is why the function joins `security_identifier` rather than
-      // `security_symbol` — the latter's `coalesce(ticker, provider_symbol)` would supply one.
-      const { data, error } = await market.rpc('apply_cik_map', {
-        p_map: Object.fromEntries(map),
-      })
-      if (error) throw new Error(`apply_cik_map failed: ${error.message}`)
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        filers: map.size,
-        // Rows CHANGED, not rows matched: the statement skips a security whose cik is already
-        // right, so a steady-state run reports 0 and that is the correct answer.
-        updated: typeof data === 'number' ? data : 0,
       })
     }
 
@@ -2965,40 +2559,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // and never permanently. And an ANTI-JOIN, not an ordering — read straight from the security
     // list with a `limit`, this would return the same companies for ever, which is the defect
     // `pending_industry` ran with for months.
-    if (resource === IN_SYMBOLS_RESOURCE) {
-      // NSE'S OWN ISIN -> TRADING-SYMBOL MAP, and the reason India resolves at all.
-      //
-      // `market.listing.symbol` holds a vendor abbreviation for 406 of 645 Indian equities (SUEL
-      // for SUZLON, HUVR for HINDUNILVR), and NSE answers an unknown symbol with an EMPTY ARRAY
-      // and HTTP 200 — so `in-filings` reported `walked: 6, mapped: 0, failed: 0` while asking the
-      // wrong question, with nothing anywhere able to show it.
-      const listed = await nse.equityList(30_000)
-      if (listed.length === 0) {
-        // AN EMPTY LIST IS A PROVIDER EVENT, NEVER A STATEMENT THAT INDIA HAS NO LISTINGS.
-        // Applying it would not erase anything (the upsert only writes what it is given), but
-        // reporting ok would hide a broken feed behind a green run.
-        await market.rpc('finish_refresh', {
-          p_resource: resource, p_ok: false, p_error: 'empty nse equity list',
-        })
-        return json({ resource, ok: false, error: 'NSE returned no listings' })
-      }
-
-      const map: Record<string, string> = {}
-      for (const row of listed) map[row.isin] = row.symbol
-
-      const { data, error } = await market.rpc('apply_nse_symbol_map', { p_map: map })
-      if (error) throw new Error(`apply_nse_symbol_map failed: ${error.message}`)
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        listings: listed.length,
-        // Rows CHANGED, not matched — a security whose symbol is already right is skipped, so a
-        // steady-state run reports 0 and that is the correct answer.
-        updated: typeof data === 'number' ? data : 0,
-      })
-    }
-
     if (resource === IN_FILINGS_RESOURCE) {
       const deadline = Date.now() + 70_000
 
@@ -3471,290 +3031,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
-    if (resource === PRICE_HISTORY_RESOURCE) {
-      const deadline = Date.now() + 60_000
-      const { data: pending, error: pErr } = await market
-        .from('pending_price_history')
-        .select('security_id,symbol,fetch_symbol')
-        .limit(scopeLimit ?? 120)
-      if (pErr) throw new Error(`pending_price_history read failed: ${pErr.message}`)
-
-      const wanted = (pending ?? []).map((r) => ({
-        securityId: r.security_id as string,
-        symbol: String(r.symbol),
-        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
-      }))
-      if (wanted.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, written: 0, remaining: 0, note: 'every equity has weekly history' })
-      }
-
-      const start = `${new Date().getUTCFullYear() - PRICE_HISTORY_YEARS}-01-01`
-      // Written AFTER the bars land, never before: the marker is what removes a security from
-      // `pending_price_history`, so setting it first would drop the security out of the backlog
-      // with nothing stored.
-      const earliestBySecurity = new Map<string, string>()
-      let written = 0
-      let batches = 0
-      let batchesFailed = 0
-      let noHistory = 0
-      let throttledOut = false
-      let lastError: string | null = null
-
-      // TWELVE, the same batch size the daily resource uses. Measured: three symbols of 20-year
-      // weekly bars is 3,231 rows, so twelve is ~13,000 rows and a few MB — comfortably inside a
-      // 256 MB worker, and far from the URL length that makes `in.()` answer a bare 502.
-      const BATCH = 12
-      for (let i = 0; i < wanted.length && Date.now() < deadline - 12_000; i += BATCH) {
-        const group = wanted.slice(i, i + BATCH)
-        batches++
-        try {
-          const isolated = await fetchWithIsolation(
-            fetcher,
-            (syms: string[]) =>
-              `/api/v1/equity/price/historical?symbol=${symbolList(syms)}` +
-              `&provider=yfinance&interval=1W&start_date=${start}`,
-            group.map((g) => g.fetchSymbol),
-            Math.min(45_000, deadline - Date.now()),
-            deadline,
-          )
-          const rows = isolated.rows
-          if (isolated.error) lastError = isolated.error
-          const deadSymbols = new Set(isolated.dead.map((d) => d.toUpperCase()))
-          // PER BATCH, NOT PER RUN. A run-wide `anySucceeded` is the "if any of the 40 answered,
-          // blame the rest" rule, and yfinance defeats it by throttling PROGRESSIVELY — it omits
-          // symbols from a 200 rather than erroring, so a partly-served batch looks like a healthy
-          // one. Observed live: a run reported `noHistory: 13` alongside `Signal timed out`, and
-          // those 13 were almost certainly collateral.
-          //
-          // So a symbol is only marked when THIS batch answered cleanly and simply did not include
-          // it, or when isolation asked it ALONE and it failed. Anything else is left for the next
-          // run, which costs one more request and cannot cost a security 30 days.
-          // A batch that answered nothing is now ISOLATED by `fetchWithIsolation` and adjudicated
-          // by a control symbol, so `dead` is authoritative either way: populated means the
-          // provider is up and those symbols are unanswerable, empty means it is not up and
-          // nothing may be marked.
-          const batchClean = !isolated.error && rows.length > 0
-
-          const bySymbol = new Map<string, { date: string; close: number }[]>()
-          for (const r of rows) {
-            // The provider adds a `symbol` column only when SEVERAL are requested, so a
-            // single-symbol batch has to be told which symbol it asked about.
-            const parsed = barFrom(r, group[0].fetchSymbol)
-            if (!parsed) continue
-            const key = parsed.symbol.toUpperCase()
-            const list = bySymbol.get(key) ?? []
-            list.push(parsed.bar)
-            bySymbol.set(key, list)
-          }
-
-          const priceRows: { security_id: string; date: string; close: number; grain: string }[] = []
-          for (const g of group) {
-            const bars = bySymbol.get(g.fetchSymbol.toUpperCase()) ?? []
-            if (bars.length === 0) {
-              if (!batchClean && !deadSymbols.has(g.fetchSymbol.toUpperCase())) continue
-              // MARKED ONLY IF THIS BATCH ANSWERED CLEANLY, OR ISOLATION PROVED THE SYMBOL DEAD. A throttled yfinance returns a
-              // 200 with no rows rather than erroring, and marking on that recorded "this security
-              // has no history" for thousands of perfectly answerable ones in a single afternoon.
-              {
-                noHistory++
-                const { error } = await market
-                  .from('security')
-                  .update({ price_history_missing_at: new Date().toISOString() })
-                  .eq('security_id', g.securityId)
-                if (error) throw new Error(`price_history_missing_at update failed: ${error.message}`)
-              }
-              continue
-            }
-            for (const b of bars) {
-              priceRows.push({ security_id: g.securityId, date: b.date, close: b.close, grain: 'weekly' })
-            }
-            // THE MARKER, so nothing has to SCAN for this again. Asking `security_price` whether a
-            // security has weekly history costs 7.9s cold across ~8M rows, and both
-            // `pending_price_history` and the coverage view were paying it — the backlog read
-            // measured 5.8s, two seconds from the PostgREST role's timeout. Recorded here, it is
-            // an 8ms column read. Same pattern as `daily_history_from`.
-            earliestBySecurity.set(g.securityId,
-              bars.reduce((min, b) => (b.date < min ? b.date : min), bars[0].date))
-          }
-
-          for (let j = 0; j < priceRows.length; j += 500) {
-            const { error } = await market
-              .from('security_price')
-              .upsert(
-                dedupeBy(priceRows.slice(j, j + 500), (r) => `${r.security_id}|${r.grain}|${r.date}`),
-                { onConflict: 'security_id,grain,date' },
-              )
-            if (error) throw new Error(`security_price weekly upsert failed: ${error.message}`)
-          }
-          written += priceRows.length
-
-          for (const [securityId, earliest] of earliestBySecurity) {
-            const { error } = await market
-              .from('security')
-              .update({ price_history_from: earliest })
-              .eq('security_id', securityId)
-            if (error) throw new Error(`price_history_from update failed: ${error.message}`)
-          }
-          earliestBySecurity.clear()
-        } catch (e) {
-          batchesFailed++
-          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          lastError = msg
-          if (throttled(msg)) { throttledOut = true; break }
-        }
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        written,
-        batches,
-        batchesFailed,
-        noHistory,
-        throttledOut,
-        lastError,
-        remaining: await backlogSize(market, 'pending_price_history'),
-      })
-    }
-
-    if (resource === DAILY_HISTORY_RESOURCE) {
-      // DEEP DAILY HISTORY, WHOLE UNIVERSE. `security-prices` keeps a ~400-day daily window and
-      // `security-price-history` fills twenty years WEEKLY; this fills the same span at daily
-      // resolution, which is the difference between a chart you can draw and a backtest you can
-      // run. The weekly series is deliberately untouched — a 20-year window is ~5,040 daily points
-      // per symbol against ~1,040 weekly, and `price_series` has crossed the anon 3-second timeout
-      // twice already.
-      //
-      // A SHORTER DEADLINE THAN ITS SIBLINGS, because the limit here is MEMORY rather than the
-      // clock: one batch is several times the size of anything else this function fetches, so the
-      // run should end with headroom rather than with the supervisor killing the worker.
-      const deadline = Date.now() + 55_000
-      const { data: pending, error: pErr } = await market
-        .from('pending_daily_history')
-        .select('security_id,symbol,fetch_symbol')
-        .limit(scopeLimit ?? 60)
-      if (pErr) throw new Error(`pending_daily_history read failed: ${pErr.message}`)
-
-      const wanted = (pending ?? []).map((r) => ({
-        securityId: r.security_id as string,
-        symbol: String(r.symbol),
-        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
-      }))
-      if (wanted.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, written: 0, remaining: 0, note: 'every equity has deep daily history' })
-      }
-
-      let written = 0
-      let batches = 0
-      let batchesFailed = 0
-      let noHistory = 0
-      let securities = 0
-      let throttledOut = false
-      let lastError: string | null = null
-
-      for (let i = 0; i < wanted.length && Date.now() < deadline - 15_000; i += DAILY_HISTORY_BATCH) {
-        const group = wanted.slice(i, i + DAILY_HISTORY_BATCH)
-        batches++
-        try {
-          const isolated = await fetchWithIsolation(
-            fetcher,
-            (syms: string[]) =>
-              `/api/v1/equity/price/historical?symbol=${symbolList(syms)}` +
-              `&provider=yfinance&interval=1d&start_date=${DAILY_HISTORY_START}`,
-            group.map((g) => g.fetchSymbol),
-            Math.min(40_000, deadline - Date.now()),
-            deadline,
-          )
-          const rows = isolated.rows
-          if (isolated.error) lastError = isolated.error
-          const deadSymbols = new Set(isolated.dead.map((d) => d.toUpperCase()))
-          // The same adjudication every batched resource here uses: a symbol is marked only when
-          // THIS batch answered cleanly and omitted it, or when isolation asked it ALONE and it
-          // failed. yfinance throttles PROGRESSIVELY — it drops symbols from a 200 rather than
-          // erroring — so a run-wide tally is never evidence about a symbol.
-          const batchClean = !isolated.error && rows.length > 0
-
-          const bySymbol = new Map<string, { date: string; close: number }[]>()
-          for (const r of rows) {
-            // The provider adds a `symbol` column only when SEVERAL are requested, so a
-            // single-symbol batch has to be told which symbol it asked about.
-            const parsed = barFrom(r, group[0].fetchSymbol)
-            if (!parsed) continue
-            const key = parsed.symbol.toUpperCase()
-            const list = bySymbol.get(key) ?? []
-            list.push(parsed.bar)
-            bySymbol.set(key, list)
-          }
-
-          for (const g of group) {
-            const bars = bySymbol.get(g.fetchSymbol.toUpperCase()) ?? []
-            if (bars.length === 0) {
-              if (!batchClean && !deadSymbols.has(g.fetchSymbol.toUpperCase())) continue
-              noHistory++
-              const { error } = await market
-                .from('security')
-                .update({ daily_history_missing_at: new Date().toISOString() })
-                .eq('security_id', g.securityId)
-              if (error) throw new Error(`daily_history_missing_at update failed: ${error.message}`)
-              continue
-            }
-
-            // WRITTEN AND MARKED PER SECURITY, not per batch. One security's bars are ~7,300 rows;
-            // accumulating a whole batch before upserting would hold six of those at once for no
-            // benefit, and this is the resource whose ceiling is memory.
-            const priceRows = bars.map((b) => ({
-              security_id: g.securityId,
-              date: b.date,
-              close: b.close,
-              grain: 'daily',
-            }))
-            for (let j = 0; j < priceRows.length; j += 500) {
-              const { error } = await market
-                .from('security_price')
-                .upsert(
-                  dedupeBy(priceRows.slice(j, j + 500), (r) => `${r.security_id}|${r.grain}|${r.date}`),
-                  { onConflict: 'security_id,grain,date' },
-                )
-              if (error) throw new Error(`security_price daily-history upsert failed: ${error.message}`)
-            }
-            written += priceRows.length
-            securities++
-
-            // THE "DONE" MARKER, WRITTEN LAST AND ONLY ON SUCCESS. It is what removes the security
-            // from `pending_daily_history`, so writing it before the bars land would drop the
-            // security out of the backlog with nothing stored — the security-facing version of a
-            // page that advances without doing the work.
-            const earliest = bars.reduce((min, b) => (b.date < min ? b.date : min), bars[0].date)
-            const { error: markErr } = await market
-              .from('security')
-              .update({ daily_history_from: earliest })
-              .eq('security_id', g.securityId)
-            if (markErr) throw new Error(`daily_history_from update failed: ${markErr.message}`)
-          }
-        } catch (e) {
-          batchesFailed++
-          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          lastError = msg
-          if (throttled(msg)) { throttledOut = true; break }
-        }
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        written,
-        securities,
-        batches,
-        batchesFailed,
-        noHistory,
-        throttledOut,
-        lastError,
-        remaining: await backlogSize(market, 'pending_daily_history'),
-      })
-    }
-
     if (resource === EARNINGS_HISTORY_RESOURCE) {
       // ACTUAL-VERSUS-ESTIMATE, FROM THE ENDPOINT WE ALREADY CALL.
       //
@@ -3904,6 +3180,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // DERIVING METRICS NEEDS NO PROVIDER, so this resource has none of the machinery the others
+    // do: no batching, no isolation, no negative cache, no deadline arithmetic. The work is a JOIN
+    // over statements we already hold, and `market.derive_security_metrics` does all of it in one
+    // statement — which is why it cannot be throttled and re-running it is free.
     if (resource === METRICS_RESOURCE) {
       // PAGED, AND THE PAGE SIZE IS NOT NEGOTIABLE UPWARD. Unlimited, this exceeded the statement
       // timeout on the role PostgREST uses (105,927 statements) and did NOTHING while correctly
@@ -4943,6 +4223,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // Statements are fetched PER SECURITY, not per batch: each of the three endpoints returns one
+    // row per PERIOD, and a multi-symbol response would interleave periods from different
+    // companies with only a `symbol` field to tell them apart. One symbol at a time keeps the
+    // attribution structural rather than something to get right.
     if (resource === STATEMENTS_RESOURCE) {
       const { data: pending, error: pErr } = await market
         .from('pending_statements')
@@ -5538,6 +4822,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // Everything for ONE security, from the stock page. Scoped rather than universe-wide because
+    // the resources it wraps are budgeted for a backlog and would refuse on their TTL, and because
+    // fundamentals cost one of 25 daily calls — spending those on what someone is looking at is
+    // the only shape that provider supports.
     if (resource === ONE_SECURITY_RESOURCE) {
       const wanted = String(symbolScope ?? '').trim().toUpperCase()
       if (!wanted) return releaseAnd({ error: 'security-refresh needs a `symbol`' }, 400)
@@ -5713,1052 +5001,6 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({ ...out, refreshed: true })
-    }
-
-    if (resource === PROMOTE_RESOURCE) {
-      let figi = String(figiScope ?? '').trim()
-
-      // PROMOTE BY TICKER, without waiting for the venue to be enumerated. The directory route
-      // needs the sweep to have reached the listing and it pages no deeper than 15,000, so `BABA`
-      // was unreachable that way while being one `/v3/mapping` call away. Promotion only ever
-      // needed the FIGI.
-      const tickerArg = String(symbolScope ?? '').trim().toUpperCase()
-      const exchArg = String(exchScope ?? 'US').trim().toUpperCase()
-      // What the mapping told us, kept so the security can be created from it when the sweep has
-      // not reached this listing. Resolving the FIGI alone is HALF A FEATURE: `untracked_listing`
-      // is built from `exchange_listing`, so a ticker the directory has never enumerated resolves
-      // and then promotes nothing. Measured on the first BABA attempt: `figi BBG006G2JVL2,
-      // promoted: false, reason: already tracked or unknown figi` — the FIGI was right and there
-      // was simply no row to promote.
-      let mapped: { name?: string; compositeFigi?: string; securityType?: string } | undefined
-      if (!figi && tickerArg) {
-        const hits = await mapTickers(
-          [{ ticker: tickerArg, exchCode: exchArg }],
-          { apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined },
-        )
-        mapped = hits[0]
-        if (!mapped?.compositeFigi) {
-          return json({
-            resource, ticker: tickerArg, promoted: false,
-            reason: 'OpenFIGI has no listing for that ticker on that exchange',
-          })
-        }
-        figi = mapped.compositeFigi
-      }
-
-      if (!figi) return releaseAnd({ error: 'promote-listing needs a `figi` or a `symbol`' }, 400)
-
-      const { data: listing, error: lErr } = await market
-        .from('untracked_listing')
-        .select('figi,composite_figi,exch_code,ticker,name,country_iso2,provider_symbol')
-        .eq('figi', figi)
-        .maybeSingle()
-      if (lErr) throw new Error(`untracked_listing read failed: ${lErr.message}`)
-      // Already promoted is a SUCCESS, not an error: two people tapping the same row should not
-      // produce a failure for the second one.
-      // Is it already ours? Then this is a SUCCESS, not an error — two people tapping the same row
-      // must not fail for the second one.
-      const { data: existing, error: exErr } = await market
-        .from('security_identifier')
-        .select('security_id')
-        .eq('kind_code', 'figi')
-        .eq('value', figi)
-        .maybeSingle()
-      if (exErr) throw new Error(`security_identifier read failed: ${exErr.message}`)
-      if (existing) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, figi, promoted: false, reason: 'already tracked' })
-      }
-
-      // NOT IN THE DIRECTORY, BUT NAMED BY A PERSON. Build the row from the mapping response
-      // instead of refusing: that is the whole point of promoting by ticker, since the US alone
-      // holds 20,107 common stocks and OpenFIGI pages to 15,000, so waiting for the sweep is not an
-      // answer for "this major company should be here".
-      const source = listing ?? (mapped
-        ? {
-            figi,
-            composite_figi: figi,
-            exch_code: exchArg,
-            ticker: tickerArg,
-            name: mapped.name ?? tickerArg,
-            // The mapping response carries no country. Left NULL rather than guessed — the country
-            // a security is FILED under is not one to invent, and `security-profiles` fills it.
-            country_iso2: null,
-            // No suffix for a US listing; anywhere else the local-symbol backlog resolves it.
-            provider_symbol: exchArg === 'US' ? tickerArg : null,
-          }
-        : null)
-
-      if (!source) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, figi, promoted: false, reason: 'unknown figi and no ticker to map' })
-      }
-
-      const securityId = crypto.randomUUID()
-      const { error: sErr } = await market.from('security').insert({
-        security_id: securityId,
-        name: source.name,
-        security_type_code: 'equity',
-        country_iso2: source.country_iso2 ?? null,
-        is_tradeable: true,
-      })
-      if (sErr) throw new Error(`security insert failed: ${sErr.message}`)
-
-      // FIGI first — it is what stops this listing being offered as untracked again.
-      const identifiers = [
-        { kind_code: 'figi', value: source.composite_figi ?? source.figi, security_id: securityId, source_code: 'openfigi' },
-        { kind_code: 'ticker', value: source.ticker, security_id: securityId, source_code: 'openfigi' },
-      ]
-      const { error: iErr } = await market
-        .from('security_identifier')
-        .upsert(identifiers, { onConflict: 'kind_code,value', ignoreDuplicates: true })
-      if (iErr) throw new Error(`identifier insert failed: ${iErr.message}`)
-
-      if (source.provider_symbol) {
-        const { error: pErr } = await market.from('security_provider_symbol').upsert(
-          { security_id: securityId, provider_code: 'yfinance', symbol: source.provider_symbol },
-          { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
-        )
-        if (pErr) throw new Error(`provider symbol insert failed: ${pErr.message}`)
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        figi,
-        promoted: true,
-        securityId,
-        symbol: source.provider_symbol ?? source.ticker,
-        note: 'sector and returns arrive on the next security-profiles / security-performance run',
-      })
-    }
-
-    if (resource === FX_RESOURCE) {
-      // Every currency we actually hold, not a hardcoded list — a new market brings a new currency
-      // and it must not need a deploy. Same reason `exchange` and `tracked_fund` are tables.
-      const { data: currencies, error: cErr } = await market.from('currency').select('code')
-      if (cErr) throw new Error(`currency read failed: ${cErr.message}`)
-      const codes = (currencies ?? []).map((c) => c.code as string)
-
-      const deadline = Date.now() + 60_000
-      const quotes: { currency_code: string; as_of: string; usd_per_unit: number; source_code: string; derived_from: string | null }[] = []
-      const failed: string[] = []
-      const implausible: string[] = []
-
-      // Quote the real currencies first; subunits are derived from their parents afterwards, so a
-      // parent must be fetched even if no security is quoted in it directly.
-      const parents = new Set(Object.values(SUBUNITS).map((s) => s.parent))
-      const toFetch = [...new Set([...codes.filter((c) => !(c in SUBUNITS)), ...parents])]
-
-      for (const code of toFetch) {
-        if (Date.now() > deadline - 5_000) break
-        let q: FxQuote | null = null
-        try {
-          q = await fetchUsdPerUnit(code, Math.min(8_000, deadline - Date.now()))
-        } catch {
-          failed.push(code)
-          continue
-        }
-        if (!q) { failed.push(code); continue }
-        // A rate we cannot vouch for must not reprice 8,169 market caps. Rejected, not corrected:
-        // the most likely cause is an INVERTED pair, and both directions look plausible.
-        if (!isPlausibleRate(q.usdPerUnit)) { implausible.push(`${code}=${q.usdPerUnit}`); continue }
-        quotes.push({
-          currency_code: code,
-          as_of: q.asOf,
-          usd_per_unit: q.usdPerUnit,
-          source_code: 'yfinance',
-          derived_from: null,
-        })
-      }
-
-      // Subunits, derived from whatever parent this run actually quoted. Not from a stored rate:
-      // a parent that failed today should leave its subunit untouched rather than mixing a fresh
-      // subunit with a stale parent under one `as_of`.
-      const bySymbol = new Map(quotes.map((q) => [q.currency_code, q]))
-      for (const [sub, { parent, per }] of Object.entries(SUBUNITS)) {
-        if (!codes.includes(sub)) continue
-        const p = bySymbol.get(parent)
-        if (!p) { failed.push(`${sub}(no ${parent})`); continue }
-        quotes.push({
-          currency_code: sub,
-          as_of: p.as_of,
-          usd_per_unit: p.usd_per_unit / per,
-          source_code: 'yfinance',
-          derived_from: parent,
-        })
-      }
-
-      if (quotes.length > 0) {
-        const { error } = await market
-          .from('fx_rate')
-          .upsert(dedupeBy(quotes, (q) => `${q.currency_code}|${q.as_of}`),
-            { onConflict: 'currency_code,as_of' })
-        if (error) throw new Error(`fx_rate upsert failed: ${error.message}`)
-      }
-
-      // ── HISTORY, FOR THE CURRENCIES THAT DO NOT HAVE IT YET ─────────────────────────────────
-      //
-      // Spot is enough to reprice a market cap TODAY and useless for a ratio SERIES: converting a
-      // 2021 bar with today's rate is wrong by every intervening move and looks entirely ordinary.
-      // So each run backfills ten years of WEEKLY rates for a few currencies that are still
-      // spot-only, and then never touches them again — this is a one-off per currency, not a
-      // recurring cost, which is why a handful per run drains 41 currencies in days without
-      // competing with anything.
-      let backfilled = 0
-      const historyFor: string[] = []
-      // Currencies the provider has no usable history for. Reported separately from `failed`:
-      // a pair we could not fetch and a pair that genuinely has one bar are different facts.
-      const noHistory: string[] = []
-      {
-        // A currency is "spot-only" if everything we hold for it is recent. Asking for rows older
-        // than 90 days is an ANTI-JOIN over the entity, not a count — a currency with three days of
-        // data and one with ten years both have rows, and only the second is done.
-        // ASKED AS A BACKLOG, NOT READ AS A PAGE. This probe used to select the rows older than
-        // 90 days and build a set from them — and `PGRST_DB_MAX_ROWS` is 1,000 while the backfill
-        // writes ~520 rows per currency, so after two currencies it could not see past its own
-        // page and re-fetched the same four for ever while reporting no failures.
-        const { data: pendingFx, error: hErr } = await market
-          .from('pending_fx_history')
-          .select('currency_code')
-        if (hErr) throw new Error(`pending_fx_history read failed: ${hErr.message}`)
-        const needs = new Set((pendingFx ?? []).map((r) => r.currency_code as string))
-        // Subunits are DERIVED from a parent, never quoted: Yahoo has no `ILAUSD=X`. They are
-        // filled from the parent's history below rather than fetched.
-        const wanted = toFetch.filter((c) => c !== 'USD' && needs.has(c))
-
-        for (const code of wanted) {
-          if (Date.now() > deadline - 12_000) break
-          if (historyFor.length >= 4) break
-          let hist: { asOf: string; usdPerUnit: number }[] = []
-          try {
-            hist = await fetchUsdPerUnitHistory(code, Math.min(20_000, deadline - Date.now()))
-          } catch { failed.push(`${code}(history)`); continue }
-          // A SINGLE BAR IS NOT HISTORY. Yahoo carries one for some minor pairs (GEL, measured),
-          // so the upsert succeeds, writes a recent row, and the currency stays in the backlog to
-          // be re-asked eight times a day for ever. Marked instead — the fetch answered, and what
-          // it answered is "there is nothing here".
-          if (hist.length < 8) {
-            const { error: mErr } = await market
-              .from('currency')
-              .update({ history_missing_at: new Date().toISOString() })
-              .eq('code', code)
-            if (mErr) throw new Error(`history_missing_at update failed: ${mErr.message}`)
-            noHistory.push(code)
-            if (hist.length === 0) continue
-          }
-
-          const rows = hist.map((h) => ({
-            currency_code: code,
-            as_of: h.asOf,
-            usd_per_unit: h.usdPerUnit,
-            source_code: 'yfinance',
-            derived_from: null as string | null,
-          }))
-          // Every subunit of this currency, in the same pass and from the SAME rates — a subunit
-          // whose parent has ten years of history and which has three days would silently fall back
-          // to the spot rate for every historical bar.
-          for (const [sub, { parent, per }] of Object.entries(SUBUNITS)) {
-            if (parent !== code || !codes.includes(sub)) continue
-            for (const h of hist) {
-              rows.push({
-                currency_code: sub,
-                as_of: h.asOf,
-                usd_per_unit: h.usdPerUnit / per,
-                source_code: 'yfinance',
-                derived_from: parent,
-              })
-            }
-          }
-
-          const { error } = await market
-            .from('fx_rate')
-            .upsert(dedupeBy(rows, (r) => `${r.currency_code}|${r.as_of}`),
-              { onConflict: 'currency_code,as_of', ignoreDuplicates: true })
-          if (error) throw new Error(`fx_rate history upsert failed: ${error.message}`)
-          backfilled += rows.length
-          historyFor.push(code)
-        }
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        quoted: quotes.length,
-        derived: quotes.filter((q) => q.derived_from).length,
-        currencies: codes.length,
-        // One-off per currency: `historyFor` empty with `failed` empty means every currency has its
-        // ten years and there is nothing left to do, which is the steady state.
-        backfilled,
-        historyFor,
-        noHistory,
-        failed,
-        // Reported separately from `failed`: a pair we could not fetch and a pair whose value we
-        // refused are different facts, and only the second one suggests the pair is inverted.
-        implausible,
-      })
-    }
-
-    if (resource === LISTINGS_RESOURCE) {
-      // SWEEP AS MANY VENUES AS THE BUDGET ALLOWS, not exactly one.
-      //
-      // This resource used to do a single venue/type/prefix slice per invocation. Measured
-      // 2026-08-17, that is 59 venues x 3 instrument types, plus 36 letter-partitions x 3 for the
-      // one venue over the paging ceiling = **282 slices**. At 8 cron runs a day that is a
-      // **35-day** full catalogue pass — and most slices are tiny: Portugal is 50 listings and one
-      // request, and it was costing a whole cron slot exactly like a 4,000-listing venue.
-      //
-      // Neither limit that matters is per-invocation. One page is one OpenFIGI request, so a run
-      // doing twenty single-page venues spends twenty of them. The real ceilings are the worker's
-      // wall clock and OpenFIGI's rate limit, so both are budgeted explicitly here rather than
-      // approximated by "one venue".
-      //
-      // WALL CLOCK IS THE HARD ONE. `workerTimeoutMs` is 90s (functions/main/index.ts), and a
-      // venue that STARTS just under the deadline still has to page, upsert and advance its cursor
-      // — a tail that is not bounded by the deadline. `security-performance` runs at 89s of its 90
-      // for exactly this reason. So the loop refuses to START a venue without enough budget left
-      // for a whole one, rather than checking only that the deadline has not yet passed.
-      const SWEEP_DEADLINE = Date.now() + 55_000
-      // Enough for one venue's worst case (20 pages) plus its writes, measured against the
-      // observed ~1.2s per page.
-      const VENUE_RESERVE_MS = 28_000
-      // MEASURED, because the documented number is for a DIFFERENT ENDPOINT and using it here was
-      // wrong by 7.5x. OpenFIGI's widely-quoted "250 requests/minute with an API key" is the limit
-      // for `/v3/mapping`. This resource calls `/v3/filter`, which has its own, far smaller
-      // allowance — measured 2026-08-18 against our key, after letting the bucket reset:
-      //
-      //   20 consecutive 200s, first 429 on request 21
-      //
-      // which matches the sweep exactly: it reported `requestsUsed: 21` and stopped with
-      // `openfigi throttled`. The budget was 150, so it could never bind before the provider did.
-      //
-      // 18 leaves a little headroom. A budget is only as good as the ceiling it is sized against,
-      // and counting the right quantity (which #147 fixed) does nothing if the limit is wrong.
-      //
-      // `/v3/mapping` is a SEPARATE bucket — verified by calling it successfully while `/v3/filter`
-      // was returning 429 — so `security-tickers` and `security-local-symbols` are unaffected by
-      // this resource being throttled, and do not need to be budgeted against it.
-      const REQUEST_BUDGET = 18
-      let requestsUsed = 0
-      const swept: Record<string, unknown>[] = []
-      let sweepThrottled = false
-
-      while (
-        Date.now() < SWEEP_DEADLINE - VENUE_RESERVE_MS &&
-        requestsUsed < REQUEST_BUDGET &&
-        !sweepThrottled
-      ) {
-      const { data: cursors, error: curErr } = await market
-        .from('exchange_cursor')
-        .select('exch_code,country_iso2,suffix,next_cursor,last_run_at,security_type,query_prefix')
-        .eq('enabled', true)
-        // Least recently run first, so no venue is starved by the ones before it. A venue
-        // mid-enumeration (next_cursor set) is finished before a fresh one is started.
-        .order('next_cursor', { ascending: false, nullsFirst: false })
-        .order('last_run_at', { ascending: true, nullsFirst: true })
-        .limit(1)
-      if (curErr) throw new Error(`exchange_cursor read failed: ${curErr.message}`)
-      const target = (cursors ?? [])[0]
-      if (!target) break
-
-      const exch = target.exch_code as string
-      const suffix = (target.suffix as string | null) ?? ''
-      // WHICH KIND OF INSTRUMENT THIS VENUE IS PART-WAY THROUGH. Sweeping only `Common Stock` loses
-      // every ADR: `BABA` is `securityType2: 'Depositary Receipt'`, which is why a 15,000-row US
-      // sweep held `BABB`, `BABAF` and `BABYF` but not `BABA` — and the same for TSM, NVO and every
-      // other foreign company's US line, the exact names someone expects to find.
-      const secType = (target.security_type as string | null) ?? 'Common Stock'
-      // WHICH OpenFIGI FIELD THIS TYPE FILTERS ON — data, not a literal, because the two levels of
-      // OpenFIGI's type vocabulary are not interchangeable. Stocks and ADRs are `securityType2`
-      // values; an ETF is only reachable as `securityType: 'ETP'`, since its coarse bucket
-      // (`securityType2: 'Mutual Fund'`) is 44,119 US rows of mostly open-end funds and blows the
-      // paging ceiling. Kept beside the type in `exchange_sweep_type` so adding a fund class stays
-      // a row in Studio.
-      const { data: typeRow, error: tfErr } = await market
-        .from('exchange_sweep_type')
-        .select('figi_field')
-        .eq('security_type', secType)
-        .maybeSingle()
-      if (tfErr) throw new Error(`exchange_sweep_type read failed: ${tfErr.message}`)
-      const figiTypeField =
-        (typeRow?.figi_field as 'securityType' | 'securityType2' | null) ?? 'securityType2'
-      // NULL means "sweep the venue whole"; a prefix means it is too large for one query.
-      const prefix = (target.query_prefix as string | null) ?? undefined
-      const { listings, next, pages, requests, total, throttled: figiThrottled } = await listExchange(
-        exch,
-        (target.next_cursor as string | null) ?? undefined,
-        {
-          apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
-          securityType2: secType,
-          figiTypeField,
-          query: prefix,
-          // Bounded by BOTH remaining budgets. A page is one OpenFIGI request, so the request
-          // allowance caps pages directly; the time budget is passed through so a slow venue
-          // stops paging rather than eating the next venue's share.
-          maxPages: Math.max(1, Math.min(20, REQUEST_BUDGET - requestsUsed)),
-          budgetMs: Math.max(5_000, SWEEP_DEADLINE - Date.now()),
-        },
-      )
-      // `requests`, NOT `pages`. A venue answering in one request reports `pages: 0`, so
-      // budgeting on pages counted 11 against ~21 actually made on the first multi-venue sweep —
-      // a rate-limit budget that undercounts by half is not a budget.
-      requestsUsed += requests
-      if (figiThrottled) sweepThrottled = true
-
-      let written = 0
-      for (let i = 0; i < listings.length; i += 500) {
-        const chunk = listings.slice(i, i + 500).map((l) => ({
-          figi: l.figi,
-          composite_figi: l.compositeFigi ?? null,
-          exch_code: exch,
-          ticker: l.ticker,
-          name: l.name ?? null,
-          security_type: l.securityType ?? null,
-          // The FINE type, which is the only one that says "fund". An ETF arrives as
-          // securityType2 'Mutual Fund' / securityType 'ETP'; storing only the coarse value filed
-          // 864 Amsterdam ETFs under the same label as open-end mutual funds on the first sweep.
-          figi_security_type: l.securityTypeDetail ?? null,
-          country_iso2: target.country_iso2 ?? null,
-          provider_symbol: `${l.ticker}${suffix}`,
-          last_seen_at: new Date().toISOString(),
-        }))
-        const { error } = await market.from('exchange_listing').upsert(dedupeBy(chunk, (c) => String(c.figi)), { onConflict: 'figi' })
-        if (error) throw new Error(`exchange_listing upsert failed: ${error.message}`)
-        written += chunk.length
-      }
-
-      // When a TYPE is exhausted, advance to the next one rather than declaring the venue done.
-      // The list is a table, so adding "Preferred Stock" later is a row rather than a deploy.
-      // WHERE TO GO NEXT — three nested dimensions: page -> prefix -> type.
-      let nextType = secType
-      let nextPrefix: string | null = prefix ?? null
-
-      // Too big to page through whole, so take it in slices. Decided from the `total` the API
-      // itself reports rather than a list of "big" exchanges: Athens has 606 listings and slicing
-      // it into 36 would be 36 requests to fetch what one gets.
-      if (!prefix && (total ?? 0) > PAGING_CEILING) {
-        const { data: first, error: pErr } = await market
-          .from('exchange_sweep_partition')
-          .select('prefix,sort_order')
-          .order('sort_order')
-          .limit(1)
-        if (pErr) throw new Error(`exchange_sweep_partition read failed: ${pErr.message}`)
-        nextPrefix = (first?.[0]?.prefix as string | undefined) ?? null
-      } else if (!next) {
-        const { data: parts, error: pErr } = await market
-          .from('exchange_sweep_partition')
-          .select('prefix,sort_order')
-          .order('sort_order')
-        if (pErr) throw new Error(`exchange_sweep_partition read failed: ${pErr.message}`)
-        const prefixes = (parts ?? []).map((r) => r.prefix as string)
-
-        if (prefix) {
-          const at = prefixes.indexOf(prefix)
-          nextPrefix = at >= 0 && at + 1 < prefixes.length ? prefixes[at + 1] : null
-        }
-
-        // Only advance the TYPE once the prefixes are exhausted (or there were none).
-        if (!nextPrefix) {
-          const { data: types, error: tErr } = await market
-            .from('exchange_sweep_type')
-            .select('security_type,sort_order')
-            .order('sort_order')
-          if (tErr) throw new Error(`exchange_sweep_type read failed: ${tErr.message}`)
-          const order = (types ?? []).map((t) => t.security_type as string)
-          const at = order.indexOf(secType)
-          // Past the last type, wrap to the first: the directory is a living thing, and a venue
-          // swept months ago should eventually be re-enumerated for new listings.
-          nextType = order.length === 0 ? secType : order[(at + 1) % order.length]
-        }
-      }
-
-      const { error: updErr } = await market
-        .from('exchange_cursor')
-        .update({
-          // A null cursor means this TYPE is exhausted, so the next run starts the next type rather
-          // than resuming a page that no longer exists.
-          next_cursor: next ?? null,
-          security_type: nextType,
-          query_prefix: next ? (prefix ?? null) : nextPrefix,
-          last_run_at: new Date().toISOString(),
-          // ONLY RECORD A COUNT A RUN ACTUALLY PRODUCED. `listings: written` unconditionally meant
-          // a refused run overwrote the venue's total with zero: Japan went 1,800 -> 0 on a run
-          // that fetched nothing, destroying the only record of what had been swept there. A run
-          // that wrote nothing has nothing to say about the venue, so it says nothing.
-          ...(written > 0 ? { listings: written } : {}),
-        })
-        .eq('exch_code', exch)
-      if (updErr) throw new Error(`exchange_cursor update failed: ${updErr.message}`)
-
-      // `throttled` is reported per venue, not folded into `complete`. A refused sweep and an
-      // exhausted venue both come back with no listings, and telling them apart is the whole
-      // point: without it, `written: 0, pages: 0, complete: false` reads as "nothing to do" and a
-      // sweep that is being refused looks exactly like one that is finished.
-      swept.push({
-        exchange: exch, securityType: secType, figiTypeField, written, pages, total,
-        complete: !next && !figiThrottled,
-        throttled: figiThrottled,
-      })
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        venues: swept.length,
-        written: swept.reduce((n, v) => n + (v.written as number), 0),
-        requestsUsed,
-        // Reported so a run that stopped early SAYS WHY. Without it, a sweep cut short by the rate
-        // limit is indistinguishable from one that had nothing left to do — the same distinction
-        // `throttled` exists to make per venue.
-        stoppedBecause: sweepThrottled
-          ? 'openfigi throttled'
-          : requestsUsed >= REQUEST_BUDGET
-          ? 'request budget'
-          : Date.now() >= SWEEP_DEADLINE - VENUE_RESERVE_MS
-          ? 'time budget'
-          : 'no venues left',
-        swept,
-      })
-    }
-
-    if (resource === LOCAL_SYM_RESOURCE) {
-      const wanted: { securityId: string; isin: string; countryIso2: string }[] = []
-      for (let page = 0; page < 3; page++) {
-        const { data, error } = await market
-          .from('pending_local_symbol')
-          .select('security_id,isin,country_iso2')
-          .order('best_weight', { ascending: false })
-          // A SECOND, UNIQUE SORT KEY — without it these pages are not a partition.
-          // `best_weight` is 0 for every security no tracked fund holds, which is most of this
-          // backlog, and Postgres gives no stable order among ties: two `range()` calls can return
-          // the same row twice and never return another. Re-processing is harmless (the writes are
-          // idempotent) but the SKIPPED rows are not — they sit at a page boundary the resource
-          // never reaches, which looks exactly like a backlog that has stopped draining.
-          .order('security_id', { ascending: true })
-          .range(page * 1000, (page + 1) * 1000 - 1)
-        if (error) throw new Error(`pending_local_symbol read failed: ${error.message}`)
-        const rows = data ?? []
-        wanted.push(...rows.map((r) => ({
-          securityId: r.security_id as string,
-          isin: r.isin as string,
-          countryIso2: r.country_iso2 as string,
-        })))
-        if (rows.length < 1000) break
-      }
-      // Only countries we know how to address; the rest would resolve to a symbol yfinance does
-      // not recognise, which yields an empty series that looks like an outage.
-      const addressable = wanted.filter((w) => hasLocalExchange(w.countryIso2, venues))
-      if (addressable.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, resolved: 0, remaining: 0, note: 'no addressable securities pending' })
-      }
-
-      const { resolvedCount, requestsUsed, unresolved } = await mapIsinsToLocalSymbols(addressable, {
-        apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
-        venues,
-        onBatch: async (found, missed) => {
-          if (found.length > 0) {
-            const { error } = await market.from('security_provider_symbol').upsert(
-              found.map((f) => ({
-                security_id: f.securityId,
-                provider_code: 'yfinance',
-                symbol: f.symbol,
-              })),
-              { onConflict: 'security_id,provider_code', ignoreDuplicates: true },
-            )
-            if (error) throw new Error(`provider symbol upsert failed: ${error.message}`)
-
-            // Store the composite FIGI as an identifier. It is the ONLY key that joins a security
-            // to `exchange_listing` (the directory endpoint returns no ISIN), so capturing it as
-            // we resolve is what makes the directory usable later.
-            const figis = found
-              .filter((f) => f.compositeFigi)
-              .map((f) => ({
-                kind_code: 'figi',
-                value: f.compositeFigi as string,
-                security_id: f.securityId,
-                source_code: 'openfigi',
-              }))
-            if (figis.length > 0) {
-              const { error: figiErr } = await market
-                .from('security_identifier')
-                .upsert(figis, { onConflict: 'kind_code,value', ignoreDuplicates: true })
-              if (figiErr) throw new Error(`figi identifier upsert failed: ${figiErr.message}`)
-            }
-          }
-          // A negative result is a result: without this the same unaddressable securities are
-          // re-sent on every run and crowd out the ones that would resolve.
-          if (missed.length > 0) {
-            const { error } = await market
-              .from('security')
-              .update({ local_symbol_missing_at: new Date().toISOString() })
-              .in('security_id', missed)
-            if (error) throw new Error(`local_symbol_missing_at update failed: ${error.message}`)
-          }
-        },
-      })
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        resolved: resolvedCount,
-        unresolved,
-        requestsUsed,
-                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
-        // after any successful run however deep the queue is — measured 2026-09-01,
-        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
-        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
-        // to decide whether a backlog is progressing. The page-scoped figure is kept as
-        // `unanswered`, which is a different and also useful fact.
-        remaining: await backlogSize(market, 'pending_local_symbol'),
-        unanswered: Math.max(0, addressable.length - resolvedCount - unresolved),
-      })
-    }
-
-
-    // Keep the daily bars we already download. `security-performance` fetches ~400 days per
-    // security to compute seven numbers and discards the series, so a chart is possible for the 47
-    // curated instruments and nobody else.
-    //
-    // INCREMENTAL: the backlog carries each security's newest stored bar and the fetch starts
-    // there, so a daily refresh asks for a day rather than four hundred. Batches are grouped by how
-    // far back their members need, because the provider takes one start_date per request.
-    if (resource === SEC_PRICES_RESOURCE) {
-      const { data: pending, error: pendErr } = await market
-        .from('pending_prices')
-        .select('security_id,symbol,fetch_symbol,last_date')
-        .order('best_weight', { ascending: false })
-        // 400, measured: 52s of the 55s budget, 73,542 rows, no failures. The DEADLINE is meant to
-        // be what stops a run — a page small enough to finish in 5s just wastes 50 of them, and at
-        // 120 this backlog would have taken 20 days to drain against a 4x/day cron.
-        // Overshooting is safe: unprocessed rows stay in the backlog and cost one bigger read.
-        .limit(scopeLimit ?? 400)
-      if (pendErr) throw new Error(`pending_prices read failed: ${pendErr.message}`)
-
-      const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id))
-      if (wanted.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, written: 0, remaining: 0, note: 'every series is current' })
-      }
-
-      const bySymbolId = new Map(wanted.map((r) => [String(r.symbol), String(r.security_id)]))
-      const plans = planPriceFetches(
-        wanted.map((r) => ({
-          symbol: String(r.symbol),
-          fetchSymbol: String(r.fetch_symbol ?? r.symbol),
-          lastDate: (r.last_date as string | null) ?? null,
-        })),
-        new Date(),
-        20,
-      )
-
-      const deadline = Date.now() + 55_000
-      let written = 0
-      let emptySeries = 0
-      let batchesFailed = 0
-      let throttledOut = false
-      let lastError: string | null = null
-      // Bars recovered by asking a symbol on its own after its batch produced nothing. A non-zero
-      // value here means a BATCH was hiding an answerable security, which is worth seeing.
-      let isolatedWrites = 0
-      // SECURITIES priced this run, as distinct from the BARS written. `remaining` was
-      // `wanted.length` — the page size, which never moved however much work the run did.
-      const securitiesPriced = new Set<string>()
-      let dividendsSeen = 0
-      const cutoff = new Date(Date.now() - PRICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10)
-
-      for (const plan of plans) {
-        const remaining = deadline - Date.now()
-        if (remaining < 5_000) break
-        let rows: Record<string, unknown>[] = []
-        try {
-          rows = await fetcher(
-            `/api/v1/equity/price/historical?symbol=${symbolList(plan.symbols.map((s) => s.fetchSymbol))}` +
-              `&provider=yfinance&start_date=${plan.startDate}&interval=1d`,
-            Math.min(20_000, remaining),
-          )
-        } catch (e) {
-          batchesFailed++
-          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          // Same rule as the isolation path: once the provider is refusing us, the rest of
-          // the page will refuse too, and each attempt pushes the limit further out.
-          if (throttled(lastError)) { throttledOut = true; break }
-          continue
-        }
-
-        // Map the provider's answer back onto OUR display symbol: it replies under the fetch symbol
-        // (`HEXA-B.ST`), and the series is stored under the display symbol, which since #79 is the
-        // primary listing. They are usually the same now — usually is not always.
-        // Keyed on SECURITY_ID, not on the symbol. `market.prices.symbol` is a foreign key to the
-        // curated instruments table, so a universe-wide write into it is refused — correctly. And a
-        // symbol is not a stable key: migration 39 changed the display symbol for 41% of non-US
-        // securities, and anything keyed on it needed re-keying by hand.
-        const toId = new Map(plan.symbols.map((s) => [s.fetchSymbol.toUpperCase(), bySymbolId.get(s.symbol)]))
-        const priceRows: { security_id: string; date: string; close: number; grain: string }[] = []
-        // DIVIDENDS ARRIVE ON THIS SAME RESPONSE and used to be thrown away. openbb's yfinance
-        // provider defaults `include_actions` to true and aliases the column, so no extra call and
-        // not even an extra request parameter is needed — see `Bar.dividend`.
-        //
-        // Two properties this path has that the Tiingo one cannot:
-        //   1. `observed_symbol` is the symbol we fetched the SERIES by, so an action and the
-        //      prices it applies to are attributable to the same listing BY CONSTRUCTION. #141 had
-        //      to add a join to enforce that for Tiingo, which asks by US ticker while prices come
-        //      from the primary listing (33 of 45 mismatched).
-        //   2. It covers every market yfinance covers. Tiingo is US-listed only, so a Japanese or
-        //      Swiss dividend was previously invisible.
-        const divRows: {
-          security_id: string; ex_date: string; kind: string; value: number;
-          source_code: string; observed_symbol: string
-        }[] = []
-        for (const r of rows) {
-          const parsed = barFrom(r, plan.symbols[0].fetchSymbol)
-          if (!parsed) continue
-          const id = toId.get(parsed.symbol.toUpperCase())
-          if (!id) continue
-          // Dividends are NOT subject to the price window: `security_price` is a ~400-day
-          // downsampled series and `security_corporate_action` is neither, so filtering these on
-          // the chart cutoff would drop facts for no reason.
-          if (parsed.bar.dividend !== undefined) {
-            divRows.push({
-              security_id: id,
-              ex_date: parsed.bar.date,
-              kind: 'dividend',
-              value: parsed.bar.dividend,
-              source_code: 'yfinance',
-              observed_symbol: parsed.symbol,
-            })
-          }
-          // Splits ride on the same response. RECORDED, NOT APPLIED — the bars are already
-          // split-adjusted, so these correct nothing and must never be fed back into a price.
-          // Their value is coverage: Tiingo is US-only, so a Tokyo or Zurich split was invisible.
-          if (parsed.bar.splitRatio !== undefined) {
-            divRows.push({
-              security_id: id,
-              ex_date: parsed.bar.date,
-              kind: 'split',
-              value: parsed.bar.splitRatio,
-              source_code: 'yfinance',
-              observed_symbol: parsed.symbol,
-            })
-          }
-          if (parsed.bar.date < cutoff) continue
-          priceRows.push({ security_id: id, date: parsed.bar.date, close: parsed.bar.close, grain: 'daily' })
-        }
-
-        if (divRows.length > 0) {
-          // DO NOTHING, not DO UPDATE. The primary key is (security_id, ex_date, kind) and does
-          // NOT include the source, so Tiingo and yfinance rows for the same event collide. They
-          // are reporting the same fact, so the first writer wins and there is no churn — an
-          // upsert that overwrote would rewrite the same rows on every run for ever.
-          const { error } = await market
-            .from('security_corporate_action')
-            .upsert(dedupeBy(divRows, (d) => `${d.security_id}|${d.ex_date}|${d.kind}`),
-              { onConflict: 'security_id,ex_date,kind', ignoreDuplicates: true })
-          if (error) throw new Error(`dividend upsert failed: ${error.message}`)
-          dividendsSeen += divRows.length
-        }
-
-        if (priceRows.length === 0) {
-          // The provider answered and had nothing for these. Negative-cache so they stop being
-          // re-asked — but only when the batch itself did not fail, or a rate limit would mark the
-          // whole universe unpriceable (the 1,369 mistake).
-          //
-          // "DID NOT FAIL" IS A THROW CHECK, AND THAT WAS THE HOLE. A throttled provider answers
-          // 200-with-no-rows rather than erroring, so nothing throws, every batch looks like a
-          // clean "no data", and the whole page is marked anyway — the mistake this comment was
-          // written to prevent, committed underneath it. `written > 0` is the missing half: proof
-          // the provider produced bars for SOMEONE in this run.
-          //
-          // AND `written > 0` KILLS THE BACKLOG THE MOMENT ITS ANSWERABLE WORK IS DONE, which is
-          // where this now stands. Once every security left is one yfinance does not carry, no
-          // batch produces a bar, `written` stays 0 for the whole run, the gate never fires, and
-          // the same securities are re-asked eight times a day for ever. Measured 2026-08-14:
-          // `written: 0, emptySeries: 300, batchesFailed: 0, remaining: 393` — unchanged run after
-          // run, 301 of them never priced at all. Driving `security-refresh` at ICT.PS and FAB.AE
-          // returns `returns: 0, "not covered"`: the Philippines and the UAE are genuinely outside
-          // the keyless provider. Fourth instance of this exact shape (`security-fundamentals` and
-          // `security-industries` both died this way, and `security-performance` this morning).
-          //
-          // So evidence comes from ISOLATION, not from a run-wide tally — the same rule
-          // `security-performance` now uses. A symbol asked ON ITS OWN that answers with no bars is
-          // evidence about that symbol; a batch that produced nothing says only that the batch
-          // produced nothing. Bounded by the deadline, so a run isolates what it has budget for and
-          // leaves the rest; a throttled provider makes every isolation throw, so a throttled run
-          // marks nothing.
-          const emptyIds: string[] = []
-          for (const sym of plan.symbols) {
-            if (Date.now() > deadline - 5_000) break
-            const id = bySymbolId.get(sym.symbol)
-            if (!id) continue
-            try {
-              const alone = await fetcher(
-                `/api/v1/equity/price/historical?symbol=${symbolList([sym.fetchSymbol])}` +
-                  `&provider=yfinance&start_date=${plan.startDate}&interval=1d`,
-                Math.min(8_000, deadline - Date.now()),
-              )
-              const bars = alone
-                .map((r) => barFrom(r, sym.fetchSymbol))
-                .filter((b): b is NonNullable<typeof b> => !!b && b.bar.date >= cutoff)
-              if (bars.length === 0) {
-                emptyIds.push(id)
-              } else {
-                const { error } = await market.from('security_price').upsert(
-                  bars.map((b) => ({
-                    security_id: id, date: b.bar.date, close: b.bar.close, grain: 'daily',
-                  })),
-                  // THREE columns. `grain` joined the primary key in migration 94 so a date can
-                  // carry both a daily and a weekly bar; naming the old two-column target would
-                  // conflict on a key the table no longer has.
-                  { onConflict: 'security_id,grain,date' },
-                )
-                if (error) throw new Error(`security_price upsert failed: ${error.message}`)
-                written += bars.length
-                isolatedWrites += bars.length
-              }
-            } catch (e) {
-              const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-              if (throttled(msg)) { lastError = msg; throttledOut = true; break }
-              // A refusal is not an answer. Left unmarked and retried next run.
-            }
-          }
-          const ids = emptyIds
-          if (ids.length > 0) {
-            const { error } = await market
-              .from('security')
-              .update({ prices_missing_at: new Date().toISOString() })
-              .in('security_id', ids)
-            if (error) throw new Error(`prices_missing_at update failed: ${error.message}`)
-          }
-          // COUNT WHAT WAS ACTUALLY EMPTY, not the size of the batch that came back empty. Since
-          // isolation can now recover a security whose BATCH produced nothing — that is the whole
-          // reason for asking individually — `plan.symbols.length` would report securities as
-          // having no series in the same run that wrote bars for them. A counter that overstates is
-          // how the statements coverage was misread as 12x its real value.
-          emptySeries += emptyIds.length
-          continue
-        }
-
-        for (let i = 0; i < priceRows.length; i += 500) {
-          const { error } = await market
-            .from('security_price')
-            .upsert(dedupeBy(priceRows.slice(i, i + 500), (r) => `${r.security_id}|${r.date}`),
-              { onConflict: 'security_id,grain,date' })
-          if (error) throw new Error(`security_price upsert failed: ${error.message}`)
-        }
-        written += priceRows.length
-
-        // Keep the DAILY window bounded. Without this the table grows forever and the "~400 bars
-        // per security" sizing that justified storing this at all stops being true.
-        //
-        // `.eq('grain', 'daily')` IS LOAD-BEARING AND SILENT IF LOST. The weekly series is twenty
-        // years long, so an unqualified delete below the daily cutoff destroys all of it the first
-        // time this resource touches a security — no error, no count, nothing in `refresh_log`,
-        // just a chart that shortens back to 400 days. Proven by mutation in
-        // `an-old-bar-is-not-stale.sql`, which deletes the qualifier and watches the history go.
-        const touched = [...new Set(priceRows.map((r) => r.security_id))]
-        for (const id of touched) securitiesPriced.add(String(id))
-        for (let i = 0; i < touched.length; i += 100) {
-          const { error } = await market
-            .from('security_price')
-            .delete()
-            .in('security_id', touched.slice(i, i + 100))
-            .eq('grain', 'daily')
-            .lt('date', cutoff)
-          if (error) throw new Error(`price window prune failed: ${error.message}`)
-        }
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource, written, emptySeries, isolatedWrites, batchesFailed, lastError, throttledOut,
-        dividendsSeen,
-        plans: plans.length, securitiesPriced: securitiesPriced.size,
-        // Securities from THIS PAGE still pending afterwards. A security is done when it got bars
-        // or was confirmed empty one at a time; a batch that merely failed leaves it pending.
-                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
-        // after any successful run however deep the queue is — measured 2026-09-01,
-        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
-        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
-        // to decide whether a backlog is progressing. The page-scoped figure is kept as
-        // `unanswered`, which is a different and also useful fact.
-        remaining: await backlogSize(market, 'pending_prices'),
-        unanswered: Math.max(0, wanted.length - securitiesPriced.size - emptySeries),
-      })
-    }
-
-    // Ask the price provider what IT calls this security, instead of sending Bloomberg's spelling.
-    //
-    // OpenFIGI's `ticker` is the Bloomberg form and the provider rejects it: `BRK/B` and `RR/.L`
-    // 400, while `6.HK` and `ESSITYB.ST` return "no data" because Hong Kong pads to four digits and
-    // Stockholm share classes take a hyphen. The last two carry no unusual character at all, which
-    // is why this resolves from a SOURCE rather than applying rules written from memory — the
-    // mistake `exchanges.ts` records, where a hand-written table silently dropped 534 securities.
-    if (resource === YAHOO_SYMBOL_RESOURCE) {
-      const { data: pending, error: pendErr } = await market
-        .from('pending_yahoo_symbol')
-        .select('security_id,isin,country_iso2,current_symbol')
-        .order('best_weight', { ascending: false })
-        // 300, raised from 60 after measuring: 60 symbols took 5s and 200 took 18s of the 55s
-        // budget, with `failed: 0` at both. The endpoint is far less rate-limiting than the
-        // one-call-per-security shape suggested, and the wall-clock deadline is the real bound.
-        //
-        // This resource GATES the others — a security without a correct symbol cannot get a
-        // profile, an industry, fundamentals or prices — so at 60 a backlog of 8,792 needed 18 days
-        // and everything downstream waited on it. Kept well under the measured ceiling rather than
-        // maximised: this is somebody else's free endpoint.
-        .limit(scopeLimit ?? 300)
-      if (pendErr) throw new Error(`pending_yahoo_symbol read failed: ${pendErr.message}`)
-
-      const wanted = dedupeBy(pending ?? [], (r) => String(r.security_id))
-      if (wanted.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, resolved: 0, remaining: 0, note: 'nothing to re-address' })
-      }
-
-      // BOUNDED BY WALL CLOCK, not by request count. Yahoo's search is rate-limited and one call
-      // per security is not batchable, so a count-based bound is a bound on nothing: 15 anonymous
-      // OpenFIGI requests once took ~40s on a laptop and blew the worker on this node. On an
-      // incremental resource, stopping early is free.
-      const deadline = Date.now() + 55_000
-      let resolved = 0
-      let unresolved = 0
-      let failed = 0
-      let lastError: string | null = null
-      const changed: string[] = []
-
-      for (const row of wanted) {
-        const remaining = deadline - Date.now()
-        if (remaining < 4_000) break
-        let hits
-        try {
-          hits = await searchByIsin(String(row.isin), Math.min(8_000, remaining))
-        } catch (e) {
-          // A refusal is about the ENDPOINT, not this security — do not negative-cache it, or a
-          // rate limit becomes 60 securities marked unresolvable for a month. This is the same
-          // rule `fetchWithIsolation` learned the hard way after mismarking 1,369 of them.
-          failed++
-          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          continue
-        }
-
-        const symbol = pickHomeListing(hits, String(row.country_iso2), venues)
-        if (!symbol) {
-          // Answered, and nothing on this security's home market. That IS about the security.
-          const { error } = await market
-            .from('security')
-            .update({ yahoo_symbol_missing_at: new Date().toISOString() })
-            .eq('security_id', row.security_id)
-          if (error) throw new Error(`yahoo_symbol_missing_at update failed: ${error.message}`)
-          unresolved++
-          continue
-        }
-        if (symbol === row.current_symbol) {
-          // The spelling was never the problem for this one; stop re-asking about it.
-          const { error } = await market
-            .from('security')
-            .update({ yahoo_symbol_missing_at: new Date().toISOString() })
-            .eq('security_id', row.security_id)
-          if (error) throw new Error(`yahoo_symbol_missing_at update failed: ${error.message}`)
-          unresolved++
-          continue
-        }
-
-        const { error: psErr } = await market.from('security_provider_symbol').upsert(
-          { security_id: row.security_id, provider_code: 'yfinance', symbol },
-          { onConflict: 'security_id,provider_code' },
-        )
-        if (psErr) throw new Error(`provider symbol upsert failed: ${psErr.message}`)
-
-        // KEEP EVERY VENUE THE SEARCH REVEALED, not just the one we priced on. The ISIN search
-        // returns the security's other listings — the ADR, the cross-listing — and until now they
-        // were discarded, which is exactly why "local line vs ADR" had no answer. `is_primary` is
-        // reserved for the home-market pick; a partial unique index enforces one per security.
-        const listings = hits
-          .filter((h) => !h.quoteType || h.quoteType === 'EQUITY')
-          .map((h) => ({ sym: (h.symbol ?? '').trim(), exch: venueForSymbol((h.symbol ?? '').trim(), venues) }))
-          .filter((h) => h.sym && h.exch)
-        const seenExch = new Set<string>()
-        const listingRows = []
-        for (const l of listings) {
-          // One row per venue: an ISIN search can return the same exchange twice (share classes).
-          if (seenExch.has(l.exch as string)) continue
-          seenExch.add(l.exch as string)
-          listingRows.push({
-            security_id: row.security_id,
-            exch_code: l.exch as string,
-            provider_symbol: l.sym,
-            is_primary: l.sym === symbol,
-            source_code: 'yfinance',
-            last_seen_at: new Date().toISOString(),
-          })
-        }
-        if (listingRows.length > 0) {
-          // INSERTED NON-PRIMARY, then promoted separately. `onConflict: 'security_id,exch_code'`
-          // names the PRIMARY KEY, so `ignoreDuplicates` does nothing for the PARTIAL UNIQUE INDEX
-          // `listing_one_primary_idx` — and a security that already has a primary on one exchange
-          // fails the whole statement when a second is inserted for another:
-          //
-          //   listing upsert failed: duplicate key value violates unique constraint
-          //   "listing_one_primary_idx"
-          //
-          // Caught in production 2026-08-13 by the ingestion watch.
-          const { error: lErr } = await market.from('listing').upsert(
-            listingRows.map((r) => ({ ...r, is_primary: false })),
-            { onConflict: 'security_id,exch_code', ignoreDuplicates: true },
-          )
-          if (lErr) throw new Error(`listing upsert failed: ${lErr.message}`)
-
-          // Promote the home-market pick: demote first so exactly one row can hold the flag. Two
-          // statements rather than one because the index is what enforces the invariant, and an
-          // upsert cannot express "move this flag".
-          const chosen = listingRows.find((r) => r.provider_symbol === symbol)
-          if (chosen) {
-            const { error: dErr } = await market.from('listing')
-              .update({ is_primary: false })
-              .eq('security_id', row.security_id).eq('is_primary', true)
-            if (dErr) throw new Error(`demote primary failed: ${dErr.message}`)
-            const { error: pErr } = await market.from('listing')
-              .update({ is_primary: true })
-              .eq('security_id', row.security_id).eq('exch_code', chosen.exch_code)
-            if (pErr) throw new Error(`promote primary failed: ${pErr.message}`)
-          }
-        }
-
-        // A NEW SYMBOL INVALIDATES EVERY SYMBOL-KEYED NEGATIVE CACHE. Those flags record "we asked
-        // and got nothing" — but we asked under the WRONG NAME, so leaving them set would fix the
-        // spelling and still exclude the security from every backlog for 30 days. This clearing is
-        // the difference between resolving a symbol and actually recovering the security.
-        //
-        // The list lives in `market.clear_symbol_caches` rather than here. It used to be five
-        // columns written out at this call site, and `prices_missing_at` (migration 42, later)
-        // never joined them — so 4,801 equities stayed locked out of `pending_prices` after their
-        // symbol was corrected, with no error and no symptom. Next to the columns it is at least
-        // enforceable: `tests/negative-caches-are-classified.sql` fails when a `%_missing_at`
-        // column is added and nobody says which side of this it belongs on.
-        const { error: clrErr } = await market
-          .rpc('clear_symbol_caches', { p_security_id: row.security_id })
-        if (clrErr) throw new Error(`clearing negative caches failed: ${clrErr.message}`)
-
-        resolved++
-        if (changed.length < 12) changed.push(`${row.current_symbol ?? '?'} -> ${symbol}`)
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        resolved,
-        unresolved,
-        failed,
-        lastError,
-        examples: changed,
-                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
-        // after any successful run however deep the queue is — measured 2026-09-01,
-        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
-        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
-        // to decide whether a backlog is progressing. The page-scoped figure is kept as
-        // `unanswered`, which is a different and also useful fact.
-        remaining: await backlogSize(market, 'pending_yahoo_symbol'),
-        unanswered: wanted.length - resolved - unresolved - failed,
-      })
     }
 
     // Level 2 of the taxonomy: the sub-sector a sector page shows as chips. The data was already
@@ -7055,6 +5297,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
+    // Sector for securities NO sector SPDR holds — i.e. everything non-US. Written as a SECOND
+    // source (`yfinance`, priority 100) beside the filing-derived one (`sec-nport`, 300), so a
+    // security XLK holds keeps its filing sector and everything else gains a provider opinion.
     if (resource === SEC_PROFILE_RESOURCE) {
       const { data: pending, error: pendErr } = await market
         .from('pending_profile')
@@ -7352,473 +5597,10 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       })
     }
 
-    // Per-security returns. This is why most constituents render no % change: market.performance
-    // scope='instrument' only ever covered the 35 curated symbols.
-    if (resource === SEC_PERF_RESOURCE) {
-      const { data: pending, error: pendErr } = await market
-        .from('pending_performance')
-        .select('security_id,symbol,fetch_symbol')
-        .order('best_weight', { ascending: false })
-        .limit(1000)
-      if (pendErr) throw new Error(`pending_performance read failed: ${pendErr.message}`)
-      // FETCH by the provider's address (`005930.KS`), STORE under the display ticker — the app
-      // looks a stock up by the symbol it shows, not by the one yfinance wants.
-      const fetchToDisplay = new Map<string, string>()
-      const fetchToSecurity = new Map<string, string>()
-      for (const r of pending ?? []) {
-        fetchToDisplay.set(r.fetch_symbol as string, r.symbol as string)
-        fetchToSecurity.set(r.fetch_symbol as string, r.security_id as string)
-      }
-      const symbols = [...fetchToDisplay.keys()]
-      if (symbols.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, refreshed: 0, remaining: 0, note: 'every security has fresh returns' })
-      }
-
-      // 40 symbols x ~400 bars is ~1 MB. The country refresh proves 19 symbols x 1900 bars (~4 MB)
-      // is safe, so this stays well inside the worker while still covering a page per batch.
-      const BATCH = 40
-      // BOUNDED AGAINST THE WORKER, NOT AGAINST A ROUND NUMBER.
-      //
-      // `workerTimeoutMs` is 90s (functions/main/index.ts). This used to be a flat 60s deadline
-      // that gated only whether to START a batch — and a batch that starts just under it still has
-      // to fetch, isolate, upsert, retract and prune stale periods, and none of that tail is
-      // bounded by the deadline. Measured 2026-08-17: the cron's own run took **89 seconds of the
-      // 90**, and a later manual run was killed outright with `WorkerRequestCancelled`.
-      //
-      // A killed worker is strictly worse than a smaller run: it loses the batch in flight AND
-      // never calls `finish_refresh`, so the resource is locked out for the 2-minute in-flight TTL
-      // on top. Since the binding constraint here is requests per unit TIME rather than per run,
-      // trading one batch for a guaranteed margin costs nothing real.
-      //
-      // Same shape as the fix in the exchange sweep: refuse to START work that cannot finish.
-      const WORKER_BUDGET_MS = 75_000
-      const BATCH_RESERVE_MS = 20_000
-      const deadline = Date.now() + WORKER_BUDGET_MS
-      const now = new Date()
-      let written = 0
-      // SECURITIES covered, tracked separately from the ROWS written, because a security yields
-      // one performance row PER PERIOD (seven to nine of them). Counting rows and subtracting
-      // them from a count of securities is what made `remaining` report 0 on a backlog 6,909 deep.
-      const symbolsCovered = new Set<string>()
-      let batchesFailed = 0
-      let throttledOut = false
-      let emptyBatches = 0
-      let lastError: string | null = null
-      // `deadline - BATCH_RESERVE_MS`, not `deadline`: the loop condition decides whether to
-      // START a batch, so it must leave room for one to FINISH.
-      let stoppedOnBudget = false
-      for (let i = 0; i < symbols.length; i += BATCH) {
-        if (Date.now() >= deadline - BATCH_RESERVE_MS) { stoppedOnBudget = true; break }
-        const batch = symbols.slice(i, i + BATCH)
-        const remaining = deadline - Date.now()
-        if (remaining < 3_000) break
-        // A throw and an empty answer are DIFFERENT FACTS. Collapsing them with `.catch(() => [])`
-        // is why this reported `refreshed: 0, remaining: 1000` run after run with nothing to say
-        // whether the provider was refusing the symbols or simply had no data for them.
-        let fetched: PerfRow[] = []
-        try {
-          fetched = await loadEquityReturns(
-            fetcher, batch, now, SEC_PERF_TTL_MINUTES, Math.min(15_000, remaining),
-          )
-        } catch (e) {
-          batchesFailed++
-          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          // Same rule as the isolation path: once the provider is refusing us, the rest of
-          // the page will refuse too, and each attempt pushes the limit further out.
-          if (throttled(lastError)) { throttledOut = true; break }
-          continue
-        }
-        const rows = fetched.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id }))
-        // A 200 THAT OMITS A SYMBOL SAYS NOTHING ABOUT THAT SYMBOL — so it is asked again, ALONE,
-        // and only an answer about it on its own is allowed to mark it.
-        //
-        // The previous rule gated on `fetched.length > 0`: if ANY symbol in the batch answered,
-        // every absent one was recorded as permanently unanswerable. That is a TALLY, and the
-        // provider defeats tallies — yfinance throttles PROGRESSIVELY, answering some symbols in a
-        // batch while refusing others, with no error anywhere because the refusal is an omission
-        // from a 200 rather than a throw. `fetchWithIsolation` exists for exactly this and could
-        // not help here: it isolates when the call THROWS, and this call succeeds.
-        //
-        // Measured 2026-08-14, which is how this was found: 3,045 securities carried
-        // `performance_missing_at`, and 2,548 of them HAD daily price bars from the last five days
-        // — the provider was demonstrably answering for them. Among them MediaTek, Tapestry,
-        // Ferguson, Royalty Pharma, Edenred and ACS (an IBEX 35 constituent). 2,297 were marked in
-        // a single pass on 08-11. Driving `security-refresh` against TPR and 2454.TW returned all
-        // seven periods, a market cap, fundamentals and statements — so the marks were simply false.
-        //
-        // The bound is the DEADLINE, not a count of misses: a run isolates what it has budget for
-        // and leaves the rest for the next one. Nothing is marked for want of time — that is the
-        // negative-cache equivalent of blaming the victim, and `fetchWithIsolation` already refuses
-        // to do it.
-        //
-        // THIS USED TO SAY "a throttle makes every isolation throw, so a throttled run marks
-        // NOTHING". THAT IS FALSE FOR yfinance, WHICH ANSWERS A THROTTLE WITH AN EMPTY 200 — the
-        // seventh instance of that shape in this file, and the only one whose comment asserted the
-        // opposite. Nothing throws, nothing answers, and every isolated symbol looks individually
-        // dead.
-        //
-        // Measured 2026-09-04: ten Thai securities marked in ONE run at 22:35 — TTB-R.BK, CRC-R.BK,
-        // TU-R.BK and seven more — each holding daily bars back to 2006-2007 and zero performance
-        // rows. Neither theory that fits the surface survived: it is not the `-R` NVDR symbol
-        // (34 of 40 such symbols carry performance perfectly well) and it is not a young series
-        // (TTB-R.BK has bars from 2007-12-24). One run, one country, every isolation empty, is a
-        // provider refusal wearing a per-symbol answer.
-        //
-        // So an empty isolated answer is only evidence about the SYMBOL once the provider is known
-        // to be talking to us. That is what `fetchWithIsolation`'s `control` argument is for; this
-        // loop is hand-rolled and never had it.
-        const got = new Set(fetched.map((r) => r.scope_id))
-        const missed = batch.filter((sym) => !got.has(sym))
-        const confirmedDead: string[] = []
-        let isolatedAnswered = 0
-        for (const sym of missed) {
-          if (Date.now() > deadline - 4_000) break
-          try {
-            const alone = await loadEquityReturns(
-              fetcher, [sym], now, SEC_PERF_TTL_MINUTES,
-              Math.min(8_000, deadline - Date.now()),
-            )
-            if (alone.length === 0) {
-              // Answered about this symbol on its own and had no usable series for it. That is
-              // evidence about the SYMBOL, which is the only thing that earns a mark.
-              confirmedDead.push(sym)
-            } else {
-              isolatedAnswered += 1
-              rows.push(...alone.map((r) => ({ ...r, scope_id: fetchToDisplay.get(r.scope_id) ?? r.scope_id })))
-            }
-          } catch (e) {
-            // A refusal is not an answer. Left unmarked and retried next run.
-            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-            if (throttled(msg)) { lastError = msg; throttledOut = true; break }
-          }
-        }
-        // THE CONTROL PROBE. If not one isolated call answered, we have no evidence the provider is
-        // talking to us at all — so ask about a symbol that certainly has returns. If the control
-        // is empty too, the emptiness is ours, not the symbols', and NOTHING is marked; the next
-        // run will try again, which costs one cycle. Marking wrongly costs 30 days and freezes the
-        // stale returns behind it, because a marked security is excluded from the backlog that
-        // would have corrected them.
-        //
-        // IT RUNS WHENEVER ANYTHING WOULD BE MARKED, AND THE OLD GATE IS WHY IT NEVER FIRED.
-        //
-        // This used to require `isolatedAnswered === 0`, reasoning that "a run where some
-        // isolations succeeded has already proved the provider is up". That is the one thing
-        // yfinance does not honour: it throttles PROGRESSIVELY, answering some symbols and
-        // silently omitting others from a 200 — the behaviour that has defeated every tally-based
-        // rule in this file, and which `fetchWithIsolation` exists for one level up. Under it some
-        // isolated calls succeed, the gate stays shut, and the refused symbols are marked as
-        // permanently unanswerable.
-        //
-        // Measured 2026-09-05: TEN Thai securities marked in one run — Siam City Cement, Thai
-        // Union, Carabao, Central Retail, TMBThanachart — every one of them holding recent bars
-        // that MOVE, which `market.data_defect.contradicted_negative_cache` had been reporting at
-        // 10-12 for days. Probing the provider found `SCCC-R.BK` and `CCET-R.BK` answering 25 bars
-        // each; probing again minutes later returned nothing for them AND nothing for AAPL, which
-        // is the throttle, visible in one measurement.
-        //
-        // So the cost is now one control call on any run that would mark, instead of one on a run
-        // where nothing answered. That is ~8 calls a day against 30 days of wrongly excluding a
-        // security from the backlog that would have corrected its returns.
-        if (confirmedDead.length > 0 && !throttledOut) {
-          let controlAnswered = false
-          try {
-            const probe = await loadEquityReturns(
-              fetcher, [PERF_CONTROL_SYMBOL], now, SEC_PERF_TTL_MINUTES,
-              Math.min(8_000, Math.max(1_000, deadline - Date.now())),
-            )
-            controlAnswered = probe.length > 0
-          } catch (e) {
-            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-            lastError = msg
-          }
-          if (!controlAnswered) {
-            lastError = lastError ??
-              `every isolated symbol returned an empty series and ${PERF_CONTROL_SYMBOL} did too — ` +
-              'treating it as a provider refusal and marking nothing'
-            confirmedDead.length = 0
-          }
-        }
-
-        const missedIds = confirmedDead
-          .map((sym) => fetchToSecurity.get(sym))
-          .filter((id): id is string => !!id)
-        if (missedIds.length > 0) {
-          const { error } = await market
-            .from('security')
-            .update({ performance_missing_at: new Date().toISOString() })
-            .in('security_id', missedIds)
-          if (error) throw new Error(`performance_missing_at update failed: ${error.message}`)
-          // MARKING MUST RETRACT, for the same reason producing must. The upsert path already
-          // deletes periods a successful run stopped producing; giving up on a security left its
-          // OLD rows untouched — and then excluded it from the backlog for 30 days, so nothing
-          // could ever correct them. That is how a stale number outlives the fix that stopped
-          // generating it: REA.AX, 1803.T and MRP.JO were all still serving 1d/1w/1m = 0.00% from
-          // 08-10, frozen behind a mark set on 08-12, while their real prices moved every day.
-          for (let j = 0; j < confirmedDead.length; j += 100) {
-            const slice = confirmedDead.slice(j, j + 100).map((s) => fetchToDisplay.get(s) ?? s)
-            const { error: delErr } = await market
-              .from('performance')
-              .delete()
-              .eq('scope', 'instrument')
-              .in('scope_id', slice)
-            if (delErr) throw new Error(`stale performance retract failed: ${delErr.message}`)
-          }
-        }
-        if (throttledOut) break
-        if (rows.length === 0) { emptyBatches++; continue }
-        const { error } = await market
-          .from('performance')
-          .upsert(dedupeBy(rows, (r) => `${r.scope}|${r.scope_id}|${r.period}`),
-            { onConflict: 'scope,scope_id,period' })
-        if (error) throw new Error(`performance upsert failed: ${error.message}`)
-
-        // AN UPSERT CANNOT RETRACT. A period we no longer produce keeps whatever was written last
-        // time, forever — so the moment `returnsFor` starts omitting a period (a series that
-        // shortened, or one broken by a unit change), the OLD wrong number survives every future
-        // refresh and looks freshly written. That is the shape of every silent defect in this
-        // pipeline, so the write is made authoritative: for each symbol answered, delete the
-        // periods this run deliberately did not produce.
-        // Grouped by the period-set signature rather than done per symbol — in practice almost
-        // every symbol yields the same full set, so this is one delete, not one per security.
-        const producedBySymbol = new Map<string, Set<string>>()
-        for (const r of rows) {
-          const set = producedBySymbol.get(r.scope_id) ?? new Set<string>()
-          set.add(r.period)
-          producedBySymbol.set(r.scope_id, set)
-        }
-        const bySignature = new Map<string, { periods: string[]; symbols: string[] }>()
-        for (const [sym, periods] of producedBySymbol) {
-          const sig = [...periods].sort().join(',')
-          const entry = bySignature.get(sig) ?? { periods: [...periods], symbols: [] }
-          entry.symbols.push(sym)
-          bySignature.set(sig, entry)
-        }
-        for (const { periods, symbols } of bySignature.values()) {
-          // `in.()` is a URL, so chunk the symbol list — 6.5 KB earns a bare 502.
-          for (let j = 0; j < symbols.length; j += 100) {
-            const { error: delErr } = await market
-              .from('performance')
-              .delete()
-              .eq('scope', 'instrument')
-              .in('scope_id', symbols.slice(j, j + 100))
-              .not('period', 'in', `(${periods.join(',')})`)
-            if (delErr) throw new Error(`stale period delete failed: ${delErr.message}`)
-          }
-        }
-        written += rows.length
-        for (const sym of producedBySymbol.keys()) symbolsCovered.add(sym)
-      }
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        refreshed: written,
-        securitiesCovered: symbolsCovered.size,
-        // Says WHY a run stopped short, so a budgeted stop is never mistaken for a drained
-        // backlog — the distinction `remaining` alone cannot make.
-        stoppedOnBudget,
-        batchesFailed,
-        emptyBatches,
-        lastError,
-        // SECURITIES, not rows — see the statements resource for the same defect. A security
-        // yields seven to nine performance rows, so `symbols.length - written` went negative and
-        // clamped. Measured live 2026-08-17: `refreshed: 2751, remaining: 0` (2,751 rows is ~306
-        // securities) while `pending_performance` stood at 6,909.
-                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
-        // after any successful run however deep the queue is — measured 2026-09-01,
-        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
-        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
-        // to decide whether a backlog is progressing. The page-scoped figure is kept as
-        // `unanswered`, which is a different and also useful fact.
-        remaining: await backlogSize(market, 'pending_performance'),
-        unanswered: Math.max(0, symbols.length - symbolsCovered.size),
-      })
-    }
-
-    if (resource === TICKERS_RESOURCE) {
-      // Only securities that still need one, MOST VISIBLE FIRST. `pending_ticker` orders by the
-      // security's weight in a sector fund, so the names a sector page actually renders are
-      // resolved in the first run rather than after the whole 9.7k backlog.
-      // PAGED: PostgREST caps a response at db-max-rows (1000 here), so a bare .limit(4000)
-      // silently returns 1000 and the run resolves a quarter of what it could. With an API key
-      // one run can map 4,000, so the page size is the binding constraint, not the rate limit.
-      const PAGE = 1000
-      const wanted: { securityId: string; isin: string }[] = []
-      for (let page = 0; page < 4; page++) {
-        const { data, error: pendErr } = await market
-          .from('pending_ticker')
-          .select('security_id,isin')
-          // Ordered explicitly rather than trusting the view's ORDER BY: a view's ordering is not
-          // contractual once PostgREST wraps it, and the ordering is the whole point of the backlog.
-          .order('best_weight', { ascending: false })
-          // Unique tiebreak, so the four pages are a partition rather than four samples. See the
-          // note in `security-local-symbols`: ordering by a non-unique column alone lets a row be
-          // returned twice and another never at all.
-          .order('security_id', { ascending: true })
-          .range(page * PAGE, (page + 1) * PAGE - 1)
-        if (pendErr) throw new Error(`pending_ticker read failed: ${pendErr.message}`)
-        const rows = data ?? []
-        wanted.push(...rows.map((r) => ({ securityId: r.security_id as string, isin: r.isin as string })))
-        if (rows.length < PAGE) break
-      }
-      if (wanted.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, resolved: 0, remaining: 0, note: 'every security already has a ticker' })
-      }
-
-      // Written PER BATCH rather than accumulated: with a key a run maps thousands of ISINs, and
-      // holding all of that in a 150 MB worker is what killed it (a bare 502, no error body — the
-      // same failure and the same fix as the price refresh). This also means a worker that dies
-      // keeps the progress it already made.
-      const writeBatch = async (batch: { securityId: string; ticker: string; name?: string }[], missed: string[]) => {
-        // Record the misses FIRST — a negative result is a result. Without it the ~80% of holdings
-        // with no US listing stay in the backlog and are re-sent to OpenFIGI four times a day
-        // forever, starving the securities that could actually resolve.
-        if (missed.length > 0) {
-          const { error: missErr } = await market
-            .from('security')
-            .update({ figi_missing_at: new Date().toISOString() })
-            .in('security_id', missed)
-          if (missErr) throw new Error(`figi_missing_at update failed: ${missErr.message}`)
-        }
-        if (batch.length === 0) return
-        // A ticker is NOT globally unique (identifier_kind says so), so two securities can
-        // legitimately want the same symbol — a different exchange, or a delisted line. The PK
-        // keeps the first and `ignoreDuplicates` stops one collision failing the batch.
-        const { error: insErr } = await market.from('security_identifier').upsert(
-          batch.map((r) => ({
-            kind_code: 'ticker',
-            value: r.ticker,
-            security_id: r.securityId,
-            source_code: 'openfigi',
-          })),
-          { onConflict: 'kind_code,value', ignoreDuplicates: true },
-        )
-        if (insErr) throw new Error(`ticker upsert failed: ${insErr.message}`)
-
-        // A PLACEHOLDER NAME IS NOT A NAME, and the fix arrives in this same response.
-        //
-        // N-PORT lets a filer report a holding as `New Issuer: BB Company ID:<n>` — a Bloomberg
-        // internal id, not a company — and 28 securities carry one. The app renders `security.name`
-        // verbatim, so those read as exactly that string. OpenFIGI knows them, and it has been
-        // returning the name alongside the ticker all along; it was simply dropped on the floor.
-        // Measured: INE377Y01014 -> BAJAJ HOUSING FINANCE LTD, AEE01569T248 -> TALABAT HOLDING PLC,
-        // INE379A01028 -> ITC HOTELS LIMITED.
-        //
-        // Only replaces a PLACEHOLDER. A real filed name is the filing's own word for the security
-        // and outranks a vendor's, which is the same rule `security_taxonomy` follows for a curated
-        // sector over a provider's.
-        for (const r of batch) {
-          if (!r.name) continue
-          const { error } = await market
-            .from('security')
-            .update({ name: r.name })
-            .eq('security_id', r.securityId)
-            .or('name.ilike.New Issuer:*,name.ilike.*Company ID:*')
-          if (error) throw new Error(`placeholder rename failed: ${error.message}`)
-        }
-        // Now priceable and linkable, which is what `is_tradeable` means.
-        const { error: updErr } = await market
-          .from('security')
-          .update({ is_tradeable: true })
-          .in('security_id', batch.map((r) => r.securityId))
-        if (updErr) throw new Error(`is_tradeable update failed: ${updErr.message}`)
-      }
-
-      const { requestsUsed, unresolved, resolvedCount } = await mapIsinsToTickers(wanted, {
-        apiKey: Deno.env.get('OPENFIGI_API_KEY') ?? undefined,
-        onBatch: writeBatch,
-      })
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        resolved: resolvedCount,
-        unresolved,
-        requestsUsed,
-        // What is left for the next run — this resource is incremental by design.
-                // `remaining` IS THE BACKLOG, NOT WHAT IS LEFT OF THIS PAGE. Page-scoped, it reads ~0
-        // after any successful run however deep the queue is — measured 2026-09-01,
-        // security-prices reported `remaining: 0` against a `pending_prices` of 9,013 and
-        // security-corporate-actions 60 against 2,533. It is the one number an operator reads
-        // to decide whether a backlog is progressing. The page-scoped figure is kept as
-        // `unanswered`, which is a different and also useful fact.
-        remaining: await backlogSize(market, 'pending_ticker'),
-        unanswered: Math.max(0, wanted.length - resolvedCount - unresolved),
-      })
-    }
-
-    if (resource === PRICES_RESOURCE) {
-      // Fetched and written in batches so peak memory is one batch, not the whole
-      // universe — the one-shot version died on the node without answering.
-      let batchNo = 0
-      const { written, unmapped } = await loadPricesBatched(
-        fetcher,
-        await instrumentUniverse(),
-        new Date(),
-        async (rows) => {
-          const n = batchNo++
-          const { error } = await market.from('prices').upsert(rows, { onConflict: 'symbol,date' })
-          if (error) throw new Error(`prices upsert failed on batch ${n} (${rows.length} rows): ${error.message}`)
-        },
-      )
-      if (written === 0) throw new Error('no price rows loaded')
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, refreshed: written, unmapped })
-    }
-
-    const { rows, unmapped } = await spec!.load({
-      fetcher,
-      now: new Date(),
-      // Universes live in the DB (editable in Studio), not in the function, so a
-      // corrected ETF proxy or a new ticker takes effect without a redeploy.
-      universe: async () => {
-        if (resource === 'instrument-performance') return await instrumentUniverse()
-        if (resource === 'group-performance') {
-          // Tiers get their growth from each group's proxy ETF, which the reference data already
-          // names. Scoped `<scheme>:<group>` because a group id is not unique across schemes —
-          // MSCI and FTSE both have `developed`, backed by DIFFERENT funds (URTH vs VEA).
-          const { data, error } = await market
-            .from('classification_groups')
-            .select('id,scheme_id,etf')
-            .not('etf', 'is', null)
-          if (error) throw new Error(`group universe read failed: ${error.message}`)
-          // Skip funds already marked dead in tracked_fund. FM stopped filing in 2024 because it
-          // was liquidated, and a liquidated fund has no price series either — asking for one is
-          // how this resource spent a day returning 502s.
-          const { data: dead } = await market
-            .from('tracked_fund')
-            .select('symbol')
-            .eq('enabled', false)
-          const retired = new Set((dead ?? []).map((f) => f.symbol as string))
-          return (data ?? [])
-            .filter((g) => !retired.has(g.etf as string))
-            .map((g) => ({
-              scopeId: `${g.scheme_id as string}:${g.id as string}`,
-              symbol: g.etf as string,
-            }))
-        }
-        const { data, error } = await market
-          .from('countries')
-          .select('iso2,etf_symbol')
-          .not('etf_symbol', 'is', null)
-        if (error) throw new Error(`universe read failed: ${error.message}`)
-        return (data ?? []).map((c) => ({ scopeId: c.iso2 as string, symbol: c.etf_symbol as string }))
-      },
-    })
-    if (unmapped.length) {
-      // Loud, not fatal: a provider rename should degrade, not blank the screen.
-      console.error(`market-refresh(${resource}): unmapped provider labels: ${unmapped.join(', ')}`)
-    }
-
-    const { error } = await market
-      .from('performance')
-      .upsert(dedupeBy(rows, (r) => `${r.scope}|${r.scope_id}|${r.period}`),
-            { onConflict: 'scope,scope_id,period' })
-    if (error) throw new Error(`upsert failed: ${error.message}`)
-
-    await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-    return json({ resource, refreshed: rows.length, unmapped })
+    // Every resource `EXTRA_TTL_MINUTES` accepts has a handler above, so reaching this line is a
+    // defect in this file rather than a bad request. Thrown, so the catch records it in
+    // `refresh_log` like any other failure instead of answering a 200 that did nothing.
+    throw new Error(`no handler for '${resource}'`)
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
     // Record the failure: begin_refresh() then applies its error backoff, so a
@@ -7921,13 +5703,13 @@ Deno.serve(async (req: Request) => {
   const startedAt = new Date()
 
   // From a CLONE. A Request body can only be read once and `handle` reads it itself; without the
-  // clone this would consume the body and every resource would silently fall back to the default.
-  let requested = 'sector-performance'
+  // clone this would consume the body and every request would be refused for naming no resource.
+  let requested = '(none)'
   try {
     const body = await req.clone().json()
     if (body?.resource) requested = String(body.resource)
   } catch {
-    // No body, or not JSON — `handle` applies the same default.
+    // No body, or not JSON — `handle` refuses it, and the run is recorded under `(none)`.
   }
 
   const res = await handle(req)

@@ -1,8 +1,7 @@
 ---
 name: market-refresh-security
 description:
-  Refresh ONE security immediately — returns, market cap, fundamentals and
-  statements. Use when someone says a specific stock page looks stale, empty or
+  Refresh ONE security immediately — market cap, fundamentals and statements. Use when someone says a specific stock page looks stale, empty or
   wrong, or names a ticker to update. Costs a handful of requests, so it is the
   right tool for anything a person is actually looking at.
 license: GPL-3.0
@@ -13,8 +12,9 @@ metadata:
 
 # Refresh one security
 
-`security-refresh` does everything for a single symbol in one call: returns, market cap,
-fundamentals and statements.
+`security-refresh` does everything for a single symbol in one call: market cap, fundamentals and
+statements. Returns are not refreshed here: Dagster's `security_return` computes them nightly, and
+`market.performance` is a view over it.
 
 ```bash
 BASE=https://supabase.rafiki.guru
@@ -28,7 +28,7 @@ curl -sS --max-time 200 -X POST "$BASE/functions/v1/market-refresh" \
 A healthy answer:
 
 ```json
-{"resource":"security-refresh","symbol":"688223.SS","returns":7,
+{"resource":"security-refresh","symbol":"688223.SS",
  "marketCap":45288108032,"fundamentals":"updated","statements":"12 rows","refreshed":true}
 ```
 
@@ -56,8 +56,10 @@ curl -sS "$BASE/rest/v1/security_symbol?symbol=eq.AAPL&select=*" \
 
 Known bad spellings that come from OpenFIGI's Bloomberg-flavoured `ticker`: `BRK/B` (should be
 `BRK-B`), `WALMEX*.MX`, `PE&OLES*.MX`, `6.HK` (Hong Kong pads to four digits: `0006.HK`),
-`ESSITYB.ST` (Stockholm share classes take a hyphen: `ESSITY-B.ST`). `security-yahoo-symbols` fixes
-these by asking Yahoo for the ISIN's home listing — run that resource rather than editing by hand.
+`ESSITYB.ST` (Stockholm share classes take a hyphen: `ESSITY-B.ST`). The Dagster symbology ladder
+fixes these: its Yahoo rung (`raw_yahoo_symbol`) asks Yahoo for the ISIN's home listing. The rung is
+an operator backfill today, so backfill the security's `symbology_subject` partition rather than
+editing by hand (umbrella `docs/deferred/2026-09-24-the-yahoo-rung-is-an-operator-backfill.md`).
 
 ## Expected answers that are NOT failures
 

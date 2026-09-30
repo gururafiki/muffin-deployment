@@ -10,16 +10,10 @@
 //   deno run stack/supabase/functions/market-refresh/logic-check.ts
 
 import {
-  barFrom,
   dedupeBy,
   extractMacroPoints,
   fetchWithIsolation,
-  firstComparableIndex,
-  returnsFor,
   symbolList,
-  toPercent,
-  planPriceFetches,
-  type Bar,
 } from './resources.ts'
 
 // WHERE THE MIGRATION HISTORY LIVES, IN ONE PLACE.
@@ -46,8 +40,6 @@ async function* migrationSql(): AsyncGenerator<string> {
     }
   }
 }
-import { pickHomeListing, type YahooHit } from './yahoo.ts'
-import { venuesFromRows, hasLocalExchange, pickLocalSymbol, venueForSymbol } from './exchanges.ts'
 
 let failures = 0
 const check = (ok: boolean, label: string, detail = '') => {
@@ -55,132 +47,9 @@ const check = (ok: boolean, label: string, detail = '') => {
   console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${detail ? ` — ${detail}` : ''}`)
 }
 
-// ── a close of zero is not a price ───────────────────────────────────────────
-// Shipped: 1,078 of 20,399 performance rows at exactly -100%, i.e. 154 securities each showing
-// -100% on all seven periods including `1d`. `Number.isFinite(0)` is true, so a zero bar was
-// accepted, and `returnsFor` guarded only the denominator.
-console.log('\nbarFrom — a close of zero is not a price')
-check(barFrom({ symbol: 'X', date: '2026-01-02', close: 0 }, 'X') === null,
-  'a zero close is rejected')
-check(barFrom({ symbol: 'X', date: '2026-01-02', close: -3 }, 'X') === null,
-  'a negative close is rejected')
-check(barFrom({ symbol: 'X', date: '2026-01-02', close: 'abc' }, 'X') === null,
-  'a non-numeric close is rejected')
-check(barFrom({ symbol: 'X', date: '', close: 5 }, 'X') === null, 'a missing date is rejected')
-check(barFrom({ date: '2026-01-02', close: 5 }, 'FALLBACK')?.symbol === 'FALLBACK',
-  'a single-symbol response falls back to the requested symbol')
-check(barFrom({ symbol: 'X', date: '2026-01-02T00:00:00', close: 5 }, 'X')?.bar.date === '2026-01-02',
-  'a timestamp is truncated to a plain ISO day')
-
-// The end-to-end shape of that bug: a trailing zero bar must not make every period -100%.
-{
-  const now = new Date('2026-08-09T00:00:00Z')
-  const withZero: Bar[] = [
-    { date: '2025-06-01', close: 80 },
-    { date: '2025-12-30', close: 100 },
-    { date: '2026-08-08', close: 0 },
-  ]
-  const r = returnsFor(withZero, now)
-  check(!Object.values(r).some((v) => v === -100),
-    'a zero LATEST close cannot produce -100% across every period',
-    `got ${JSON.stringify(r)}`)
-}
-
-// ── a discontinuity is not a market move ─────────────────────────────────────
-// Shipped: AMRM.TA +9453.7% and ISHO.TA +8946.9%, both quoted in ILA and both jumping ~100x on the
-// SAME day (2026-05-18) — Yahoo switching Tel Aviv quotes from shekels to agorot. Measured over all
-// 40 securities returning >= +300%: the largest legitimate one-day move was 2.04x and the smallest
-// illegitimate one 6.0x, so the two populations do not overlap.
-console.log('\nfirstComparableIndex — a unit change is not a market move')
-{
-  const smooth: Bar[] = [
-    { date: '2026-01-01', close: 100 },
-    { date: '2026-01-02', close: 128 }, // SNDK's real biggest day was 1.28x
-    { date: '2026-01-03', close: 150 },
-  ]
-  check(firstComparableIndex(smooth) === 0, 'a smooth series is comparable throughout')
-
-  const redenominated: Bar[] = [
-    { date: '2026-01-01', close: 41.83 },
-    { date: '2026-01-02', close: 4040 }, // AMRM.TA, 96.6x, ILS -> agorot
-    { date: '2026-01-03', close: 4100 },
-  ]
-  check(firstComparableIndex(redenominated) === 1, 'the bar after a ~100x jump starts a new regime')
-
-  const collapsed: Bar[] = [
-    { date: '2026-01-01', close: 4000 },
-    { date: '2026-01-02', close: 40 }, // the same thing in reverse
-    { date: '2026-01-03', close: 41 },
-  ]
-  check(firstComparableIndex(collapsed) === 1, 'a 100x FALL is caught too, not just a rise')
-}
-{
-  // Per PERIOD, not per symbol: a break 30 days ago must not discard today's 1d.
-  const now = new Date('2026-08-09T00:00:00Z')
-  const series: Bar[] = [
-    { date: '2025-06-01', close: 80 },   // 1y anchor — BEFORE the break
-    { date: '2025-12-30', close: 100 },  // ytd anchor — BEFORE the break
-    { date: '2026-07-10', close: 10000 }, // the break: 100x
-    { date: '2026-08-01', close: 10500 },
-    { date: '2026-08-08', close: 11000 }, // latest
-  ]
-  const r = returnsFor(series, now)
-  check(!('1y' in r), '1y spans the break and is OMITTED, not reported')
-  check(!('ytd' in r), 'ytd spans the break and is omitted')
-  check(r['1d'] !== undefined, '1d is AFTER the break and survives', `got ${r['1d']}`)
-  check(Math.abs((r['1d'] ?? 0) - 4.7619) < 0.001, '1d is still computed correctly', `got ${r['1d']}`)
-  check(!Object.values(r).some((v) => v > 1000),
-    'no period reports the fabricated ~10,000% move', `got ${JSON.stringify(r)}`)
-}
-
-// ── the return maths itself ──────────────────────────────────────────────────
-console.log('\nreturnsFor — anchors')
-{
-  const now = new Date('2026-08-09T00:00:00Z')
-  const series: Bar[] = [
-    { date: '2025-06-01', close: 80 },
-    { date: '2025-12-30', close: 100 },
-    { date: '2026-06-01', close: 110 },
-    { date: '2026-08-01', close: 120 },
-    { date: '2026-08-08', close: 132 },
-  ]
-  const r = returnsFor(series, now)
-  check(r['1d'] === 10, '1d uses the PREVIOUS BAR, not a date lookback', `got ${r['1d']}`)
-  check(r['ytd'] === 32, 'ytd anchors on the last close of last year', `got ${r['ytd']}`)
-  check(r['1y'] === 65, '1y picks the last bar at or before the anchor', `got ${r['1y']}`)
-  check(!('5y' in r), 'a period the series cannot reach is omitted, not zero')
-  check(Object.keys(returnsFor([{ date: '2026-08-08', close: 1 }], now)).length === 0,
-    'a one-bar series yields nothing rather than dividing by itself')
-}
-
 // ── symbols are not URL-safe ─────────────────────────────────────────────────
 // Shipped: `BRK/B` 400s and takes its whole batch of 20 with it; `PE&OLES*.MX` unencoded ENDS the
 // symbol parameter and silently truncates the request, which still returns 200.
-// ── a dead instrument must not report a live return ──────────────────────────
-// Shipped: Egypt, Nigeria and Portugal each showed +0.0% on EVERY period, dated today, from ETFs
-// that stopped trading years ago. The provider keeps serving the final bars, so each period is
-// measured between two identical closes.
-console.log('\nreturnsFor — a stale series reports nothing, not zero')
-{
-  const now = new Date('2026-08-13T00:00:00Z')
-  const dead: Bar[] = [
-    { date: '2024-03-28', close: 12.5 },
-    { date: '2024-04-01', close: 12.5 },
-  ]
-  check(Object.keys(returnsFor(dead, now)).length === 0,
-    'a series that ends years ago yields NO periods', JSON.stringify(returnsFor(dead, now)))
-  check(!Object.values(returnsFor(dead, now)).includes(0),
-    'and specifically never the +0.0% that reads as "the market was flat"')
-
-  // The boundary: a long weekend plus holidays is legitimate and must still report.
-  const stale = [
-    { date: '2026-08-01', close: 100 },
-    { date: '2026-08-06', close: 110 },
-  ]
-  check(Object.keys(returnsFor(stale, now)).length > 0,
-    'a 7-day gap still reports — markets close for holidays', JSON.stringify(returnsFor(stale, now)))
-}
-
 console.log('\nsymbolList — real tickers are not URL-safe')
 check(symbolList(['AAPL', 'MSFT']) === 'AAPL,MSFT', 'ordinary symbols are untouched')
 check(symbolList(['BRK/B']) === 'BRK%2FB', 'a slash is encoded (it 400s the whole batch raw)')
@@ -190,12 +59,6 @@ check(symbolList(['A', 'B']).split(',').length === 2, 'the comma SEPARATOR stays
 check(symbolList(['NESN.SW']) === 'NESN.SW', 'a dot suffix is not mangled')
 check(symbolList(['005930.KS', 'BP/.L']) === '005930.KS,BP%2F.L',
   'a mixed batch encodes only what needs it')
-
-// ── fraction vs percent ──────────────────────────────────────────────────────
-console.log('\ntoPercent')
-check(toPercent(-0.0366) === -3.66, 'a fraction becomes a percent', `got ${toPercent(-0.0366)}`)
-check(toPercent(null) === null, 'a missing value stays missing')
-check(toPercent('0.5') === null, 'a string is not silently coerced')
 
 // ── the same conflict key twice fails the WHOLE statement ────────────────────
 // Shipped: `security-industries` returned a bare 502 on any page big enough to contain a security
@@ -301,96 +164,6 @@ console.log('\nfetchWithIsolation — a bad symbol costs only itself')
   check(expired.dead.length === 0, 'a blown deadline blames nobody', JSON.stringify(expired.dead))
 }
 
-// ── a window that never moved is not a 0.00% return ──────────────────────────
-// Found by the flat-return tripwire firing at 32 rows (threshold 5) on 2026-08-13. The cause was
-// not delisting, which is what that tripwire was written for: `GOTO.JK` had 62 bars across the
-// 3-month window and ONE distinct close — 50, every trading day — and `AOT-R.BK` had 65 bars and
-// two. Ordinary listings on live exchanges, padded rather than quoted.
-//
-// No existing guard could see it. The closes are positive, so `barFrom` accepts them; the latest
-// bar is today, so the staleness rule passes; there is no discontinuity, so `firstComparableIndex`
-// has nothing to cut. It renders as "this market was flat" — a claim about the market rather than
-// an admission that we have no prices for it.
-console.log('\nreturnsFor — a constant window reports nothing, not zero')
-{
-  const day = (n: number) => new Date(Date.UTC(2026, 7, 13) - n * 86_400_000).toISOString().slice(0, 10)
-  const now = new Date(Date.UTC(2026, 7, 13))
-
-  // 200 sessions all at exactly 50 — the GOTO.JK shape.
-  const frozen: Bar[] = Array.from({ length: 200 }, (_, i) => ({ date: day(199 - i), close: 50 }))
-  const f = returnsFor(frozen, now)
-  check(f['3m'] === undefined, 'a window with one distinct close reports NO 3m', JSON.stringify(f['3m']))
-  check(f['1y'] === undefined, 'and no 1y')
-
-  // Flat for the recent quarter, but genuinely up over the year: the short window must go and the
-  // long one must survive. Per-window, because a security can be flat for a week and not for a year.
-  // 420 sessions so the 1y anchor actually EXISTS — at 300 the year was omitted for want of a bar
-  // that old, which passes the assertion for entirely the wrong reason.
-  const mixed: Bar[] = Array.from({ length: 420 }, (_, i) => ({
-    date: day(419 - i),
-    close: i < 320 ? 10 + i * 0.1 : 42,
-  }))
-  const m = returnsFor(mixed, now)
-  check(m['3m'] === undefined, 'a flat recent quarter still reports no 3m', JSON.stringify(m['3m']))
-  check(typeof m['1y'] === 'number' && m['1y'] > 0,
-    'while the year, which did move, is still reported', JSON.stringify(m['1y']))
-}
-
-// ── an ISIN hit must be on the security's HOME market ────────────────────────
-// Yahoo's ISIN index is inconsistent: Televisa's returns the local TLEVISACPO.MX, Walmex's returns
-// ONLY a Frankfurt line. Taking the first hit would price a Mexican retailer off a thin,
-// differently-denominated German listing — the mistake `exchanges.ts` exists to prevent.
-const VENUES = venuesFromRows([
-  { exch_code: 'US', country_iso2: 'US', suffix: '' },
-  { exch_code: 'MM', country_iso2: 'MX', suffix: '.MX' },
-  { exch_code: 'LN', country_iso2: 'GB', suffix: '.L' },
-  { exch_code: 'HK', country_iso2: 'HK', suffix: '.HK' },
-  { exch_code: 'KS', country_iso2: 'KR', suffix: '.KS' },
-  { exch_code: 'KQ', country_iso2: 'KR', suffix: '.KQ' },
-])
-
-console.log('\nvenuesFromRows — the catalog shape')
-check(VENUES.KR?.length === 2, 'a country can have several venues', `${VENUES.KR?.length}`)
-check(VENUES.KR?.[0].figi === 'KS', 'row order is preserved, so `preference` decides the primary board')
-check(VENUES.US?.[0].suffix === '', 'the US suffix is an empty string, not absent')
-check(venuesFromRows([{ exch_code: 'XX', country_iso2: null, suffix: '.XX' }]).XX === undefined,
-  'a venue with no country is skipped rather than keyed on null')
-check(hasLocalExchange('KR', VENUES) && !hasLocalExchange('US', VENUES),
-  'US is not a LOCAL exchange — it is the fallback the whole mechanism exists to avoid')
-check(pickLocalSymbol('KR', [{ ticker: '000660', exchCode: 'KQ' }, { ticker: '005930', exchCode: 'KS' }], VENUES)?.symbol === '005930.KS',
-  'the preferred board wins even when the other is listed first')
-
-console.log('\nvenueForSymbol — the suffix names the venue')
-check(venueForSymbol('005930.KS', VENUES) === 'KS', 'a local suffix resolves')
-check(venueForSymbol('AAPL', VENUES) === 'US', 'no suffix means US')
-check(venueForSymbol('BRK-B', VENUES) === 'US', 'a hyphenated US class share is still US')
-check(venueForSymbol('FOO.XYZ', VENUES) === null, 'an unknown suffix resolves to nothing, not a guess')
-// Mirrors migration 38's `order by length(suffix) desc, preference`. Stated in two languages, so
-// both get asserted rather than trusted to agree.
-check(venueForSymbol('SOME.KQ', VENUES) === 'KQ', 'the secondary board is distinguishable from the primary')
-
-console.log('\npickHomeListing — the home market or nothing')
-check(pickHomeListing([{ symbol: 'TLEVISACPO.MX', quoteType: 'EQUITY' }], 'MX', VENUES) === 'TLEVISACPO.MX',
-  'the local listing is accepted')
-check(pickHomeListing([{ symbol: '4GNB.F', quoteType: 'EQUITY' }], 'MX', VENUES) === null,
-  'a FOREIGN cross-listing is refused, not taken as a fallback')
-check(pickHomeListing(
-  [{ symbol: '4GNB.F', quoteType: 'EQUITY' }, { symbol: 'WALMEX.MX', quoteType: 'EQUITY' }], 'MX', VENUES,
-) === 'WALMEX.MX', 'the home listing wins even when a foreign one comes first')
-check(pickHomeListing([{ symbol: 'BRK-B', quoteType: 'EQUITY' }], 'US', VENUES) === 'BRK-B',
-  'a US symbol has no suffix at all')
-check(pickHomeListing([{ symbol: 'BRK-B.MX', quoteType: 'EQUITY' }], 'US', VENUES) === null,
-  'and a suffixed symbol is therefore NOT a US listing')
-check(pickHomeListing([{ symbol: 'RR.L', quoteType: 'EQUITY' }], 'GB', VENUES) === 'RR.L',
-  'the UK suffix is accepted')
-check(pickHomeListing([{ symbol: 'BRKW', quoteType: 'ETF' }], 'US', VENUES) === null,
-  'an ETF written on the name is refused — q=BRK/B returns four of them')
-check(pickHomeListing([{ symbol: '0006.HK', quoteType: 'EQUITY' }], 'HK', VENUES) === '0006.HK',
-  'Hong Kong four-digit padding survives the suffix match')
-check(pickHomeListing([], 'GB', VENUES) === null, 'no hits means no symbol')
-check(pickHomeListing([{ symbol: 'AAA.XX', quoteType: 'EQUITY' }], 'ZZ', VENUES) === null,
-  'a country with no known venue resolves to nothing rather than guessing')
-
 // ── every resource the cron calls must be one the function ACCEPTS ───────────
 // Adding a resource means touching TWO places: the handler block, and the `EXTRA` allow-list the
 // request is validated against. Shipped 2026-08-12 with only the first — the handler was there, the
@@ -474,26 +247,6 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     check(index.includes(gate), `${resource} still gates its empty-answer marking`, gate)
   }
 
-  // `security-performance` is held to a STRICTER rule than the five above, so it is asserted
-  // separately rather than by its old gate string.
-  //
-  // Those five gate on "the endpoint answered for SOMEONE in this run", which is a tally — and a
-  // tally is exactly what yfinance defeats. It throttles PROGRESSIVELY: some symbols in a batch
-  // come back, others are simply absent from the same 200, and nothing throws. Measured
-  // 2026-08-14, that had left 2,548 securities negative-cached while the provider was serving
-  // daily bars for every one of them (MediaTek, Tapestry, Ferguson, ACS), 2,297 of them marked in
-  // a single pass. So marking now requires the symbol to have been asked ON ITS OWN.
-  //
-  // Two things must remain true, and deleting either is the failure this file exists to catch:
-  // the marked set comes from `confirmedDead` (per-symbol evidence, not batch arithmetic), and a
-  // mark RETRACTS the rows it can no longer stand behind — otherwise the stale number outlives
-  // the fix, which is how 1d/1w/1m = 0.00% survived four days behind a mark.
-  // `security-prices` is held to the same stricter rule, and for the same reason: `written > 0`
-  // kills a backlog the moment its answerable work is done. Measured 2026-08-14 —
-  // `written: 0, emptySeries: 300, batchesFailed: 0, remaining: 393`, unchanged run after run,
-  // because every security left is one yfinance does not carry (ICT.PS and FAB.AE return
-  // "not covered"). Nothing was wrongly marked; the same 300 were simply re-asked eight times a
-  // day for ever. Fourth instance of this shape in this file's history.
   // PAGING MUST BE A PARTITION, NOT FOUR SAMPLES. Both multi-page backlog reads order by
   // `best_weight`, which is 0 for every security no tracked fund holds — most of the rows. Postgres
   // gives no stable order among ties, so successive `range()` calls can return one row twice and
@@ -556,237 +309,6 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   check(tiebreaks >= pageOrders,
     'every paged backlog read has a UNIQUE sort key, so its pages partition',
     `${pageOrders} range() reads, ${tiebreaks} unique tiebreaks`)
-
-  check(
-    index.includes('const ids = emptyIds'),
-    'security-prices marks only symbols confirmed ALONE',
-    'const ids = emptyIds',
-  )
-  check(
-    index.includes('isolatedWrites += bars.length'),
-    'security-prices KEEPS what isolation recovers rather than discarding it',
-    'isolatedWrites',
-  )
-  // AND AN EMPTY ISOLATED ANSWER IS ONLY EVIDENCE ONCE THE PROVIDER IS PROVEN TO BE ANSWERING.
-  //
-  // The comment above this loop used to assert "a throttle makes every isolation throw, so a
-  // throttled run marks NOTHING". That is FALSE for yfinance, which signals a throttle with an
-  // empty 200 — the seventh instance of that shape in this codebase and the only one whose comment
-  // claimed the opposite. Nothing throws, nothing answers, and every isolated symbol looks
-  // individually dead.
-  //
-  // Measured 2026-09-04: ten Thai securities marked in ONE run at 22:35 (TTB-R.BK, CRC-R.BK,
-  // TU-R.BK and seven more), each holding daily bars back to 2006-2007 and zero performance rows.
-  // Both surface theories died on measurement — 34 of 40 `-R.BK` NVDR symbols carry performance
-  // perfectly well, and the series are nineteen years deep, not young.
-  //
-  // CORRECTION, 2026-09-05: THE THROTTLE STORY BELOW WAS WRONG, AND THE PROBE IS KEPT ANYWAY.
-  // The ten Thai marks it was written for were HONEST. Driven against a captured payload,
-  // `SCCC-R.BK` returns 272 bars with ONE distinct close and `loadEquityReturns` yields zero rows,
-  // so the resource was right to mark. Widening the probe did NOT stop it — a forced run re-marked
-  // all ten. What was actually wrong was the GUARD reading stored bars against a mark that records
-  // a fresh fetch; it is a gauge now.
-  // The widened probe stays because progressive throttling IS real in this pipeline and a control
-  // call on any marking run is cheap insurance — but it is insurance, not the fix for that
-  // incident, and the reasoning below should be read with that correction in front of it.
-  //
-  // THE FIRST FIX GATED THE PROBE ON `isolatedAnswered === 0`, AND IT RECURRED THE NEXT DAY.
-  // Measured 2026-09-05, one day after the note above: ten MORE Thai securities marked in a single
-  // run — Siam City Cement, Thai Union, Carabao, Central Retail, TMBThanachart — every one holding
-  // recent bars that MOVE, with `market.data_defect.contradicted_negative_cache` sitting at 10-12
-  // throughout. The gate is what let it through: yfinance throttles PROGRESSIVELY, so SOME
-  // isolated calls answer, `isolatedAnswered` is non-zero, and the probe that would have caught
-  // the refusal never runs. Confirmed in one measurement — `SCCC-R.BK` and `CCET-R.BK` answered 25
-  // bars each, and minutes later returned nothing, as did AAPL.
-  //
-  // "Some symbols answered, therefore the provider is up" is the tally-shaped reasoning this file
-  // rejects everywhere else; it survived here because it reads as an optimisation. The probe now
-  // runs on ANY run that would mark — one extra call, against 30 days of wrongly excluding a
-  // security from the backlog that would have corrected its returns.
-  check(
-    index.includes('confirmedDead.length > 0 && !throttledOut') &&
-      !index.includes('confirmedDead.length > 0 && isolatedAnswered === 0'),
-    'security-performance runs the control probe on ANY run that would mark, not only when nothing answered',
-    'confirmedDead.length > 0 && isolatedAnswered === 0',
-  )
-  check(
-    index.includes('PERF_CONTROL_SYMBOL') && index.includes('controlAnswered'),
-    'security-performance proves the provider is up with a control symbol before marking',
-    'PERF_CONTROL_SYMBOL / controlAnswered',
-  )
-
-  check(
-    index.includes('const missedIds = confirmedDead'),
-    'security-performance marks only symbols confirmed ALONE',
-    'const missedIds = confirmedDead',
-  )
-  check(
-    index.includes('stale performance retract failed'),
-    'security-performance retracts the rows it stops standing behind',
-    'stale performance retract failed',
-  )
-}
-
-// ── an offshore incorporation is not a market ────────────────────────────────
-// N-PORT reports the INCORPORATION jurisdiction, so Alibaba is filed under `KY`. There is no
-// exchange in the Cayman Islands, so the strict home-market rule refused every hit — including the
-// correct one — and the security fell back to OpenFIGI's US lookup: displayed AND priced as `BABAF`
-// while its real listing is `9988.HK`. 180 equities sit in venue-less jurisdictions (119 KY, 56 BM,
-// 5 VG), none of them drillable.
-console.log('\npickHomeListing — a country with no venues still resolves')
-{
-  const offshore: YahooHit[] = [
-    { symbol: 'KYG017191142.SG', quoteType: 'EQUITY' },   // Stuttgart — not in the venue table
-    { symbol: '9988.HK', quoteType: 'EQUITY' },           // Hong Kong — the real listing
-  ]
-  check(pickHomeListing(offshore, 'KY', VENUES) === '9988.HK',
-    'a Cayman-filed security resolves to its real exchange',
-    String(pickHomeListing(offshore, 'KY', VENUES)))
-
-  // The strict rule must still hold where the country DOES name markets, or a Korean bank gets
-  // priced off its Frankfurt line — the mistake `exchanges.ts` exists to prevent.
-  const korean: YahooHit[] = [
-    { symbol: 'KRX.F', quoteType: 'EQUITY' },             // Frankfurt
-    { symbol: '005930.KS', quoteType: 'EQUITY' },         // Seoul
-  ]
-  check(pickHomeListing(korean, 'KR', VENUES) === '005930.KS',
-    'a country WITH venues still requires one of its own',
-    String(pickHomeListing(korean, 'KR', VENUES)))
-  check(pickHomeListing([{ symbol: 'KRX.F', quoteType: 'EQUITY' }], 'KR', VENUES) === null,
-    'and refuses a foreign cross-listing rather than taking it')
-}
-
-// ── DIVIDENDS RIDE ON THE PRICE RESPONSE ──────────────────────────────────────────────────────
-//
-// openbb's yfinance provider sets `include_actions: bool = Field(default=True)` and aliases the
-// column (`__alias_dict__ = {'dividend': 'dividends'}`), so every price response has always carried
-// a dividend field — and `barFrom` dropped it, keeping only `{date, close}`. Verified against
-// Yahoo directly: `events.dividends` comes back alongside the bars in ONE request.
-//
-// Fifth instance of the same lesson (market cap twice, operating country, currency) and the
-// cheapest: no new call, and not even a new request parameter.
-console.log('\nbarFrom — a dividend on the bar is kept, not discarded')
-{
-  const withDiv = barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: 0.25 }, 'X')
-  check(withDiv?.bar.dividend === 0.25, 'a dividend on the bar survives the parse',
-    String(withDiv?.bar.dividend))
-  check(withDiv?.bar.close === 100, 'and the close is untouched')
-
-  // A ZERO IS THE PROVIDER SAYING "no dividend", not an event worth a row. Storing it would put a
-  // dividend row on every bar of every security — millions of rows asserting nothing.
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: 0 }, 'X')?.bar.dividend === undefined,
-    'a zero dividend is absence, not a zero-value event')
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100 }, 'X')?.bar.dividend === undefined,
-    'a bar with no dividend field is fine')
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: 'abc' }, 'X')?.bar.dividend === undefined,
-    'a non-numeric dividend is rejected rather than coerced')
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, dividend: -1 }, 'X')?.bar.dividend === undefined,
-    'a negative dividend is rejected')
-
-  // SPLITS ride on the same response, aliased `split_ratio`. RECORDED, NOT APPLIED: the bars are
-  // already split-adjusted (`adjustment` defaults to `splits_only`, verified on NFLX's 10-for-1 of
-  // 2025-11-17, whose stored series is smooth across the ex-date), so feeding these back into a
-  // price would divide it a second time.
-  const sp = barFrom({ symbol: 'X', date: '2025-11-17', close: 110, split_ratio: 10 }, 'X')
-  check(sp?.bar.splitRatio === 10, 'a split ratio survives the parse', String(sp?.bar.splitRatio))
-  // A RATIO OF 1 IS "no split", the provider's way of saying nothing happened — the same shape as
-  // a 0 dividend. Storing it would put a split row on every bar of every security.
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, split_ratio: 1 }, 'X')?.bar.splitRatio === undefined,
-    'a ratio of 1 is absence, not a split')
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, split_ratio: 0 }, 'X')?.bar.splitRatio === undefined,
-    'a ratio of 0 is nonsense and is rejected')
-  check(barFrom({ symbol: 'X', date: '2026-02-10', close: 100, split_ratio: 0.1 }, 'X')?.bar.splitRatio === 0.1,
-    'a REVERSE split (ratio < 1) is kept — it is a real event, not a rejected value')
-}
-
-console.log('\ndividend capture — attributable by construction')
-{
-  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  // `observed_symbol` must be the symbol the SERIES was fetched by. That is what makes this path
-  // structurally safer than the Tiingo one, which asks by US ticker while prices come from the
-  // primary listing — 33 of 45 mismatched before #141 added a join to enforce agreement.
-  check(/observed_symbol: parsed\.symbol/.test(index),
-    'a captured dividend records the symbol its own price series was fetched by')
-  // DO NOTHING, not DO UPDATE: the primary key excludes the source, so Tiingo and yfinance rows for
-  // the same event collide. An upsert that overwrote would rewrite the same rows every run.
-  check(/onConflict: 'security_id,ex_date,kind', ignoreDuplicates: true/.test(index),
-    'colliding dividend rows are left alone rather than rewritten every run')
-  // The price window must not filter dividends: `security_price` is a ~400-day downsampled series
-  // and `security_corporate_action` is neither.
-  const divBlock = index.match(/if \(parsed\.bar\.dividend !== undefined\)[\s\S]*?\n          \}/)?.[0] ?? ''
-  check(divBlock.length > 0 && !divBlock.includes('cutoff'),
-    'the chart cutoff does not drop dividends — different table, different retention')
-  // The dedupe key MUST include `kind`. A security can pay a dividend and split on the SAME
-  // ex-date (a split is usually announced with one), and a key of (security, date) alone would
-  // silently drop one of the two — the primary key is (security_id, ex_date, kind) precisely
-  // because both can exist.
-  check(/dedupeBy\(divRows, \(d\) => `\$\{d\.security_id\}\|\$\{d\.ex_date\}\|\$\{d\.kind\}`\)/.test(index),
-    'the action dedupe key includes kind, so a same-day split and dividend cannot collide')
-  check(/kind: 'split',/.test(index), 'splits are captured from the price response too')
-}
-
-// ── DEBT TERMS COME OFF A FILING WE ALREADY PARSE ─────────────────────────────────────────────
-//
-// 15,159 bonds — the largest slice of the universe — had no coupon and no maturity, while every
-// N-PORT debt holding carries a <debtSec> block that `parseHoldings` read around and skipped.
-// Measured on AGG's filing: 8,867 of 8,870 holdings carry one.
-console.log('\nparseHoldings — the debt block')
-{
-  const { parseHoldings } = await import('./edgar.ts')
-  const xml = `<invstOrSec>
-    <name>Highwoods Realty LP</name><cusip>431282AR3</cusip>
-    <identifiers><isin value="US431282AR39"/></identifiers>
-    <balance>1935000</balance><units>PA</units><curCd>USD</curCd>
-    <valUSD>2022965.1</valUSD><pctVal>0.0027</pctVal><assetCat>DBT</assetCat>
-    <invCountry>US</invCountry>
-    <debtSec><maturityDt>2029-04-15</maturityDt><couponKind>Fixed</couponKind>
-      <annualizedRt>4.2</annualizedRt><isDefault>N</isDefault></debtSec>
-  </invstOrSec>`
-  const [h] = parseHoldings(xml)
-  check(h?.maturityDate === '2029-04-15', 'the maturity is read', h?.maturityDate)
-  check(h?.couponRate === 4.2, 'the coupon rate is read', String(h?.couponRate))
-  check(h?.couponKind === 'Fixed', 'the coupon kind is read', h?.couponKind)
-  check(h?.inDefault === false, 'isDefault N becomes false, not undefined', String(h?.inDefault))
-
-  // A ZERO COUPON IS A REAL BOND. The measured range across AGG is 0.0 to 11.5, so a truthiness
-  // test would silently drop every zero-coupon holding. Note this is the OPPOSITE of the dividend
-  // case, where 0 means "no dividend on this bar" — same-looking value, opposite meaning.
-  const [z] = parseHoldings(xml.replace('<annualizedRt>4.2', '<annualizedRt>0.0'))
-  check(z?.couponRate === 0, 'a 0.0 coupon survives — it is a zero-coupon bond, not a missing rate',
-    String(z?.couponRate))
-
-  // "None" IS A REPORTED KIND, not an absence. 5 of AGG's holdings carry it.
-  const [n] = parseHoldings(xml.replace('<couponKind>Fixed', '<couponKind>None'))
-  check(n?.couponKind === 'None', 'couponKind "None" is kept as a value', n?.couponKind)
-
-  // SCOPED TO <debtSec>. A derivative carries its own maturity in a different block, and reading
-  // the first match in the whole holding would attribute a swap's expiry to the security.
-  const withSwap = `<invstOrSec><name>X</name><assetCat>DE</assetCat>
-    <fwdDeriv><maturityDt>2027-01-01</maturityDt></fwdDeriv></invstOrSec>`
-  const [d] = parseHoldings(withSwap)
-  check(d?.maturityDate === undefined,
-    'a derivative maturity outside <debtSec> is NOT read as the security maturity', String(d?.maturityDate))
-
-  // An equity holding has no debt block and must not acquire empty terms.
-  const eq = `<invstOrSec><name>Apple</name><assetCat>EC</assetCat><curCd>USD</curCd></invstOrSec>`
-  const [e] = parseHoldings(eq)
-  check(e?.maturityDate === undefined && e?.couponRate === undefined,
-    'an equity holding carries no debt terms')
-}
-
-console.log('\ndebt terms — written to the security, guarded')
-{
-  const ingest = await Deno.readTextFile(new URL('./ingest.ts', import.meta.url))
-  // `?? null`, never `|| null`: a 0.0 coupon is a real bond and `||` would null every one.
-  check(/coupon_rate: h\.couponRate \?\? null/.test(ingest),
-    'the coupon rate uses ?? so a 0.0 coupon is not nulled by truthiness')
-  // The presence of a maturity is what marks a holding as debt; without that test an equity would
-  // have its (nonexistent) terms written as nulls over whatever a bond filing had set.
-  check(/if \(!id \|\| !h\.maturityDate\) return \[\]/.test(ingest),
-    'only holdings that actually carried a debt block are written')
-  // Learned, not seeded — the rule for every categorical discovered from a filing.
-  check(/\['coupon_kind', rows\(couponKinds\)\]/.test(ingest),
-    'coupon kinds are LEARNED from the filing, not seeded from memory')
 }
 
 // ── NO LOOP MAY GATE ON A BARE DEADLINE ───────────────────────────────────────────────────────
@@ -827,146 +349,18 @@ console.log('\nworker budget — a loop must leave room to finish')
   const workerMs = Number(main.match(/workerTimeoutMs = (\d+) \* 1000/)?.[1] ?? NaN) * 1000
   check(Number.isFinite(workerMs) && workerMs > 0, 'found the real worker timeout', `${workerMs}ms`)
 
-  const budget = Number(index.match(/const WORKER_BUDGET_MS = (\d+)_(\d+)/)?.slice(1).join('') ?? NaN)
-  const reserve = Number(index.match(/const BATCH_RESERVE_MS = (\d+)_(\d+)/)?.slice(1).join('') ?? NaN)
-  check(budget < workerMs,
-    'the performance budget is under the worker timeout, with margin',
-    `budget ${budget}ms vs worker ${workerMs}ms (margin ${workerMs - budget}ms)`)
-  check(budget - reserve > 0 && reserve >= 10_000,
+  // Every handler's own deadline, read off the source. The largest must leave the worker room to
+  // finish the batch that starts just under it, which is what the reserve is for.
+  const deadlines = [...index.matchAll(/const deadline = Date\.now\(\) \+ (\d+)_(\d+)/g)]
+    .map((m) => Number(m[1] + m[2]))
+  const reserve = Number(index.match(/const TAIL_RESERVE_MS = (\d+)_(\d+)/)?.slice(1).join('') ?? NaN)
+  const longest = Math.max(...deadlines)
+  check(deadlines.length > 0 && longest < workerMs,
+    'every handler deadline is under the worker timeout',
+    `${deadlines.length} deadlines, longest ${longest}ms vs worker ${workerMs}ms`)
+  check(reserve >= 10_000,
     'the reserve is big enough for a batch tail to actually finish',
-    `reserve ${reserve}ms, last batch may start at ${budget - reserve}ms`)
-}
-
-// ── A PRICE RETURN IS NOT THE RETURN ──────────────────────────────────────────────────────────
-//
-// Every figure this system has shown is a PRICE return, which is not absent-but-wrong, it is
-// SHOWN-and-wrong: it renders as "+4.2%" and is believed. For an income-paying market it
-// understates, and over a decade the income is most of the answer.
-console.log('\ntotalReturnsFor — reinvested, and never a substitute')
-{
-  const { totalReturnsFor, returnsFor } = await import('./resources.ts')
-  const now = new Date('2026-08-18T00:00:00Z')
-  const day = (n: number) => new Date(Date.UTC(2026, 7, 18 - n)).toISOString().slice(0, 10)
-  // 60 bars so the monthly window has an anchor to reach back to.
-  const N = 60
-  // Flat at 100, with one 2.00 dividend two days before the end.
-  const series: Bar[] = Array.from({ length: N }, (_, i) => ({ date: day(N - 1 - i), close: 100 }))
-  series[N - 2] = { date: series[N - 2].date, close: 100, dividend: 2 }
-
-  const pr = returnsFor(series, now)
-  const tr = totalReturnsFor(series, now)
-  // The price return over a flat series is suppressed (a window that never moved is not a 0.00%
-  // return), but the TOTAL return is real: the holder received income.
-  check(tr['1w'] !== undefined && tr['1w'] > 1.9 && tr['1w'] < 2.1,
-    'a dividend on a flat series produces a real total return', String(tr['1w']))
-  check(pr['1w'] === undefined,
-    'while the PRICE return over that same flat window is still suppressed', String(pr['1w']))
-
-  // NO DIVIDEND ANYWHERE => the two must AGREE. This is the case that makes an overwrite look
-  // correct, which is exactly why the column is kept separate.
-  const rising: Bar[] = Array.from({ length: N }, (_, i) => ({ date: day(N - 1 - i), close: 100 + i }))
-  const pr2 = returnsFor(rising, now)
-  const tr2 = totalReturnsFor(rising, now)
-  for (const p of Object.keys(pr2)) {
-    check(Math.abs((tr2[p] ?? NaN) - pr2[p]) < 0.01,
-      `with no income, total and price agree on ${p}`, `${tr2[p]} vs ${pr2[p]}`)
-  }
-
-  // REINVESTED, not summed: a dividend early in a rising series compounds, so the total return
-  // must EXCEED price return plus the raw dividend yield at the start.
-  // INSIDE the 1m window, deliberately. A dividend paid BEFORE a window's anchor must not affect
-  // that window's return — placing it at index 1 tested nothing and (correctly) changed nothing,
-  // which read as a broken computation and was a broken fixture.
-  const withEarly: Bar[] = rising.map((b, i) => (i === N - 5 ? { ...b, dividend: 5 } : b))
-  const trEarly = totalReturnsFor(withEarly, now)
-  // `1m`, chosen because the 60-bar series actually spans it — a period the series cannot reach
-  // yields `undefined` on BOTH sides and the comparison passes vacuously, which is how a guard
-  // ends up asserting nothing.
-  check(trEarly['1m'] !== undefined && pr2['1m'] !== undefined,
-    'the fixture spans the period being compared — otherwise this asserts nothing',
-    `tr=${trEarly['1m']} pr=${pr2['1m']}`)
-  check((trEarly['1m'] ?? 0) > (pr2['1m'] ?? 0),
-    'income raises the total return above the price return', `${trEarly['1m']} vs ${pr2['1m']}`)
-
-  // The same eligibility rules as the price return. A stale series produces neither.
-  const stale = Array.from({ length: 5 }, (_, i) => ({ date: `2025-01-0${i + 1}`, close: 100 + i }))
-  check(Object.keys(totalReturnsFor(stale, now)).length === 0,
-    'a stale series produces no total return, exactly as it produces no price return')
-  check(Object.keys(totalReturnsFor([{ date: day(1), close: 100 }], now)).length === 0,
-    'a one-bar series produces nothing')
-}
-
-console.log('\ntotal return — wired at EVERY site, not just the visible one')
-{
-  const rs = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
-  // THREE call sites build performance rows and only one is the per-security path. Wiring the
-  // obvious one and leaving two is the recurring failure in this file — six marking sites, four
-  // `remaining` units, four unbounded loops. Counted, not eyeballed.
-  const sites = [...rs.matchAll(/Object\.entries\(returnsFor\(series, now\)\)/g)].length
-  const wired = [...rs.matchAll(/total_return_pct: tr/g)].length
-  check(sites > 0 && sites === wired,
-    'every returnsFor row-building site also emits a total return',
-    `${sites} sites, ${wired} wired`)
-  // NULL IS NOT ZERO, and must never fall back to the price return: that would erase the
-  // difference between "paid no income" and "we do not know".
-  check(!/total_return_pct: tr\w*\[period\] \?\? changePct/.test(rs),
-    'a missing total return stays NULL rather than falling back to the price return')
-}
-
-// ── FX: A WRONG RATE IS SILENT AND ENORMOUS ───────────────────────────────────────────────────
-//
-// 71% of the market caps we hold (8,169 of 11,573) are not in dollars, so nothing can rank the
-// universe by size across markets — which is also why the mega-cap canary is US-only and blind to
-// non-US securities, to anything under $50bn, and to the 34% with no cap at all.
-console.log('\nfx — direction, subunits and the plausibility band')
-{
-  const { SUBUNITS, isPlausibleRate } = await import('./fx.ts')
-
-  // THE BAND EXISTS TO CATCH AN INVERTED PAIR. `USDTWD` and `TWDUSD` are both valid symbols and
-  // exact reciprocals, and BOTH return plausible-looking numbers — 31.9 and 0.0314. Only one of
-  // them turns a TWD figure into dollars.
-  check(isPlausibleRate(3.2573), 'the Kuwaiti dinar (the highest-value currency) is accepted')
-  check(isPlausibleRate(0.0000382), 'the Vietnamese dong (the lowest) is accepted')
-  check(isPlausibleRate(1), 'parity is accepted')
-  check(!isPlausibleRate(31.9), 'an INVERTED TWD pair (31.9 rather than 0.0314) is refused')
-  check(!isPlausibleRate(26200), 'an inverted VND pair is refused')
-  check(!isPlausibleRate(0), 'a zero rate is refused')
-  check(!isPlausibleRate(-1), 'a negative rate is refused')
-  check(!isPlausibleRate(Number.NaN), 'NaN is refused')
-
-  // SUBUNITS ARE NOT CURRENCIES. Yahoo has no pair for agorot, cents or fils — they are a fixed
-  // fraction of a parent, and treating them as currencies is the same mistake that made Tel Aviv
-  // quotes look like a 100x crash.
-  check(SUBUNITS.ILA?.parent === 'ILS' && SUBUNITS.ILA?.per === 100, 'ILA is 1/100 ILS')
-  check(SUBUNITS.ZAC?.parent === 'ZAR' && SUBUNITS.ZAC?.per === 100, 'ZAC is 1/100 ZAR')
-  check(SUBUNITS.KWF?.parent === 'KWD' && SUBUNITS.KWF?.per === 1000, 'KWF is 1/1000 KWD')
-  // The derived rate must be SMALLER than its parent's — a subunit is worth less than the unit.
-  for (const [sub, { per }] of Object.entries(SUBUNITS)) {
-    check(per > 1, `${sub} divides its parent, so the derived rate is smaller`, String(per))
-  }
-}
-
-console.log('\nfx resource — refuses rather than guesses')
-{
-  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const fx = await Deno.readTextFile(new URL('./fx.ts', import.meta.url))
-  // A currency we cannot price must produce NO ROW. Writing 1.0 "because it is probably close" is
-  // how a dong market cap becomes a dollar one.
-  check(/if \(!isPlausibleRate\(q\.usdPerUnit\)\) \{ implausible\.push/.test(index),
-    'an implausible rate is REJECTED, not corrected or stored')
-  check(!/usd_per_unit: 1[,\s]/.test(index.replace(/currency === 'USD'[\s\S]{0,120}/g, '')),
-    'no currency is silently assigned parity')
-  // The subunit must derive from a rate quoted THIS RUN, not from a stored one — mixing a fresh
-  // subunit with a stale parent under one `as_of` would be a lie about the date.
-  check(/const p = bySymbol\.get\(parent\)/.test(index),
-    'a subunit derives from the parent quoted in the same run')
-  // The last NON-NULL close, because a 5-day window over a weekend has trailing nulls and
-  // `closes.at(-1)` would report "no rate" every Saturday.
-  check(/for \(let i = closes\.length - 1; i >= 0; i--\)/.test(fx),
-    'the rate walks back to the last non-null close, so a weekend is not an outage')
-  // The currency list comes from the TABLE, so a new market needs no deploy.
-  check(/from\('currency'\)\.select\('code'\)/.test(index),
-    'the currency list is read from the table, not hardcoded')
+    `reserve ${reserve}ms`)
 }
 
 // ── THE VENUE OVERRULES THE PROVIDER ON CURRENCY ──────────────────────────────────────────────
@@ -1176,6 +570,25 @@ console.log('\nresource registry — the cron and the function agree')
       for (const m of seed[0].matchAll(/\(\s*\d+,\s*'([a-z][a-z-]+)'\)/g)) cronResources.push(m[1])
     }
   }
+  // RETIREMENT IS NOT ORPHANING, AND THE GUARD COULD NOT TELL THEM APART. A resource moved to
+  // its own job is disabled-and-scheduled; a resource RETIRED by a family cutover is
+  // disabled-and-gone, which is the intent rather than the bug. Without this the ten price and
+  // performance resources failed a check that was working perfectly — and a guard that cries
+  // wolf on correct data is one somebody deletes, taking the real case with it.
+  //
+  // The migration says which it is, in the migration, so the two cannot drift: a retirement
+  // declares `-- RETIRES: <name>` beside the update that disables it. A retired name stays in the
+  // cron seed (its row is disabled, not deleted), so every check below that compares the seed with
+  // the function skips it.
+  const retired = new Set<string>()
+  for await (const sql of migrationSql()) {
+    for (const m of sql.matchAll(/--\s*RETIRES:\s*([a-z][a-z0-9 ,-]*)/g)) {
+      for (const name of m[1].split(',')) {
+        const n = name.trim()
+        if (n) retired.add(n)
+      }
+    }
+  }
   // A RESOURCE REMOVED FROM THE ROTATION MUST HAVE ITS OWN JOB, OR IT SIMPLY STOPS RUNNING.
   // Migration 137 takes the four pure-SQL resources out of the provider-paced rotation
   // (`enabled = false`) because they spend no provider budget — but `enabled = false` and
@@ -1189,23 +602,6 @@ console.log('\nresource registry — the cron and the function agree')
         /update market\.cron_resource set enabled = false[\s\S]*?in \(([^)]*)\)/g,
       )) {
         for (const q of m[1].matchAll(/'([a-z][a-z-]+)'/g)) disabled.add(q[1])
-      }
-    }
-    // RETIREMENT IS NOT ORPHANING, AND THE GUARD COULD NOT TELL THEM APART. A resource moved to
-    // its own job is disabled-and-scheduled; a resource RETIRED by a family cutover is
-    // disabled-and-gone, which is the intent rather than the bug. Without this the ten price and
-    // performance resources failed a check that was working perfectly — and a guard that cries
-    // wolf on correct data is one somebody deletes, taking the real case with it.
-    //
-    // The migration says which it is, in the migration, so the two cannot drift: a retirement
-    // declares `-- RETIRES: <name>` beside the update that disables it.
-    const retired = new Set<string>()
-    for await (const sql of migrationSql()) {
-      for (const m of sql.matchAll(/--\s*RETIRES:\s*([a-z][a-z0-9 ,-]*)/g)) {
-        for (const name of m[1].split(',')) {
-          const n = name.trim()
-          if (n) retired.add(n)
-        }
       }
     }
     const orphaned: string[] = []
@@ -1254,13 +650,11 @@ console.log('\nresource registry — the cron and the function agree')
   cronResources.push('observability-sample')
   check(cronResources.length > 10, 'found the cron resource seed', `${cronResources.length} names`)
 
-  // What the function will accept: `RESOURCES` keys in resources.ts plus the EXTRA allow-list.
-  const resourcesFile = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
-  const figi = await Deno.readTextFile(new URL('./figi.ts', import.meta.url))
-  const declared = new Set<string>([
-    ...[...resourcesFile.matchAll(/^\s{2}'([a-z][a-z-]+)':\s*\{/gm)].map((m) => m[1]),
-    ...[...index.matchAll(/_RESOURCE = '([a-z][a-z-]+)'/g)].map((m) => m[1]),
-  ])
+  // What the function will accept: the EXTRA allow-list. (The `RESOURCES` registry in
+  // resources.ts retired with the performance family.)
+  const declared = new Set<string>(
+    [...index.matchAll(/_RESOURCE = '([a-z][a-z-]+)'/g)].map((m) => m[1]),
+  )
   // `EXTRA` is DERIVED from the TTL map (`Object.keys`), so the allow-list and the TTL table are
   // the same list and cannot drift. Parse the map.
   const extraBlock = index.match(/const EXTRA_TTL_MINUTES: Record<string, number> = \{[\s\S]*?\n  \}/)?.[0] ?? ''
@@ -1303,9 +697,8 @@ console.log('\nresource registry — the cron and the function agree')
   // The incremental backlogs specifically. A backlog resource drains a slice per run, so anything
   // longer than the cron interval stalls it for the length of the TTL rather than slowing it.
   const mustBeBacklog = [
-    'SEC_PRICES_RESOURCE', 'YAHOO_SYMBOL_RESOURCE', 'ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE',
-    'FUNDAMENTALS_RESOURCE', 'INDUSTRY_RESOURCE', 'SEC_PROFILE_RESOURCE', 'SEC_PERF_RESOURCE',
-    'LOCAL_SYM_RESOURCE', 'LISTINGS_RESOURCE',
+    'ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE', 'FUNDAMENTALS_RESOURCE', 'INDUSTRY_RESOURCE',
+    'SEC_PROFILE_RESOURCE',
   ]
   const wrongTtl = mustBeBacklog.filter((c) =>
     !ttlKeys.some(([, key, ttl]) => key === c && ttl === 'BACKLOG_TTL_MINUTES'))
@@ -1400,11 +793,6 @@ console.log('\nresource registry — the cron and the function agree')
     // deliberately different units and named so.
     PRICE_TARGETS_RESOURCE: [],
     METRICS_RESOURCE: [],
-    PRICE_HISTORY_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above. The deep daily
-    // backfill counts BARS in `written` and SECURITIES in `securities`, deliberately
-    // separately: ~7,300 rows per security makes a bar count useless as progress.
-    DAILY_HISTORY_RESOURCE: [],
     // A SWEEP, NOT A BACKLOG: `remaining` is DAYS still to walk, computed from the cursor
     // against its floor. `walkedTo` and `stopAt` are the only identifiers involved, and
     // the units are days rather than securities — which is exactly why this list exists.
@@ -1412,17 +800,11 @@ console.log('\nresource registry — the cron and the function agree')
     XBRL_RESOURCE: [],
     SHARE_STATS_RESOURCE: [],
     NEWS_RESOURCE: [],
-    SYMBOL_REPAIR_RESOURCE: [],
     // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
     // `security_id` alone, so one row is one security.
     FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
-    LOCAL_SYM_RESOURCE: ['addressable', 'resolvedCount', 'unresolved'],
-    SEC_PRICES_RESOURCE: ['wanted', 'securitiesPriced', 'emptySeries'],
-    YAHOO_SYMBOL_RESOURCE: ['wanted', 'resolved', 'unresolved', 'failed'],
     INDUSTRY_RESOURCE: ['wanted', 'classifiedSecurities', 'noIndustry'],
     SEC_PROFILE_RESOURCE: ['wanted', 'classifiedSecurities', 'unmapped', 'noProfile'],
-    SEC_PERF_RESOURCE: ['symbols', 'symbolsCovered'],
-    TICKERS_RESOURCE: ['wanted', 'resolvedCount', 'unresolved'],
   }
   const idxLines = index.split('\n')
   const resourceAt = (line: number): string | null => {
@@ -1536,15 +918,6 @@ console.log('\nresource registry — the cron and the function agree')
     'every declared resource was actually checked — the list has not rotted',
     `${checkedExpressions} expressions vs ${Object.keys(REMAINING_MAY_USE).length} declared`)
 
-  // ── THE SWEEP READS THE TYPE FIELD FROM THE TABLE ──────────────────────────────────────────
-  //
-  // Migration 69 gives `exchange_sweep_type` a `figi_field` column so ETFs can be swept on
-  // OpenFIGI's FINE type (`securityType: 'ETP'`, 6,664 US rows) rather than its coarse bucket
-  // (`securityType2: 'Mutual Fund'`, 44,119 rows of open-end funds, over the paging ceiling).
-  // A column the function never reads is inert — exactly what happened to `provider_country_iso2`
-  // in migration 56, which shipped correct, was written correctly, and sat at 0 rows because the
-  // backlog that drives it could not reach the population that needed it. The SQL test asserts the
-  // row; this asserts the code actually uses it.
   // ── TWO WRITERS TO ONE TABLE MUST NOT DISAGREE ABOUT ITS KEY ────────────────────────────────
   //
   // `security_segment` is written by the SEC path and the DART path. The Korean one shipped with
@@ -1576,89 +949,7 @@ console.log('\nresource registry — the cron and the function agree')
       distinct[0] ?? '(none found)')
   }
 
-  check(index.includes('figi_field'),
-    'the sweep reads figi_field from exchange_sweep_type')
-  check(/figiTypeField,/.test(index) || /figiTypeField:/.test(index),
-    'the sweep passes the type field through to listExchange')
-  const figiSrc = await Deno.readTextFile(new URL('./figi.ts', import.meta.url))
-  check(/\[opts\.figiTypeField \?\? 'securityType2'\]/.test(figiSrc),
-    'listExchange sends the type filter under the field it was told to use',
-    'without this the ETP filter silently goes out as securityType2 and returns mutual funds')
-
-  // ── AND IT MUST RECORD WHICH KIND OF THING IT FOUND ───────────────────────────────────────
-  //
-  // Filtering on the fine type while STORING the coarse one is not a half-fix, it is a silent
-  // mislabel: the first ETP sweep wrote 1,013 correct Amsterdam listings — ISHARES FTSE ALL WORLD
-  // ETF, VANGUARD FTSE GLB AL-CAP ETF — every one of them recorded as `Mutual Fund`, which is a
-  // different instrument that is not exchange-traded. `security_type = 'ETP'` returned 0 rows
-  // while 864 of them sat there. The resource reported `written: 1013, complete: true` and was
-  // telling the truth.
-  check(/securityTypeDetail: r\.securityType \?/.test(figiSrc),
-    'listExchange captures the FINE securityType, not only the coarse securityType2')
-  check(/figi_security_type: l\.securityTypeDetail/.test(index),
-    'the sweep stores the fine type, so a fund is identifiable as one')
-
-  // ── THE SWEEP'S BUDGETS MUST ACTUALLY BIND ────────────────────────────────────────────────
-  //
-  // `exchange-listings` now sweeps many venues per invocation instead of one, because one slice
-  // per cron run is a 35-DAY full catalogue pass (59 venues x 3 instrument types, plus 36
-  // letter-partitions x 3 for the venue over the paging ceiling = 282 slices, at 8 runs a day).
-  //
-  // Two budgets bound it and BOTH have a way of being decorative:
-  //
-  //  - the REQUEST budget is meaningless unless `requestsUsed` is actually incremented by the
-  //    pages each venue consumed. A counter that never moves is a limit that never binds.
-  //  - the TIME budget must refuse to START a venue that cannot finish, not merely check that the
-  //    deadline has not yet passed. That distinction is the difference between stopping cleanly
-  //    and a killed worker: `security-performance` runs at 89s of its 90s limit precisely because
-  //    its deadline gates whether to start a BATCH while that batch's tail is unbounded.
-  // BY REQUESTS, NOT BY PAGES — the first version of this budget used `pages` and undercounted by
-  // roughly half. `pages` is incremented by the for-update clause in `listExchange`, so a venue
-  // that answers in ONE request and breaks out reports `pages: 0`. Measured on the first
-  // multi-venue sweep: nine of ten venues reported `pages: 0` while writing rows, and the run
-  // counted 11 requests against ~21 actually made. A rate-limit budget that undercounts by half is
-  // not a budget, and it would have overrun OpenFIGI's 250/min silently.
-  check(/requestsUsed \+= requests/.test(index),
-    'the sweep budgets by REQUESTS MADE, not by pages (a one-request venue reports pages: 0)')
-  check(/requests\+\+;\s*\n\s*const res = await fetch/.test(figiSrc),
-    'listExchange counts a request at the fetch itself, where it cannot be missed')
-
-  // ── AND THE BUDGET MUST BE SIZED AGAINST THE RIGHT ENDPOINT'S LIMIT ────────────────────────
-  //
-  // This is a VALUE check, deliberately, because the two guards above are SHAPE checks and
-  // neither could see the defect they sat next to. The budget counted the right quantity, in the
-  // right place, incremented correctly — against a ceiling that was wrong by 7.5x.
-  //
-  // The widely-quoted "250 requests/minute with an API key" is `/v3/mapping`. This resource calls
-  // `/v3/filter`, whose keyed allowance was measured 2026-08-18 as **20 per minute** (20
-  // consecutive 200s, first 429 on request 21 — matching the sweep, which reported
-  // `requestsUsed: 21` and stopped with `openfigi throttled`).
-  //
-  // A budget above that ceiling can never bind before the provider does, which makes it
-  // decorative in the most convincing possible way: it is counted, reported, and useless.
-  const OPENFIGI_FILTER_LIMIT_PER_MIN = 20
-  const budget = Number(index.match(/const REQUEST_BUDGET = (\d+)/)?.[1] ?? NaN)
-  check(Number.isFinite(budget) && budget <= OPENFIGI_FILTER_LIMIT_PER_MIN,
-    'the sweep request budget is at or below the MEASURED /v3/filter limit',
-    `REQUEST_BUDGET = ${budget}, measured ceiling = ${OPENFIGI_FILTER_LIMIT_PER_MIN}/min`)
-  // Anchored on the WHILE CONDITION, not on the string appearing anywhere. The first version of
-  // this check searched the whole file and passed while broken, because
-  // `SWEEP_DEADLINE - VENUE_RESERVE_MS` also appears in the `stoppedBecause` expression a few
-  // lines below — so weakening the actual loop guard changed nothing it could see.
-  // SLICED TO THE SWEEP'S OWN HANDLER FIRST. This used to match the FIRST `while (Date.now()...)`
-  // in the whole file, which was the sweep's only by accident of ordering — adding a paged loop to
-  // `security-metrics` above it made this guard start reading the wrong loop and fail for a reason
-  // unrelated to what it tests. Same defect the comment above describes, one level up: anchoring on
-  // a pattern is not anchoring on the thing.
-  const sweepBody = index.slice(index.indexOf('resource === LISTINGS_RESOURCE'))
-  const sweepWhile = sweepBody.match(/while \(\s*\n?\s*Date\.now\(\)[^)]*?\)\s*\{/s)?.[0] ?? ''
-  check(/SWEEP_DEADLINE - VENUE_RESERVE_MS/.test(sweepWhile),
-    'the sweep refuses to START a venue it cannot finish, rather than only checking the deadline',
-    sweepWhile ? `condition: ${sweepWhile.replace(/\s+/g, ' ').slice(0, 90)}` : 'no while loop found')
-  check(/stoppedBecause/.test(index),
-    'a sweep that stops early says why — throttled, out of requests, or out of time')
-
-  const unreachable = cronResources.filter((r) => !accepted.has(r))
+  const unreachable = cronResources.filter((r) => !accepted.has(r) && !retired.has(r))
   check(unreachable.length === 0,
     'every resource the warm-up calls is accepted by the function',
     unreachable.length ? `unreachable: ${unreachable.join(', ')}` : '')
@@ -1677,65 +968,13 @@ console.log('\nresource registry — the cron and the function agree')
   // migration 56: the failure is an ABSENCE, and absences do not raise.
   //
   // On-demand resources are named explicitly rather than pattern-matched, so adding one is a
-  // deliberate act. `security-refresh` fires when a user opens a stock page; `promote-listing` when
-  // an admin pulls a named ticker into the universe. Neither has a backlog to drain, so neither
-  // belongs on a timer — everything else does.
-  const ON_DEMAND = new Set(['security-refresh', 'promote-listing'])
+  // deliberate act. `security-refresh` fires when a user opens a stock page; it has no backlog to
+  // drain, so it does not belong on a timer — everything else does.
+  const ON_DEMAND = new Set(['security-refresh'])
   const unscheduled = [...accepted].filter((r) => !ON_DEMAND.has(r) && !cronResources.includes(r))
   check(unscheduled.length === 0,
     'every backlog resource is actually SCHEDULED, not merely reachable',
     unscheduled.length ? `absent from market.cron_resource: ${unscheduled.join(', ')}` : '')
-
-  // A REFUSED SWEEP MUST NOT READ AS A FINISHED ONE, and a run that produced nothing must not
-  // overwrite what earlier runs recorded. Both were true of `exchange-listings` until 2026-08-14:
-  // OpenFIGI answered 429 on the first page, `listExchange` broke out silently, and the resource
-  // returned `written: 0, pages: 0, complete: false` with `ok: true` — while writing that zero over
-  // Japan's recorded 1,800.
-  //
-  // Asserted on the source because there is no way to reach it behaviourally: it needs OpenFIGI to
-  // rate-limit us on demand.
-  check(/if \(res\.status === 429\) \{ throttled = true; break; \}/.test(figi),
-    'listExchange REPORTS a 429 rather than breaking silently',
-    'throttled = true on 429')
-  check(index.includes('...(written > 0 ? { listings: written } : {})'),
-    'a run that wrote nothing does not reset the venue count',
-    'listings written only when written > 0')
-  check(index.includes('throttled: figiThrottled'),
-    'the sweep response distinguishes refused from exhausted',
-    'throttled is reported')
-}
-
-// ── incremental price fetching ───────────────────────────────────────────────
-// The provider takes ONE start_date per request, so a batch costs whatever its furthest-behind
-// member needs. Mixing a never-priced security with a day-stale one makes the whole batch fetch 400
-// days — which would defeat the point of storing the series at all.
-console.log('\nplanPriceFetches — a daily refresh should ask for a day')
-{
-  const now = new Date('2026-08-12T00:00:00Z')
-  const plans = planPriceFetches([
-    { symbol: 'NEW1', fetchSymbol: 'NEW1', lastDate: null },
-    { symbol: 'FRESH', fetchSymbol: 'FRESH.ST', lastDate: '2026-08-11' },
-    { symbol: 'STALE', fetchSymbol: 'STALE', lastDate: '2026-08-01' },
-  ], now, 10)
-  const fullPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'NEW1'))
-  const incPlan = plans.find((p) => p.symbols.some((s) => s.symbol === 'FRESH'))
-  check(fullPlan?.startDate.startsWith('2025-') === true,
-    'a never-priced security gets the full window',
-    fullPlan?.startDate)
-  check(incPlan !== undefined && incPlan !== fullPlan,
-    'it does NOT drag the incremental ones into a 400-day fetch')
-  check(incPlan?.startDate === '2026-08-01',
-    'an incremental batch starts at its OLDEST member, not the newest', incPlan?.startDate)
-  check(incPlan?.symbols.find((s) => s.symbol === 'FRESH')?.fetchSymbol === 'FRESH.ST',
-    'the FETCH symbol is carried separately from the display symbol')
-
-  // A gap wider than the window cannot be closed by appending.
-  const ancient = planPriceFetches(
-    [{ symbol: 'OLD', fetchSymbol: 'OLD', lastDate: '2019-01-01' }], now, 10)
-  check(ancient[0].startDate.startsWith('2025-'),
-    'a gap wider than the window refetches the whole window rather than leaving a hole')
-
-  check(planPriceFetches([], now, 10).length === 0, 'an empty backlog plans nothing')
 }
 
 // ── extractMacroPoints — five providers, five shapes, none of them agree ─────
@@ -1801,40 +1040,6 @@ console.log('\nextractMacroPoints — junk is dropped, not coerced')
   check(extractMacroPoints([{ date: '2026-01-01', note: 'n/a' }], 'x').length === 0, 'a row with no numeric value is dropped')
   check(extractMacroPoints([{ date: '2026-01-01', value: 'abc' }], 'x').length === 0, 'a non-finite value is dropped')
   check(extractMacroPoints([], 'x').length === 0, 'an empty response yields no points')
-}
-
-
-// ── promote-wave — a bounded, deduped drain ──────────────────────────────────
-//
-// Source checks rather than behavioural ones, because this resource CREATES SECURITIES and every
-// one it creates becomes work for five rate-limited backlogs. The two properties that matter are
-// both silent when broken: a cap that does not bind, and a wave that mints one company twice.
-console.log('\npromote-wave — spending a fixed provider budget')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const fn = idx.slice(idx.indexOf("resource === PROMOTE_WAVE_RESOURCE"))
-  const body = fn.slice(0, fn.indexOf('if (resource === MACRO_RESOURCE)'))
-
-  check(
-    /Math\.min\(scopeLimit \?\? \d+, 100\)/.test(body),
-    'the wave is capped at 100 REGARDLESS of `limit` — scopeLimit alone clamps to 1000, which is the right ceiling for READING a backlog and the wrong one for creating securities',
-  )
-  check(
-    body.includes('seen.has(k)') && body.includes('toUpperCase()'),
-    'the wave dedupes by NAME within itself — pending_promotion excludes names we already hold, but not a name appearing twice in one wave (the London and Frankfurt lines of one new company)',
-  )
-  check(
-    body.includes('dedupeBy(identifiers'),
-    'identifiers go through dedupeBy — one ticker on two venues in a single wave carries the same key twice and fails the WHOLE statement with 21000',
-  )
-  check(
-    body.indexOf("from('security_identifier')") > body.indexOf("from('security')"),
-    'the FIGI is written AFTER the security and before anything else — it is what stops these listings being offered as untracked again, so a partial failure leaves the wave promoted rather than duplicated next run',
-  )
-  check(
-    body.includes('every venue is opt-out by default'),
-    'an empty queue says WHY rather than reporting a bare zero — with 92,826 candidates, "promoted 0" is otherwise indistinguishable from a broken resource',
-  )
 }
 
 
@@ -2033,85 +1238,15 @@ console.log('\nevery source_code written by a function is seeded by a migration'
 }
 
 
-// ── the price prune must not eat twenty years of history ─────────────────────────────────────
-//
-// `security-prices` bounds its rolling window by deleting everything below a 400-day cutoff. With
-// a weekly series in the same table that delete destroys the entire backfill the first time the
-// resource touches a security — no error, no count, nothing in `refresh_log`, just a chart that
-// shortens back to 400 days and reads as "the backfill never ran".
-console.log('\nthe daily prune leaves weekly history alone')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  // SEC_PRICES_RESOURCE — `security-prices`, the fund-derived series. `PRICES_RESOURCE` is the
-  // 47-row curated instrument one, which has no weekly series and no backfill to destroy.
-  // Bounded by the NEXT resource block, not by the first `finish_refresh` — this handler has an
-  // early return that calls it, so cutting there put the prune outside the window entirely and
-  // two guards failed for a reason unrelated to what they test.
-  const seg = idx.slice(idx.indexOf('resource === SEC_PRICES_RESOURCE'))
-  const nextBlock = seg.indexOf('if (resource ===', 10)
-  const body = (nextBlock > 0 ? seg.slice(0, nextBlock) : seg).replace(/\/\/[^\n]*/g, '')
-
-  const del = body.slice(body.indexOf(".from('security_price')\n            .delete()"))
-  check(
-    del.length > 0 && /\.eq\('grain', 'daily'\)/.test(del.slice(0, 400)),
-    "the window prune is qualified by grain — an unqualified delete below the daily cutoff wipes the 20-year weekly series, silently",
-  )
-  check(
-    !/onConflict: 'security_id,date'/.test(body),
-    'no price upsert still names the two-column conflict target — `grain` joined the primary key, and the old target matches no constraint',
-  )
-  // BOTH WRITERS, counted. `security-prices` writes daily bars twice — once for the batch and
-  // once for the per-symbol isolation retry — and a single-match test was satisfied by either, so
-  // deleting one passed clean. Same weakness the statements currency guard had.
-  const dailyWriters = (body.match(/grain: 'daily'/g) ?? []).length
-  check(
-    dailyWriters >= 2,
-    `both the batch and the isolation write declare grain: 'daily' (found ${dailyWriters}) — a row that relies on the column default is fine today and ambiguous the moment the default changes`,
-  )
-}
-
-// ── the backfill marks only what the provider actually refused ───────────────────────────────
-console.log('\nsecurity-price-history')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const seg = idx.slice(idx.indexOf('resource === PRICE_HISTORY_RESOURCE'))
-  const body = seg.slice(0, seg.indexOf('resource === METRICS_RESOURCE'))
-    .replace(/\/\/[^\n]*/g, '')
-
-  check(/interval=1W/.test(body), 'the backfill asks for WEEKLY bars — 20 years daily is 5,190 bars a security')
-  check(
-    /start_date=\$\{start\}/.test(body) && /PRICE_HISTORY_YEARS/.test(body),
-    'the depth comes from the PRICE_HISTORY_YEARS constant, because it is a disk budget rather than a preference',
-  )
-  check(
-    /grain: 'weekly'/.test(body),
-    'the backfill writes weekly-grained rows, or the prune will treat them as a stale daily window',
-  )
-  // PER BATCH, NOT PER RUN. Observed live: a run reported `noHistory: 13` beside
-  // `Signal timed out`, because a run-wide success flag says "if any of the 40 answered, blame
-  // the rest" — and yfinance throttles PROGRESSIVELY, omitting symbols from a 200 rather than
-  // erroring, so a partly-served batch is indistinguishable from a healthy one.
-  check(
-    /const batchClean = !isolated\.error && rows\.length > 0/.test(body),
-    'the marking gate is computed PER BATCH from that batch\'s own outcome, not from a run-wide tally',
-  )
-  check(
-    /if \(!batchClean && !deadSymbols\.has\(/.test(body),
-    'a symbol is skipped unless its batch answered cleanly OR isolation asked it alone and it failed — the next run costs one request, a false mark costs 30 days',
-  )
-  check(
-    /fetchWithIsolation/.test(body),
-    'a batch failure is isolated rather than blamed on every symbol in it',
-  )
-}
-
 
 // ── security-share-stats ─────────────────────────────────────────────────────────────────────
 console.log('\nsecurity-share-stats')
 {
   const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   const seg = idx.slice(idx.indexOf('resource === SHARE_STATS_RESOURCE'))
-  const body = seg.slice(0, seg.indexOf('resource === CIK_RESOURCE')).replace(/\/\/[^\n]*/g, '')
+  // Bounded by the NEXT handler, whichever it is, so deleting a neighbour cannot stretch the
+  // window over the rest of the file.
+  const body = seg.slice(0, seg.indexOf('\n    if (resource === ', 1)).replace(/\/\/[^\n]*/g, '')
 
   check(
     /share_statistics/.test(body) && /estimates\/consensus/.test(body),
@@ -2211,35 +1346,6 @@ console.log('\nmigration filenames sort numerically')
 }
 
 
-// ── security-symbol-repair ───────────────────────────────────────────────────────────────────
-console.log('\nsecurity-symbol-repair')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const seg = idx.slice(idx.indexOf('resource === SYMBOL_REPAIR_RESOURCE'))
-  const body = seg.slice(0, seg.indexOf('resource === NEWS_RESOURCE')).replace(/\/\/[^\n]*/g, '')
-
-  check(
-    /if \(rows\.length > 0\) \{ adopted = candidate; break \}/.test(body),
-    'a candidate is adopted ONLY when the provider answers — the rules match company names as well as class shares, so silence is the provider saying the spelling is wrong',
-  )
-  check(
-    /clear_symbol_caches/.test(body),
-    'a corrected symbol clears every symbol-keyed cache — fixing the spelling and leaving the marks set keeps the security excluded for 30 days by the flags that recorded the wrong name',
-  )
-  check(
-    /symbol_repair_at/.test(body) && (body.match(/symbol_repair_at/g) ?? []).length >= 2,
-    'the attempt is stamped whether or not a repair was found, in BOTH exits — otherwise a security whose spelling is already right is re-examined every run for ever',
-  )
-  check(
-    /encodeURIComponent\(candidate\)/.test(body),
-    'the candidate is URL-encoded — these symbols contain the characters that make an unencoded one truncate the query silently',
-  )
-  check(
-    /if \(throttled\(msg\)\) \{ failed\+\+; break \}/.test(body),
-    'a throttle stops the probing rather than concluding every remaining spelling is wrong',
-  )
-}
-
 
 // ── THE EPS SURPRISE UNIT IS DECIDED IN ONE PLACE, AND THE SOURCE DECIDES IT ───────────────────
 //
@@ -2260,10 +1366,10 @@ console.log('\nsecurity-symbol-repair')
 // this as inferred-but-unverified; it is now arithmetic against a known beat.
 {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const fx = await Deno.readTextFile(new URL('./fx.ts', import.meta.url))
-  check(/surprisePct:\s*num\(r\.surprisePercentage\)/.test(fx),
+  const av = await Deno.readTextFile(new URL('./alpha-vantage.ts', import.meta.url))
+  check(/surprisePct:\s*num\(r\.surprisePercentage\)/.test(av),
     'the surprise percent is read from the raw provider field',
-    'fx.ts must map `surprisePercentage`, not the wrapper\'s `surprise_percent`')
+    'alpha-vantage.ts must map `surprisePercentage`, not the wrapper\'s `surprise_percent`')
   check(/surprise_pct:\s*q\.surprisePct,/.test(src) && !/q\.surprisePct\s*\*\s*100/.test(src),
     'the raw provider percent is stored unscaled — it is already a percent',
     'multiplying would report a 12.59% beat as 1,259%')
@@ -2275,9 +1381,9 @@ console.log('\nsecurity-symbol-repair')
   // `symbol` and `annualEarnings` behind, so it can never be mistaken for a symbol the provider
   // does not carry. Pinned on the KEY COUNT specifically: relaxing it to "no quarterlyEarnings"
   // would let a renamed field mark every security in the page as uncovered.
-  check(/Object\.keys\(body\)\.length === 0/.test(fx) && /notCovered: true/.test(fx),
+  check(/Object\.keys\(body\)\.length === 0/.test(av) && /notCovered: true/.test(av),
     'an empty provider body is classified as "does not carry this symbol", by key count',
-    'fx.ts must distinguish a zero-key body from a shape it did not expect')
+    'alpha-vantage.ts must distinguish a zero-key body from a shape it did not expect')
 
   // And the caller may mark ONLY on that flag. The backlog is ordered by fund weight, so a symbol
   // the provider cannot answer sits at the head and is re-asked every run until something records

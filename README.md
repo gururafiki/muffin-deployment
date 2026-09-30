@@ -253,15 +253,13 @@ the `market` schema failed before `02` created it. The playbook now pipes the gl
 | `08-instrument-prices.sql` | `market.prices` — daily closes (~400-day window) behind the stock-page chart |
 | `09-market-rls.sql` | **RLS on every `market` table** — public read policy, writes service-role only |
 
-Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`):
-`sector-performance` (30 min) · `country-performance` (60 min) · `instrument-performance`
-(60 min) · `instrument-profile` (24 h — the only one that writes `market.instruments`
-rather than `market.performance`, and the only one restricted to `asset_type = 'equity'`,
-since an ETF or a coin has no sector to fetch).
-
-Plus `instrument-prices` (24 h) — the daily closes the chart draws. It reuses the same batched
-history the performance refresh already downloads, bounded to ~400 calendar days (~280 bars),
-which is what 1M/3M/6M/1Y need; the 3Y/5Y *numbers* still come from `market.performance`.
+Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`): the table
+under [The resources](#the-resources). `instrument-profile` (1 week) is the one that writes
+`market.instruments`, restricted to `asset_type = 'equity'`, since an ETF or a coin has no sector to
+fetch. The performance and price resources that were listed here (`sector-`, `country-`,
+`instrument-performance`, `instrument-prices`) moved to Dagster with the price family: returns are
+`market.performance` (a view over `security_return` and `index_return`) and the chart reads
+`market.price_series` (over `price_bar`).
 
 **Forcing a refresh.** `begin_refresh` skips while data is inside its TTL, which is correct but
 gets in the way when the data is fresh and *wrong*. Pass `force` — **service-role only**, since
@@ -543,26 +541,25 @@ venues.
 | Resource | Writes | Upstream | TTL |
 |---|---|---|---|
 | `instrument-profile` | `instruments` sector/industry/cap | yfinance | 1 week |
-| `fund-holdings` | `security`, `issuer`, `fund_holding` | **SEC EDGAR** | 1 month |
-| `derive-classifications` | `security_taxonomy`, country | none — a SQL join | 1 month |
-| `security-tickers` | ticker identifiers | **OpenFIGI** | 1 day |
-| `security-local-symbols` | `security_provider_symbol` (local lines) | **OpenFIGI** | 1 day |
-| `security-yahoo-symbols` | `security_provider_symbol`, `listing` | **Yahoo search, by ISIN** | 1 day |
+| `derive-classifications` | `security_taxonomy`, country | none — a SQL join | 12 hours |
 | `security-profiles` | `security_taxonomy` (sector) | yfinance | 1 day |
 | `security-industries` | `taxonomy_node` level 2, `security.market_cap` | yfinance | 1 day |
 | `security-fundamentals` | `security_fundamentals` | yfinance | 1 week |
 | `security-statements` | `security_statement` | yfinance | 1 week |
-| `exchange-listings` | `exchange_listing` (venue sweep) | **OpenFIGI** | 1 month |
 | `security-refresh` | one security on demand: market cap, fundamentals, statements | yfinance | none |
-| `promote-listing` | promotes an untracked listing | none | none |
 
-**Retired by the D2 cutover (2026-09-12).** Prices, returns and FX moved to Dagster (`muffin-ingest`),
-and `market.performance` became a view over `security_return` and `index_return`. The rotation rows
-are disabled, and since 2026-09-25 the function also refuses a direct call with **410** and the lane
-that replaced it — before the admin gate, so the answer does not depend on who asks. Until then an
-admin's call still reached the old handlers, and `fx-rates` would have written `market.fx_rate`
-beside the lane that owns it. `logic-check.ts` holds this list equal to the migrations'
-`-- RETIRES:` markers.
+The table lists the main ones; the function's `EXTRA_TTL_MINUTES` map is the complete list, with
+each resource's TTL.
+
+**Retired: the price family (D2, 2026-09-12) and the universe family (2026-09-26).** Prices,
+returns and FX moved to Dagster (`muffin-ingest`), and `market.performance` became a view over
+`security_return` and `index_return`; fund holdings, the venue directory, symbology and the CIK and
+NSE registries followed. The rotation rows are disabled, and the function refuses a direct call with
+**410** and the lane that replaced it — before the admin gate, so the answer does not depend on who
+asks. Until 2026-09-25 an admin's call still reached the old handlers, and `fx-rates` would have
+written `market.fx_rate` beside the lane that owns it. The handlers themselves, their helper modules
+and their ten `pending_*` views were deleted on 2026-09-30 (Phase 3, stage 1c). `logic-check.ts`
+holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 
 | Retired | Now |
 |---|---|
@@ -571,6 +568,11 @@ beside the lane that owns it. `logic-check.ts` holds this list equal to the migr
 | `security-performance`, `instrument-performance` | Dagster `security_return` — read `market.performance` |
 | `sector-performance`, `country-performance`, `group-performance` | Dagster `daily_indices` (`index_return`) — read `market.performance` |
 | `fx-rates` | Dagster `daily_fx` — read `market.fx_rate` |
+| `fund-holdings` | Dagster N-PORT discovery (`fund_holding`, `discovered_security`) — read `market.fund_holdings` |
+| `exchange-listings` | Dagster venue sweep (`venue_listing`) — read `market.untracked_listing` |
+| `security-tickers`, `security-local-symbols`, `security-yahoo-symbols`, `security-symbol-repair` | Dagster symbology ladder (`security_symbology`) |
+| `promote-wave`, `promote-listing` | the `market.promote_listing` RPC, which the Track button calls; waves move to Dagster (Phase 3, stage 4) |
+| `sec-cik-map`, `in-symbols` | Dagster registries (`security_cik`, `security_nse_filer`) |
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both
@@ -625,14 +627,14 @@ control is not rendered at all.
 ```bash
 # Any resource, from the node (respects the TTL). The rotation calls this same path:
 docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)" \
-  psql -U postgres -c "select market.cron_post('fund-holdings')"
+  psql -U postgres -c "select market.cron_post('security-statements')"
 
 # Directly, with `force` to bypass the TTL — SERVICE-ROLE ONLY, because the anon key is public
 # and a public cache-buster is a free way to hammer the provider:
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"resource":"fund-holdings","fund":"XLE","force":true}'
+  -d '{"resource":"security-statements","force":true}'
 ```
 
 `force` clears the TTL and the error backoff but **not** the in-flight lock, so concurrent forced
@@ -645,13 +647,17 @@ refreshes still collapse into one upstream fetch.
 1. Insert a row in Studio: `symbol`, `name`, `kind` (`sector` / `country` / `group` / `other`),
    and `represents_code` — the `market.sectors` id for a sector fund, the ISO-2 for a country one.
    Leave it null and the fund contributes holdings but classifies nothing.
-2. `{"resource":"fund-holdings","fund":"<SYMBOL>","force":true}` — seconds, not the monthly pass.
+2. Nothing to call. Dagster's `new_nport_filings` sensor finds the fund's newest filing (EDGAR
+   full-text search by series; a new fund's CIK and series come from SEC's daily directory) and
+   adds a partition. `raw_nport_filing` fetches it at once, and `discovered_security` and
+   `fund_holding` follow in the same run. The symbology ladder then resolves the ISINs it
+   introduced.
 3. `{"resource":"derive-classifications","force":true}` — turns the new holdings into sector and
-   country membership.
-4. `{"resource":"security-tickers","force":true}` — resolves ISINs the new fund introduced.
+   country membership now rather than at the next daily run.
 
-To make a country drillable in the UI it also needs `market.countries.etf_symbol` set, which is
-what `country-performance` reads.
+To make a country drillable in the UI it also needs `market.countries.etf_symbol` set: the Dagster
+`daily_indices` lane reads it as that country's proxy, for each country with a `market.index_scope`
+row.
 
 Retire a fund with `enabled = false` — its holdings history is kept. `notes` is respected by the
 migrations, so a hand edit is never reverted by a redeploy.
@@ -662,8 +668,9 @@ migrations, so a hand edit is never reverted by a redeploy.
   security has no sector and a sector page filtered to a non-US country is empty.
 - **Per-security % change covers only the 35 curated symbols**, so most constituents show no number.
 - **Market cap and fundamentals are absent** — FMP's free tier gates them per SYMBOL.
-- **`sector-performance` is finviz and US-listed only.** Do not present it as global, and do not
-  present it on a country page as if it were that country's.
+- **Sector returns are US-listed only** (finviz sector groups, now read by Dagster's
+  `daily_indices`). Do not present them as global, and do not present them on a country page as if
+  they were that country's.
 - **Only US-registered funds file N-PORT**, so non-US UCITS funds cannot be tracked at all.
 - Full list, with what each would take: the umbrella `todos.md`.
 

@@ -65,11 +65,13 @@ the total untouched. `market-verify` has a separate equity floor for exactly thi
 ## Backlog depth
 
 ```bash
-for v in pending_yahoo_symbol pending_local_symbol pending_profile pending_industry \
-         pending_prices pending_performance pending_fundamentals pending_statements; do
+for v in pending_profile pending_industry pending_fundamentals pending_statements; do
   printf '%-24s %s\n' "$v" "$(cnt "$v?select=security_id&limit=1")"   # needs SERVICE_ROLE, not anon
 done
 ```
+
+Symbols, prices and returns have no `pending_*` view any more: the Dagster lanes own them, and their
+state is partitions and asset checks (`muffin-dagster-operations`).
 
 **Zero is only good news if it got there by working.** A backlog empties either by fetching the data
 or by marking securities unanswerable, and the counts look identical. Cross-check:
