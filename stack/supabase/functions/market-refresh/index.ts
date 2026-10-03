@@ -497,7 +497,12 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // list. NOT a reference-length TTL: this resource does not fetch anything, it rebuilds from
     // rows the other resources already wrote, so the cost of running it often is ~2s of database
     // time and no provider quota at all.
-    [FACETS_RESOURCE]: 60,
+    //
+    // FIFTY MINUTES ON AN HOURLY CRON, NOT SIXTY. At sixty the TTL equalled the interval, a coin
+    // flip on jitter: measured 2026-10-03, the runs alternated, 13:14 skipped `fresh or in
+    // flight`, 14:14 refreshed, 15:14 skipped, so the spine refreshed every two hours while every
+    // run recorded ok.
+    [FACETS_RESOURCE]: 50,
     // Macro series move on a MONTHLY-to-DAILY cadence depending on the series (CPI monthly, EFFR
     // daily), and the resource re-reads all of them in one pass. Six hours is well inside the
     // slowest series' publication rhythm and far outside any provider's patience.
@@ -882,38 +887,16 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       if (!Number.isFinite(rows) || rows === 0) {
         throw new Error('refresh_facets returned 0 rows — the filter spine would serve an empty universe')
       }
-      // A SECOND RPC, NOT A THIRD STATEMENT INSIDE refresh_facets. A PostgREST RPC is ONE
-      // statement under the role's 8-second timeout, and `refresh_segment_spine` measured
-      // 7,242 ms at 1.92M qualifying rows — folding it in would take the combined call over the
-      // limit and kill the screener's spine along with the segment one. Its own request gets its
-      // own budget.
-      //
-      // `duration_ms` is reported rather than discarded: it is the only warning that this refresh
-      // is walking toward the 8s ceiling as the segment table grows, and `refresh_run` keeps the
-      // history. A number computed and thrown away is the fourth instance of that here.
-      let segmentSpineRows: number | null = null
-      let segmentSpineMs: number | null = null
-      let segmentSpineError: string | null = null
-      const { data: spine, error: spineErr } = await market.rpc('refresh_segment_spine')
-      if (spineErr) {
-        // NOT FATAL, and deliberately so: the filter spine above is what the Markets tab and the
-        // screener read, and it has already refreshed successfully. Failing the whole resource
-        // here would trade a stale segment dashboard for a stale universe.
-        segmentSpineError = spineErr.message.slice(0, 200)
-      } else {
-        const sRow = Array.isArray(spine) ? spine[0] : spine
-        segmentSpineRows = Number(sRow?.rows_refreshed ?? 0)
-        segmentSpineMs = Number(sRow?.duration_ms ?? 0)
-      }
-
+      // THE SEGMENT SPINE IS NOT REFRESHED HERE. As its own RPC it was one statement under the
+      // PostgREST role's 8 s ceiling, and it crossed it as `security_segment` grew: last success
+      // 2026-09-23 at 7,992 ms, then 148 timeouts in a row while this resource recorded ok. It runs
+      // from the pg_cron job `muffin-segment-spine` (:16) as `postgres`, and records its own
+      // duration in `universe_sample` (migration 20261003190000).
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
         rows_refreshed: rows,
         refreshed_at: row?.refreshed_at ?? null,
-        segment_spine_rows: segmentSpineRows,
-        segment_spine_ms: segmentSpineMs,
-        segment_spine_error: segmentSpineError,
       })
     }
 
