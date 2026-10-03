@@ -58,6 +58,11 @@ gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f ac
 - **Poll `gh run view <id> --json status` rather than piping `gh run watch` into `--log`.** On
   2026-09-24 that pipeline was still waiting ten minutes after a roll that had finished in ninety
   seconds; which half hung was not established. The polling loop returned as soon as the run did.
+- **The first deploy after a roll is a roll too.** The roll leaves a service spec (bare `:latest`
+  tag, no update config) that `docker stack deploy` does not reproduce, so the next deploy restarts
+  all three Dagster services even with an unchanged image. On 2026-10-03 that failed a running
+  backfill: 303 runs cancelled. Land queued deploys before a roll, and deploy after one only with
+  nothing in flight. See `docs/deferred/2026-09-26-a-deploy-rolls-the-ingest-image.md`.
 - **A roll kills in-flight runs.** Each run is a `multiprocessing` child of the code server
   (`dagster/_grpc/server.py`, `StartRun`). The roll warns (`::warning::N run(s) in flight`), goes
   ahead, and since muffin-deployment#387 reports the runs it killed as failed once the new location
