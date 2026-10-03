@@ -715,6 +715,8 @@ against the database the app reads. `market.backlog_sample` is written 16 times 
 panel reads that. `sample_universe` once looked cheap too (771 ms, measured warm) and is **17.6 s**
 today (2026-10-03), so it runs from its own pg_cron job rather than as a PostgREST RPC: from
 2026-09-26 every RPC call was cancelled at the 8 s ceiling while the run still reported success.
+`sample_coverage` (8.6 s cold) and `sample_quality` (4.4 s) followed it the same day, for the same
+reason: a sample that grows with the data does not belong under a fixed RPC ceiling.
 
 ### Where the data comes from
 
@@ -722,16 +724,21 @@ today (2026-10-03), so it runs from its own pg_cron job rather than as a PostgRE
   the handler in `functions/market-refresh/index.ts`. Not at the ~40 `return json(...)` sites: a
   resource added below one of them would be silently unrecorded. `written`/`remaining`/`failed`
   are GENERATED from the report jsonb, so they cannot drift from it.
-- **`market.backlog_sample` / `coverage_sample`** — written by the `observability-sample` resource,
-  on its **own hourly pg_cron job** (`muffin-observability`, :04). It is deliberately NOT in the
-  rotation: it touches no external provider, so it is free to run often, and its rate is exactly
-  what decides whether a dashboard draws a line or a single dot. 24 samples a day at no provider
-  cost. Coverage is gated to twice daily inside the handler, since it is the expensive one.
+- **`market.backlog_sample`** — written by the `observability-sample` resource, on its **own
+  hourly pg_cron job** (`muffin-observability`, :04). It is deliberately NOT in the rotation: it
+  touches no external provider, so it is free to run often, and its rate is exactly what decides
+  whether a dashboard draws a line or a single dot. 24 samples a day at no provider cost. It stays
+  in the edge function because it is a LOOP: one RPC per backlog, with a planner-estimate fallback,
+  and the error row written by the caller, since a timeout aborts the function's own transaction.
 - **`market.universe_sample`** — written by `market.sample_universe()`, called directly by the
   pg_cron job `muffin-universe` (:05) as `postgres`, with a 60 s statement timeout set in the job's
   own command. Not through the edge function: one RPC is one statement under the PostgREST role's
   8 s limit, and the sample takes ~18 s. The `defect.*`, `dist.*` and `provenance.*` families come
-  from `sample_quality`, which still runs inside `observability-sample`.
+  from `market.sample_quality()`, on the pg_cron job `muffin-quality` (:06), the same way.
+- **`market.coverage_sample`** — written by `market.sample_coverage()` on the pg_cron job
+  `muffin-coverage` at 05:23 and 17:23 UTC, as `postgres` with a 120 s timeout, plus one sample at
+  the end of every deploy. Neither job writes a `refresh_run` row, so the alert "An observability
+  sample has stopped arriving" watches the samples' own age instead.
 - **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
   only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations
   share `query2.finance.yahoo.com`).

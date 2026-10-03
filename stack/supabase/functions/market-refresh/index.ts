@@ -836,52 +836,15 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         }, { onConflict: 'sampled_at,backlog' })
       }
 
-      // THE UNIVERSE SAMPLE IS NOT TAKEN HERE. `market.sample_universe()` measured 17.6 s on
-      // 2026-10-03, and an RPC is one statement under the PostgREST role's 8 s timeout, so every
-      // hourly call from 2026-09-26 22:04 was cancelled while this run still recorded `ok: true`.
-      // It runs from its own pg_cron job, `muffin-universe` at :05, as `postgres` (migration
-      // 20261003135000). The coverage and quality samples below stay here: each is its own RPC
-      // and each fits the ceiling.
-      let sampleError: string | null = null
-
-      // COVERAGE IS SAMPLED TWICE A DAY, NOT EVERY SWEEP. It is the dimensional breakdown —
-      // completeness and freshness per country, sector, industry, cap band, style, tier, region,
-      // currency and type — and it cannot meaningfully change in the ninety minutes between
-      // sweeps. At 469 buckets a sample, taking it sixteen times a day would write 7,500 rows
-      // daily for no extra information.
-      //
-      // The cadence is decided by the DATA, not by a schedule: "has 11 hours passed since the
-      // last sample". GitHub's scheduled runs here are delayed by 19 minutes to 2 hours and slots
-      // are skipped outright (measured — the warm-up ran 12:44 for the 11:10 slot), so a rule
-      // keyed on the clock would fire twice some days and not at all on others.
-      let coverage = 0
-      let coverageSkipped = true
-      const { data: lastCoverage } = await market
-        .from('coverage_sample')
-        .select('sampled_at')
-        .order('sampled_at', { ascending: false })
-        .limit(1)
-      const lastAt = lastCoverage?.[0]?.sampled_at
-      if (!lastAt || Date.now() - new Date(lastAt).getTime() > 11 * 60 * 60 * 1000) {
-        coverageSkipped = false
-        // 743 ms measured on the node for all 469 buckets, so this fits the 8s statement timeout
-        // with room — but it is still its own RPC rather than folded into another, so a slow day
-        // costs the coverage sample and not the backlog depths alongside it.
-        const { data: cov, error: covErr } = await market.rpc('sample_coverage')
-        if (covErr) sampleError = sampleError ?? `sample_coverage failed: ${covErr.message}`
-        else coverage = Number(cov ?? 0)
-      }
-
-      // DATA QUALITY, every sweep. `market-verify` computes the same invariants nightly and keeps
-      // a pass/fail bit; this is the same view sampled hourly, so a defect creeping from 0 to 3 to
-      // 11 is visible long before it trips anything. Its own function rather than folded into
-      // sample_universe: that one lives in migration 132, and a second definition here would
-      // silently win over it.
-      let defects = 0
-      const { data: dq, error: dqErr } = await market.rpc('sample_quality')
-      if (dqErr) sampleError = sampleError ?? `sample_quality failed: ${dqErr.message}`
-      else defects = Number(dq ?? 0)
-
+      // NO SAMPLE THAT GROWS WITH THE DATA IS TAKEN HERE. An RPC is one statement under the
+      // PostgREST role's 8 s timeout, and the samples crossed it one after another as the tables
+      // grew: `sample_universe` at 17.6 s (every hourly call from 2026-09-26 22:04 was cancelled
+      // while this run recorded `ok: true`), `sample_coverage` at 8.6 s cold (a coin flip that lost
+      // whole days, 2026-09-28 among them), and `sample_quality` at 4.4 s, on its way. Each runs
+      // from its own pg_cron job as `postgres`: `muffin-universe` (:05), `muffin-quality` (:06) and
+      // `muffin-coverage` (05:23 and 17:23), migrations 20261003135000 and 20261003170000. What
+      // stays is the loop above, which isolates each backlog in its own RPC and writes its own
+      // error rows.
       let pruned = 0
       const { data: p, error: pErr } = await market.rpc('prune_observability', { p_days: 400 })
       if (!pErr) pruned = Number(p ?? 0)
@@ -892,7 +855,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       await market.rpc('finish_refresh', {
         p_resource: resource,
         p_ok: ok,
-        p_error: ok ? null : (sampleError ?? 'no backlog sample could be taken'),
+        p_error: ok ? null : 'no backlog sample could be taken',
       })
       return json({
         resource,
@@ -901,11 +864,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         estimated,
         unreadable,
         skippedByDeadline,
-        defects,
-        coverage,
-        coverageSkipped,
         pruned,
-        sampleError,
       })
     }
 

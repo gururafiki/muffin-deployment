@@ -528,3 +528,57 @@ groups:
 
 
         RUNBOOK: `gh workflow run market-verify.yml --ref main`. If it passes on demand, GitHub dropped the schedule; if it fails, read the failing assertion.'
+  - uid: muffin-sample-stale
+    title: An observability sample has stopped arriving
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "select (\n  (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '26 hours' then 1 else 0 end\n     from market.coverage_sample)\n + (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '3 hours' then 1 else 0 end\n     from market.universe_sample where metric like 'defect.%')\n)::float8 as value"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 1h
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: The coverage or data-quality sample has stopped arriving
+      description: 'Both are taken by pg_cron jobs as `postgres` (migration 20261003170000): `muffin-coverage` at 05:23 and 17:23 UTC, `muffin-quality` at :06 every hour. A pg_cron job writes no
+        `refresh_run` row, so the stalled-resource alert cannot see one stop, and a sample that stops looks exactly like a healthy one on every panel that reads it. Worse for quality: "A data-correctness
+        invariant is broken" reads the NEWEST `defect.*` group, so a stopped sample silently freezes that alert on whatever it last saw.
+
+
+        This fires when the newest coverage sample is more than 26 hours old (two missed runs) or the newest `defect.*` sample is more than 3 hours old. The universe sample is watched by "The scheduler
+        has stopped firing", which already treats a sample older than 3 hours as 9999.
+
+
+        Why they moved: through PostgREST each was one statement under the role''s 8 s ceiling. `sample_coverage` measured 8.6 s cold on 2026-10-03 and lost whole days of samples (every hourly
+        retry on 2026-09-28) while its run reported `ok: true`.
+
+
+        RUNBOOK: `select j.jobname, d.status, d.start_time, d.return_message from cron.job_run_details d join cron.job j using (jobid) where j.jobname in (''muffin-coverage'', ''muffin-quality'') order
+        by d.start_time desc limit 10;` A timeout names the statement; run the function by hand as `postgres` to measure it.'
