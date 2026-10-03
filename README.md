@@ -739,6 +739,12 @@ reason: a sample that grows with the data does not belong under a fixed RPC ceil
   `muffin-coverage` at 05:23 and 17:23 UTC, as `postgres` with a 120 s timeout, plus one sample at
   the end of every deploy. Neither job writes a `refresh_run` row, so the alert "An observability
   sample has stopped arriving" watches the samples' own age instead.
+- **`market.security_segment_spine`** — refreshed by `market.refresh_segment_spine()` on the pg_cron
+  job `muffin-segment-spine` (:16, hourly) as `postgres` with a 300 s timeout. The function records
+  each refresh as `segment_spine.duration_ms` and `segment_spine.rows` in `universe_sample`; a
+  failed refresh rolls its record back, so the record's age is what market-verify and the alert
+  above read. It was a PostgREST RPC inside `facets-refresh` until 2026-10-03, and from 09-23 it
+  timed out at the 8 s ceiling on every run.
 - **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
   only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations
   share `query2.finance.yahoo.com`).

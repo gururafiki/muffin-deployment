@@ -414,8 +414,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Segment spine refresh \u2014 milliseconds against the 8s ceiling",
-   "description": "A TRIPWIRE, not a performance chart. `security_segment_spine` is materialised because the live aggregation is 6.1 s at 1.92M qualifying rows while a single-security read is 3.8 ms \u2014 so every whole-table reader was a few hundred thousand rows from `57014 canceling statement due to statement timeout` while every probe said the view was healthy. Fourth occurrence of that shape here.\n\nThe refresh is a PostgREST RPC, which is ONE statement under the role's **8,000 ms** timeout. Measured at 7,242 ms concurrent on 1.92M qualifying rows \u2014 and 38.3% of production's segment rows qualify, so that is roughly a 5M-row table. When this line approaches 8,000 the fix is the one migration 142 already established: give it a pg_cron job, which has no PostgREST timeout.\n\nIt is plotted because a number computed and thrown away cannot warn anybody \u2014 the same reason `refresh_log` was replaced by `refresh_run`.",
+   "title": "Segment spine refresh \u2014 milliseconds (pg_cron, 300 s bound)",
+   "description": "Recorded by market.refresh_segment_spine() itself, which runs from the pg_cron job muffin-segment-spine (:16, hourly) as postgres under a 300 s statement timeout. Until 2026-10-03 it was a PostgREST RPC under an 8 s ceiling and timed out 148 times in a row from 2026-09-23 at about 8 s. A gap in this line is a refresh that failed: it rolls its own sample back.",
    "gridPos": {
     "h": 9,
     "w": 10,
@@ -446,7 +446,7 @@
      },
      "format": "time_series",
      "rawQuery": true,
-     "rawSql": "select date_trunc('hour', r.started_at) as time,\n       'spine refresh' as metric,\n       max((r.report->>'segment_spine_ms')::numeric) as value\nfrom market.refresh_run r\nwhere $__timeFilter(r.started_at)\n  and r.resource = 'facets-refresh'\n  and jsonb_typeof(r.report->'segment_spine_ms') = 'number'\ngroup by 1 order by 1"
+     "rawSql": "select s.sampled_at as time, 'spine refresh' as metric, s.value\n  from market.universe_sample s\n where $__timeFilter(s.sampled_at) and s.metric = 'segment_spine.duration_ms'\n order by 1"
     }
    ]
   }
