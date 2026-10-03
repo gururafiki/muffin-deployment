@@ -6,11 +6,12 @@
 -- keeps (20261003160000).
 --
 -- The fixture makes the two rules DISAGREE, or deleting the re-point would pass:
---   * SPAN    holds a span and no old marker      -> present under the new rule only;
---   * MARKED  holds both old markers and no span  -> present under the old rule only;
---   * EMPTY   was reached by the lane and holds no bars (null dates) -> absent under both.
--- All three sit in a country of their own, so `coverage_current`'s per-bucket counts are the
--- fixture's and nothing else's.
+--   * SPAN and SPAN2  hold a span and no old marker      -> present under the new rule only;
+--   * MARKED          holds both old markers and no span  -> present under the old rule only;
+--   * EMPTY           was reached by the lane and holds no bars (null dates) -> absent under both.
+-- TWO span-only securities against one marked one, so the per-bucket COUNT differs between the
+-- rules too (2 against 1). With one of each, both rules count 1 and reverting `coverage_current`
+-- alone passes. All four sit in a country of their own, so the counts are the fixture's.
 
 \set ON_ERROR_STOP on
 
@@ -23,12 +24,14 @@ insert into market.countries (iso2, name, flag, drillable) values ('ZH','Histori
 insert into market.security (security_id, name, security_type_code, country_iso2) values
   ('00000000-0000-0000-0000-000000031601','T316 Span',  'equity','ZH'),
   ('00000000-0000-0000-0000-000000031602','T316 Marked','equity','ZH'),
-  ('00000000-0000-0000-0000-000000031603','T316 Empty', 'equity','ZH')
+  ('00000000-0000-0000-0000-000000031603','T316 Empty', 'equity','ZH'),
+  ('00000000-0000-0000-0000-000000031604','T316 Span2', 'equity','ZH')
 on conflict (security_id) do nothing;
 
 insert into market.security_price_span (security_id, first_date, last_date) values
   ('00000000-0000-0000-0000-000000031601', date '1999-01-04', current_date - 1),
-  ('00000000-0000-0000-0000-000000031603', null, null)
+  ('00000000-0000-0000-0000-000000031603', null, null),
+  ('00000000-0000-0000-0000-000000031604', date '2011-03-01', current_date - 1)
 on conflict (security_id) do nothing;
 
 -- The old markers are dropped with the rest of the retired family (deferred, due 2026-10-12).
@@ -74,11 +77,11 @@ begin
     into got_securities, got_price, got_daily
     from market.coverage_current c
    where c.dimension = 'country' and c.bucket = 'ZH' and c.security_type_code = 'equity';
-  if got_securities is distinct from 3::bigint then
-    raise exception 'the fixture country must hold the three fixture securities, got %', got_securities;
+  if got_securities is distinct from 4::bigint then
+    raise exception 'the fixture country must hold the four fixture securities, got %', got_securities;
   end if;
-  if got_price is distinct from 1::bigint or got_daily is distinct from 1::bigint then
-    raise exception 'coverage_current must count exactly the security holding a span: price %, daily %',
+  if got_price is distinct from 2::bigint or got_daily is distinct from 2::bigint then
+    raise exception 'coverage_current must count exactly the two securities holding a span: price %, daily %',
       got_price, got_daily;
   end if;
 
