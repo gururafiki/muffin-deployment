@@ -1249,6 +1249,17 @@ services:
       DAGSTER_HOME: /opt/dagster/home
       DAGSTER_PG_PASSWORD: "{{ dagster_pg_password | default('') }}"
       INGEST_DATABASE_URL: "postgresql://ingest_rw:{{ ingest_pg_password | default('') }}@supabase-db:5432/postgres"
+      # A BACKFILL MUST OUTLIVE A RESTART OF THE CODE LOCATION. Without this, a backfill iteration
+      # that runs while the location is down cannot find its assets and FAILS THE WHOLE BACKFILL,
+      # cancelling every queued run (`DagsterAssetBackfillDataLoadError: Asset … existed at
+      # storage-time, but no longer does`). Measured 2026-10-03: a deploy restarted the three
+      # Dagster services and a 337-run backfill went 33 succeeded, 1 killed, 303 cancelled within a
+      # minute. Set, Dagster skips the iteration and resumes once the location loads; it applies
+      # only while a location is UNLOADABLE, so an asset genuinely removed from the code still
+      # fails the backfill (Dagster 1.13.22, `asset_backfill.py`,
+      # `_check_validity_of_asset_backfill_data_and_should_process_backfill`). The run that was
+      # in flight still dies with its process; this saves the rest.
+      DAGSTER_BACKFILL_RETRY_DEFINITION_CHANGED_ERROR: "1"
     volumes:
       - /home/ubuntu/dagster:/opt/dagster/home:ro
     networks:
