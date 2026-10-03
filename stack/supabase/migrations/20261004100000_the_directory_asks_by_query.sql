@@ -100,6 +100,15 @@ grant select, insert, update, delete on market.directory_type, market.directory_
 grant select on market.directory_type, market.directory_alias to ingest_rw, anon, authenticated;
 grant select on market.directory_query to ingest_rw, service_role, anon, authenticated;
 
+-- THE WORKER READS ITS QUESTIONS; IT DOES NOT WRITE THEM. Legacy migration 206 set
+-- `alter default privileges in schema market grant select, insert, update, delete on tables to
+-- ingest_rw`, which is right for the tables the worker writes and wrong for the list of what it
+-- asks. 207 revoked the same default in `ingest` for that reason ("the worker may not rewrite its
+-- own instructions") and left `market` alone, so these two tables would otherwise be writable by
+-- the role whose behaviour they decide.
+revoke insert, update, delete, truncate, references, trigger
+    on market.directory_type, market.directory_alias from ingest_rw;
+
 alter table market.directory_type enable row level security;
 drop policy if exists directory_type_public_read on market.directory_type;
 create policy directory_type_public_read on market.directory_type for select using (true);

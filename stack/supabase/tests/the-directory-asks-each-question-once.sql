@@ -8,7 +8,8 @@
 --   2. `US.arca` asks NYSE Arca and files under US, flagged for the composite mapping, while
 --      `US.common` asks US itself;
 --   3. a disabled venue asks nothing, including an alias filed under it;
---   4. a disabled type is asked of no venue, including through an alias.
+--   4. a disabled type is asked of no venue, including through an alias;
+--   5. the worker can read its questions and cannot write them.
 --
 -- The fixture brings its own venues: no migration seeds `market.exchange`, so CI's database has none
 -- and the migration therefore skips the `US.arca` seed, which the fixture supplies.
@@ -95,6 +96,28 @@ begin
   end if;
   if not exists (select 1 from market.directory_query where query_key = 'US.reit') then
     raise exception 'disabling one type must not take the others with it';
+  end if;
+end $$;
+
+-- 5. `ingest_rw` reads the list and cannot edit it. The default privilege that would otherwise grant
+-- it DML exists only in a database built from the legacy migrations, which is what CI builds.
+do $$
+declare
+  t text;
+  p text;
+begin
+  foreach t in array array['market.directory_type', 'market.directory_alias'] loop
+    if not has_table_privilege('ingest_rw', t, 'SELECT') then
+      raise exception 'ingest_rw cannot read %', t;
+    end if;
+    foreach p in array array['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'] loop
+      if has_table_privilege('ingest_rw', t, p) then
+        raise exception 'ingest_rw holds % on %: the worker could rewrite its own questions', p, t;
+      end if;
+    end loop;
+  end loop;
+  if not has_table_privilege('ingest_rw', 'market.directory_query', 'SELECT') then
+    raise exception 'ingest_rw cannot read market.directory_query';
   end if;
 end $$;
 
