@@ -57,7 +57,7 @@ insert into market.tracked_fund (symbol, name, kind, represents_code) values
 ```
 
 - `kind` — `sector`, `country`, `group`, or `other`
-- `represents_code` — **only** for a fund that IS its category. `derive-classifications` joins on
+- `represents_code` — **only** for a fund that IS its category. `security_classification` joins on
   it, so a sector SPDR's holdings become that sector's constituents. Leave it null for a style,
   thematic or fixed-income fund: holding a stock is not evidence that the stock IS that style.
 
@@ -71,15 +71,17 @@ series; a new fund's CIK and series come from SEC's daily directory) and adds a 
 `raw_nport_filing` fetches it at once, and `discovered_security` and `fund_holding` follow in the
 same run. The symbology ladder then resolves the ISINs it introduced.
 
-To classify the new holdings now rather than at the next daily run:
+Dagster's `security_classification` then turns the new holdings into sector and country
+membership as soon as `fund_holding` lands, and again daily at 05:44 UTC. The edge
+`derive-classifications` retired on 2026-10-03 and answers 410. To force a run (skill
+`muffin-dagster-operations`):
 
 ```bash
-BASE=https://supabase.rafiki.guru
-SRV=<SUPABASE_SERVICE_ROLE_KEY>
-curl -sS --max-time 250 -X POST "$BASE/functions/v1/market-refresh" \
-  -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"derive-classifications","force":true}'
+G='docker exec -i $(docker ps -qf name=muffin_dagster-webserver) python -'
+ssh muffin "$G materialize --assets security_classification --reason add-fund-<symbol>" < scripts/dagster_gql.py
 ```
+
+Step 4 uses `BASE=https://supabase.rafiki.guru` and `SRV=<SUPABASE_SERVICE_ROLE_KEY>`.
 
 Then let the backlogs do the rest: sectors, industries and fundamentals pick the new securities up
 on their own. Use `market-refresh-routine` if you want that sooner than the cron.

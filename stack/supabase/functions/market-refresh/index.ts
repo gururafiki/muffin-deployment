@@ -243,6 +243,7 @@ const RETIRED: Record<string, string> = {
   'promote-listing': 'the market.promote_listing RPC — the Track button calls it directly',
   'sec-cik-map': 'Dagster registries (raw_sec_cik_map → security_cik) — read market.security.cik',
   'in-symbols': 'Dagster registries (raw_nse_equity_list → security_nse_filer)',
+  'derive-classifications': 'Dagster security_classification — read market.security_taxonomy',
 }
 
 async function handle(req: Request): Promise<Response> {
