@@ -711,8 +711,9 @@ Postgres datasource, **the domain metrics need no exporter at all** — a panel 
 costs ~8.4s (measured 2026-08-27; `pending_prices` alone is 5,380 ms, above the 8s statement
 timeout the PostgREST role carries). A dashboard on a 30s refresh would run that continuously
 against the database the app reads. `market.backlog_sample` is written 16 times a day and every
-panel reads that. By contrast `count(*)` over every market TABLE is 771 ms for all 63, which is why
-`sample_universe` needs none of this care.
+panel reads that. `sample_universe` once looked cheap too (771 ms, measured warm) and is **17.6 s**
+today (2026-10-03), so it runs from its own pg_cron job rather than as a PostgREST RPC: from
+2026-09-26 every RPC call was cancelled at the 8 s ceiling while the run still reported success.
 
 ### Where the data comes from
 
@@ -720,11 +721,16 @@ panel reads that. By contrast `count(*)` over every market TABLE is 771 ms for a
   the handler in `functions/market-refresh/index.ts`. Not at the ~40 `return json(...)` sites: a
   resource added below one of them would be silently unrecorded. `written`/`remaining`/`failed`
   are GENERATED from the report jsonb, so they cannot drift from it.
-- **`market.backlog_sample` / `universe_sample` / `coverage_sample`** — written by the
-  `observability-sample` resource, on its **own hourly pg_cron job**. It is deliberately NOT in the
+- **`market.backlog_sample` / `coverage_sample`** — written by the `observability-sample` resource,
+  on its **own hourly pg_cron job** (`muffin-observability`, :04). It is deliberately NOT in the
   rotation: it touches no external provider, so it is free to run often, and its rate is exactly
   what decides whether a dashboard draws a line or a single dot. 24 samples a day at no provider
   cost. Coverage is gated to twice daily inside the handler, since it is the expensive one.
+- **`market.universe_sample`** — written by `market.sample_universe()`, called directly by the
+  pg_cron job `muffin-universe` (:05) as `postgres`, with a 60 s statement timeout set in the job's
+  own command. Not through the edge function: one RPC is one statement under the PostgREST role's
+  8 s limit, and the sample takes ~18 s. The `defect.*`, `dist.*` and `provenance.*` families come
+  from `sample_quality`, which still runs inside `observability-sample`.
 - **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
   only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations
   share `query2.finance.yahoo.com`).

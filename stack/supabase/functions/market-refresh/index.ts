@@ -835,14 +835,13 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         }, { onConflict: 'sampled_at,backlog' })
       }
 
-      // INDEPENDENT of the backlogs. In the first production run `sample_backlogs` threw and took
-      // the universe snapshot with it, losing 148 metrics that would have cost 771 ms and could
-      // not have failed. Two measurements that share nothing should not share a failure.
-      let metrics = 0
-      let universeError: string | null = null
-      const { data: u, error: uErr } = await market.rpc('sample_universe')
-      if (uErr) universeError = uErr.message
-      else metrics = Number(u ?? 0)
+      // THE UNIVERSE SAMPLE IS NOT TAKEN HERE. `market.sample_universe()` measured 17.6 s on
+      // 2026-10-03, and an RPC is one statement under the PostgREST role's 8 s timeout, so every
+      // hourly call from 2026-09-26 22:04 was cancelled while this run still recorded `ok: true`.
+      // It runs from its own pg_cron job, `muffin-universe` at :05, as `postgres` (migration
+      // 20261003135000). The coverage and quality samples below stay here: each is its own RPC
+      // and each fits the ceiling.
+      let sampleError: string | null = null
 
       // COVERAGE IS SAMPLED TWICE A DAY, NOT EVERY SWEEP. It is the dimensional breakdown —
       // completeness and freshness per country, sector, industry, cap band, style, tier, region,
@@ -868,7 +867,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         // with room — but it is still its own RPC rather than folded into another, so a slow day
         // costs the coverage sample and not the backlog depths alongside it.
         const { data: cov, error: covErr } = await market.rpc('sample_coverage')
-        if (covErr) universeError = universeError ?? `sample_coverage failed: ${covErr.message}`
+        if (covErr) sampleError = sampleError ?? `sample_coverage failed: ${covErr.message}`
         else coverage = Number(cov ?? 0)
       }
 
@@ -879,7 +878,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       // silently win over it.
       let defects = 0
       const { data: dq, error: dqErr } = await market.rpc('sample_quality')
-      if (dqErr) universeError = universeError ?? `sample_quality failed: ${dqErr.message}`
+      if (dqErr) sampleError = sampleError ?? `sample_quality failed: ${dqErr.message}`
       else defects = Number(dq ?? 0)
 
       let pruned = 0
@@ -888,11 +887,11 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
 
       // Fail only when NOTHING was measured. One unreadable backlog is a recorded fact, not a
       // failed run — and a run that reports failure on it would train everyone to ignore the alert.
-      const ok = sampled > 0 || estimated > 0 || metrics > 0
+      const ok = sampled > 0 || estimated > 0
       await market.rpc('finish_refresh', {
         p_resource: resource,
         p_ok: ok,
-        p_error: ok ? null : (universeError ?? 'no backlog or universe sample could be taken'),
+        p_error: ok ? null : (sampleError ?? 'no backlog sample could be taken'),
       })
       return json({
         resource,
@@ -901,12 +900,11 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         estimated,
         unreadable,
         skippedByDeadline,
-        metrics,
         defects,
         coverage,
         coverageSkipped,
         pruned,
-        universeError,
+        sampleError,
       })
     }
 
