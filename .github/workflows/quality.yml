@@ -623,6 +623,27 @@ jobs:
             sed -n 's/.*NOTICE: *//p' /tmp/t.out
           done
 
+      # GRAFANA READS AS `metrics_ro`, AND NOTHING ELSE HERE DOES. Every test above runs as a
+      # superuser, so a panel or alert reading a relation that role was never granted passes every
+      # check and errors in production: on 2026-10-03 fifteen were missing, including
+      # `resource_health`, the stalled-resource alert's only input. Runs against the database the
+      # steps above built, whose grant history is production's.
+      - name: Every relation Grafana reads is granted to metrics_ro
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_grafana_reads_are_granted.py
+          # PROVE IT CAN FAIL, ON EVERY RUN: take one grant away and require the guard to name it.
+          # Output goes to a file so the expected `::error::` lines do not annotate a green job.
+          psql -h localhost -U postgres -qc "revoke select on market.resource_health from metrics_ro"
+          if python3 .github/scripts/check_grafana_reads_are_granted.py > /tmp/g.out 2>&1; then
+            echo "::error::the guard passed with metrics_ro's grant on resource_health revoked"; exit 1
+          fi
+          grep -q "metrics_ro cannot read market.resource_health" /tmp/g.out || { cat /tmp/g.out; exit 1; }
+          psql -h localhost -U postgres -qc "grant select on market.resource_health to metrics_ro"
+          echo "  ok  the guard fails when a grant it depends on is revoked"
+
   # The edge functions were NEVER typechecked or tested by CI — they are Deno, and every job here
   # was Postgres, Terraform or Ansible. That is how a batched URL built by string interpolation, a
   # zero close accepted as a price and a series broken by a unit change all reached production and
