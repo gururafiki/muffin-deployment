@@ -18,6 +18,19 @@
 
 begin;
 
+-- WITHOUT pg_cron THE VIEW STILL READS. CI and a rebuilt database have no `cron.job`, and every
+-- reader of `resource_health` (Grafana, market-verify) would error if the function assumed one.
+do $$
+begin
+  if to_regclass('cron.job') is null then
+    if (select count(*) from market.cron_scheduled_resources()) <> 0 then
+      raise exception 'cron_scheduled_resources() returned rows with no cron.job';
+    end if;
+    perform count(*) from market.resource_health;
+    raise notice 'ok  with no pg_cron the function returns nothing and resource_health still reads';
+  end if;
+end $$;
+
 create schema if not exists cron;
 create table if not exists cron.job (
   jobid    bigserial primary key,
