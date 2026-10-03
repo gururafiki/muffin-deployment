@@ -541,7 +541,6 @@ venues.
 | Resource | Writes | Upstream | TTL |
 |---|---|---|---|
 | `instrument-profile` | `instruments` sector/industry/cap | yfinance | 1 week |
-| `derive-classifications` | `security_taxonomy`, country | none — a SQL join | 12 hours |
 | `security-profiles` | `security_taxonomy` (sector) | yfinance | 1 day |
 | `security-industries` | `taxonomy_node` level 2, `security.market_cap` | yfinance | 1 day |
 | `security-fundamentals` | `security_fundamentals` | yfinance | 1 week |
@@ -652,8 +651,10 @@ refreshes still collapse into one upstream fetch.
    adds a partition. `raw_nport_filing` fetches it at once, and `discovered_security` and
    `fund_holding` follow in the same run. The symbology ladder then resolves the ISINs it
    introduced.
-3. `{"resource":"derive-classifications","force":true}` — turns the new holdings into sector and
-   country membership now rather than at the next daily run.
+3. Nothing to call here either. Dagster's `security_classification` turns the new holdings into
+   sector and country membership as soon as `fund_holding` lands (it also runs daily at 05:44 UTC).
+   To force it: `dagster_gql.py materialize --assets security_classification --reason <why>`
+   (skill `muffin-dagster-operations`). The edge `derive-classifications` answers 410.
 
 To make a country drillable in the UI it also needs `market.countries.etf_symbol` set: the Dagster
 `daily_indices` lane reads it as that country's proxy, for each country with a `market.index_scope`
