@@ -565,15 +565,12 @@ jobs:
             fail=1
           fi
 
-          #  A MATVIEW THAT STOPS REFRESHING SERVES STALE DATA AND REPORTS SUCCESS. `facets-refresh`
-          #  records a failed `refresh_segment_spine` and returns ok anyway — correctly, since the
-          #  filter spine the screener reads has already rebuilt by then and failing the resource
-          #  would trade a stale segment dashboard for a stale universe. Nothing asserted it, which
-          #  was fine while that spine only fed dashboards. Migration 179 moved
-          #  `derive_segment_classification` onto it (2,586 ms -> 2.8 ms, and the function from
-          #  > 45,000 ms to 102 ms), so it is now on a CORRECTNESS path: a silent refresh failure
-          #  freezes the weighted sector classification while every run still reports success —
-          #  the same shape as the four days of silent daily failure 179 exists to fix.
+          #  A MATVIEW THAT STOPS REFRESHING SERVES STALE DATA AND REPORTS SUCCESS. The segment spine
+          #  is on a CORRECTNESS path (`derive_segment_classification` reads it, migration 179), and it
+          #  was frozen from 2026-09-23 to 10-03 behind 148 timeouts of the PostgREST RPC that refreshed
+          #  it, while `facets-refresh` recorded ok. It refreshes from the pg_cron job
+          #  `muffin-segment-spine` now and records each refresh in `universe_sample`; this asserts
+          #  the newest record is recent (migration 20261003190000).
           if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_spine_refresh_succeeds.py; then
             fail=1
           fi
