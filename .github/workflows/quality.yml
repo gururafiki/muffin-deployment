@@ -802,6 +802,11 @@ jobs:
       - name: Offline check — a panel must not filter away the state it reveals
         run: python3 .github/scripts/check_panels_do_not_hide_data.py
 
+      # The defect gauges are listed in market-verify.yml AND in the Grafana rule, and the two
+      # drifted once already: the alert then fired for weeks against correct data.
+      - name: Offline check — the defect gauges agree between market-verify and Grafana
+        run: python3 .github/scripts/check_defect_gauges_agree.py
+
       # A panel that cannot RENDER is invisible and nothing reports it. `Sector × facet` selected
       # two columns named `sector` and showed "No Data" from the day PR #261 created it; four
       # facets added in migration 160 were dropped by a panel titled "every facet" and rendered

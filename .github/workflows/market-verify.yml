@@ -149,6 +149,12 @@ jobs:
           # return 272 bars with ONE distinct close from yfinance and produce no computable return,
           # so the marks are honest, while our stored history for the same securities moves. No
           # threshold reconciles that, so the count is recorded as a pointer and not asserted.
+          #
+          # `returns_at_minus_100` joined them 2026-10-03. It names a zero close becoming a total
+          # loss, and `price_bar` can no longer hold one (`price_bar_close_positive`). What it found
+          # instead was FFAI's 5y: a split-adjusted 13,593,600.00 on 2021-09-30 against 1.21 now, a
+          # genuine -99.99999% that `security_return` stores to four decimals as -100.
+          # `check_defect_gauges_agree.py` holds this set equal to the Grafana rule's.
           defects=$(curl -sS --max-time 60 "$BASE/rest/v1/data_defect?select=defect,n,detail" \
             -H "apikey: $ANON" -H "Authorization: Bearer $ANON" -H 'Accept-Profile: market' 2>/dev/null)
           if ! printf '%s' "$defects" | grep -q '"defect"'; then
@@ -157,7 +163,7 @@ jobs:
           else
             python3 - "$defects" <<'PYCHK' || fail=1
           import json, sys
-          GAUGES = {'extreme_1y_returns', 'contradicted_negative_cache'}
+          GAUGES = {'extreme_1y_returns', 'contradicted_negative_cache', 'returns_at_minus_100'}
           rows = json.loads(sys.argv[1])
           bad = 0
           for r in sorted(rows, key=lambda x: x['defect']):
