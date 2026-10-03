@@ -6,7 +6,10 @@
 Commands (arguments are plain tokens, so they survive the ssh single quotes):
     repos
     backfill        --assets a,b --partitions 2026-09-11,2026-09-12 --reason <tag> [--dry-run]
-    materialize     --assets a --reason <tag> [--dry-run]      unpartitioned assets, one run
+    materialize     --assets a --reason <tag> [--checks a:check,…] [--dry-run]
+                    unpartitioned assets, one run. An asset's checks run ONLY when named in
+                    --checks: the launch sends an explicit check selection, and an empty one means
+                    none (a run on 2026-10-03 materialized `security_listing` without its check).
     backfill-status --id <backfillId>
     schedule-dry-run --schedule <name> --at 2026-09-26T00:00:00      read-only: what a tick would ask
 """
@@ -55,6 +58,8 @@ def main() -> None:
         p.add_argument("--dry-run", action="store_true")
         if name == "backfill":
             p.add_argument("--partitions", required=True)
+        else:
+            p.add_argument("--checks", default="", help="asset:check,… to run in the same run")
     status = sub.add_parser("backfill-status")
     status.add_argument("--id", required=True)
     dry = sub.add_parser("schedule-dry-run")
@@ -99,7 +104,10 @@ def main() -> None:
                     "repositoryName": REPOSITORY,
                     "jobName": "__ASSET_JOB",
                     "assetSelection": assets,
-                    "assetCheckSelection": [],
+                    "assetCheckSelection": [
+                        {"assetKey": {"path": [asset]}, "name": check}
+                        for asset, check in (c.split(":", 1) for c in args.checks.split(",") if c)
+                    ],
                 },
                 "mode": "default",
                 "runConfigData": {},

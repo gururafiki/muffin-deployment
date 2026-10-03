@@ -96,6 +96,15 @@ ssh muffin "$G materialize --assets security_return --reason <why>" < scripts/da
 ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 ```
 
+- **Name the checks you want.** `materialize` runs an asset's checks only when they are listed in
+  `--checks asset:check,…`. Without the flag the launch sends an empty check selection, which means
+  none: on 2026-10-03 `security_listing` materialized and `listing_covers_legacy` never ran.
+- **A newly deployed `eager()` asset does not fire by itself.** The first evaluation counts as
+  handled, so `newly_missing` cancels. Materialize it once by hand (measured on `security_listing`
+  in Dagster 1.13.22).
+- **A backfill relaunch should name only what is missing.** Read
+  `instance.get_materialized_partitions(AssetKey(...))` in the webserver container and launch the
+  difference.
 - **Name every missing partition.** One day left outside a backfill range kept an `eager()` asset
   blocked.
 - **Prefer one multi-day price run over several one-day runs.** Its calls are slower, and yfinance
