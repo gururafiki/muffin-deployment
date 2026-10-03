@@ -12,7 +12,7 @@ SELECT s.security_id,
     COALESCE(ps.symbol, t.value) AS symbol,
     COALESCE(us.symbol, t.value) AS us_ticker,
         CASE
-            WHEN st.security_id IS NULL THEN 'missing'::text
+            WHEN NOT a.has_any THEN 'missing'::text
             ELSE 'no_currency'::text
         END AS want,
     COALESCE(max(h.weight), 0::numeric) AS best_weight
@@ -25,15 +25,15 @@ SELECT s.security_id,
           WHERE l.security_id = s.security_id AND e.country_iso2 = 'US'::text AND l.symbol IS NOT NULL
           ORDER BY l.is_primary DESC, l.symbol
          LIMIT 1) us ON true
-     LEFT JOIN LATERAL ( SELECT x.security_id,
-            count(*) FILTER (WHERE x.currency IS NOT NULL) AS with_currency
-           FROM market.security_statement x
-          WHERE x.security_id = s.security_id
-          GROUP BY x.security_id) st ON true
+     CROSS JOIN LATERAL ( SELECT (EXISTS ( SELECT 1
+                   FROM market.security_statement x
+                  WHERE x.security_id = s.security_id)) AS has_any) a
      LEFT JOIN market.fund_holding_current h ON h.security_id = s.security_id
-  WHERE s.security_type_code = 'equity'::text AND COALESCE(ps.symbol, t.value) IS NOT NULL AND (s.statements_missing_at IS NULL OR s.statements_missing_at < (now() - '30 days'::interval)) AND (st.security_id IS NULL OR st.with_currency = 0 AND t.value IS NOT NULL AND s.cik IS NOT NULL AND (EXISTS ( SELECT 1
+  WHERE s.security_type_code = 'equity'::text AND COALESCE(ps.symbol, t.value) IS NOT NULL AND (s.statements_missing_at IS NULL OR s.statements_missing_at < (now() - '30 days'::interval)) AND (NOT a.has_any OR t.value IS NOT NULL AND s.cik IS NOT NULL AND (s.statement_currency_missing_at IS NULL OR s.statement_currency_missing_at < (now() - '30 days'::interval)) AND NOT (EXISTS ( SELECT 1
+           FROM market.security_statement x
+          WHERE x.security_id = s.security_id AND x.currency IS NOT NULL)) AND (EXISTS ( SELECT 1
            FROM market.listing l
              JOIN market.exchange e ON e.exch_code = l.exch_code
-          WHERE l.security_id = s.security_id AND e.country_iso2 = 'US'::text AND l.symbol IS NOT NULL)) AND (s.statement_currency_missing_at IS NULL OR s.statement_currency_missing_at < (now() - '30 days'::interval)))
-  GROUP BY s.security_id, (COALESCE(ps.symbol, t.value)), (COALESCE(us.symbol, t.value)), t.value, st.security_id, st.with_currency
+          WHERE l.security_id = s.security_id AND e.country_iso2 = 'US'::text AND l.symbol IS NOT NULL)))
+  GROUP BY s.security_id, (COALESCE(ps.symbol, t.value)), (COALESCE(us.symbol, t.value)), t.value, a.has_any
   ORDER BY (COALESCE(max(h.weight), 0::numeric)) DESC, s.security_id;
