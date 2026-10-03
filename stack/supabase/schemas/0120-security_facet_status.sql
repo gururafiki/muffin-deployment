@@ -33,8 +33,12 @@ WITH b AS (
             (EXISTS ( SELECT 1
                    FROM market.security_metric x_1
                   WHERE x_1.security_id = f.security_id)) AS has_metrics,
-            s.price_history_from IS NOT NULL AS has_price_history,
-            s.daily_history_from IS NOT NULL AS has_daily_history,
+            (EXISTS ( SELECT 1
+                   FROM market.security_price_span x_1
+                  WHERE x_1.security_id = f.security_id AND x_1.first_date IS NOT NULL)) AS has_price_history,
+            (EXISTS ( SELECT 1
+                   FROM market.security_price_span x_1
+                  WHERE x_1.security_id = f.security_id AND x_1.first_date IS NOT NULL)) AS has_daily_history,
             (EXISTS ( SELECT 1
                    FROM market.news_security x_1
                   WHERE x_1.security_id = f.security_id)) AS has_news,

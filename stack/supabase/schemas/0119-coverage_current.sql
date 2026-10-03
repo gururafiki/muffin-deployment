@@ -32,8 +32,8 @@ WITH base AS MATERIALIZED (
             fu.security_id IS NOT NULL AS has_fundamentals,
             st.security_id IS NOT NULL AS has_statements,
             mt.security_id IS NOT NULL AS has_metrics,
-            f2.price_history_from IS NOT NULL AS has_price_history,
-            f2.daily_history_from IS NOT NULL AS has_daily_history,
+            sp.first_date IS NOT NULL AS has_price_history,
+            sp.first_date IS NOT NULL AS has_daily_history,
             nw.security_id IS NOT NULL AS has_news,
             of.security_id IS NOT NULL AS has_leadership,
             it.security_id IS NOT NULL AS has_insider,
@@ -63,6 +63,7 @@ WITH base AS MATERIALIZED (
                    FROM market.performance
                   WHERE performance.scope = 'instrument'::text) pf ON pf.symbol = f.symbol
              LEFT JOIN market.security f2 USING (security_id)
+             LEFT JOIN market.security_price_span sp USING (security_id)
              LEFT JOIN market.security_disclosure sd USING (security_id)
              LEFT JOIN ( SELECT DISTINCT news_security.security_id
                    FROM market.news_security) nw USING (security_id)
