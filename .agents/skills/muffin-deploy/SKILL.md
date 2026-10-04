@@ -110,7 +110,7 @@ gh run watch -R gururafiki/muffin-deployment <run-id> --interval 30 --exit-statu
 
 ## 3. Verify what is running
 
-- **Ingest:** after the roll, the next `ledger_heartbeat` (hourly at :07) must be SUCCESS, and so must
+- **Ingest:** after the roll, the next `heartbeat` (hourly at :07) must be SUCCESS, and so must
   the next scheduled run of anything you changed. **Read its counters**
   (`muffin-dagster-operations`). A LOADED location is not a working lane: every run failed for four
   days behind one, and the first night after the fix succeeded while publishing half a price day.

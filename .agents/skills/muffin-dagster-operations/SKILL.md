@@ -22,7 +22,7 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 | Run storage | database `dagster`: `runs`, `run_tags`, `event_logs`, `asset_daemon_asset_evaluations`, `job_ticks`, `instigators` |
 | Raw Parquet | `/var/lib/muffin-ingest/raw/<asset>/<partition>.parquet` in the `muffin_muffin-ingest` container |
 | Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run` |
-| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool; the two short lanes carry `dagster/priority: 1` and go first, since 2026-09-25). `nightly_prices` resumes after the last key the previous night asked for (`muffin/sweep_last` on every run); `ledger_heartbeat` at :07 hourly. Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; `daily_prices_schedule` is defined and STOPPED, and is the rollback. |
+| Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool; the two short lanes carry `dagster/priority: 1` and go first, since 2026-09-25). `nightly_prices` resumes after the last key the previous night asked for (`muffin/sweep_last` on every run); `heartbeat` at :07 hourly (no pool). Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; The day-partitioned price lane (`daily_prices`, `raw_price_bars`, the day `price_bar`) and the `ingest` ledger were deleted 2026-10-04: a symbol the provider rejected alone is a `miss` in `market.identifier_probe` (provider `yfinance`), skipped for 30 days while the security keeps that symbol. |
 
 ## Last night, in order
 
@@ -46,9 +46,11 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    select as_of, count(*) from market.index_return group by 1 order by 1;
    select as_of, count(*) from market.security_return group by 1 order by 1;
    ```
-   Expect ~11.6k price bars on a weekday, ~41 FX rates, 549 index rows plus 77 sector rows, and
-   `security_return` at the newest trading day — it rebuilds itself after `nightly_prices` (the
-   note that said it needed a hand-run closed 2026-09-19). Launch it by hand only to recover a night.
+   A trading day's bars fill over a ROTATION, not in one night: `nightly_prices` extends ~2,500
+   securities a night, each to its newest bar, so a date reaches ~11.6k bars about five nights
+   later. Judge a night by its runs' counters, not by yesterday's row count. Expect ~41 FX rates,
+   549 index rows plus 77 sector rows, and `security_return` at the newest trading day — it rebuilds
+   itself after `nightly_prices`. Launch it by hand only to recover a night.
 
 ## Why a run failed
 
@@ -91,7 +93,7 @@ The daemon stores an evaluation whenever the result changes:
 
 ```bash
 G='docker exec -i $(docker ps -qf name=muffin_dagster-webserver) python -'
-ssh muffin "$G backfill --assets raw_price_bars,price_bar --partitions 2026-09-11,2026-09-12 --reason recovery-<date>" < scripts/dagster_gql.py
+ssh muffin "$G backfill --assets raw_price_history,price_bar_history --partitions <security_id>,<security_id> --reason recovery-<date>" < scripts/dagster_gql.py
 ssh muffin "$G materialize --assets security_return --reason <why>" < scripts/dagster_gql.py
 ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 ```
@@ -107,12 +109,12 @@ ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
   difference.
 - **Name every missing partition.** One day left outside a backfill range kept an `eager()` asset
   blocked.
-- **Prefer one multi-day price run over several one-day runs.** Its calls are slower, and yfinance
-  limits per minute. One observation each: a four-day backfill at ~14 calls/min passed, and a one-day
-  night run at ~42 calls/min was refused.
-- **Order by run length.** Every stage-2 asset and the heartbeat hold the `sql` pool for the whole
-  run, so launch the short lanes (FX ~25 s, indices ~20 s) before prices (~43 min for four days). The
-  hourly heartbeat queues behind a long run; that is expected, not a dead daemon.
+- **A price recovery names securities, never dates.** The lane is partitioned by security, and each
+  run extends its securities from their own newest bar. A night that stopped early left its last
+  asked key in the `muffin/sweep_last` tag; the next night resumes after it by itself.
+- **Order by run length.** Every stage-2 asset holds the `sql` pool for the whole run, so launch the
+  short lanes (FX ~25 s, indices ~20 s) before a price backfill. The heartbeat holds no pool since
+  2026-09-17, so it never queues behind one.
 - **Do not roll while a long run is in flight.** The roll kills it (`muffin-deploy`).
 - **A lane fetched through http-cache** (FX spot) can receive the previous day's body. Check
   `docker service logs muffin_http-cache --since 1h` for `STALE`, and check the table, not the run.
