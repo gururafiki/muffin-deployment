@@ -42,9 +42,13 @@ def gql(query: str, variables: dict | None = None) -> dict:
         return {"http_status": error.code, "body": error.read().decode(errors="replace")[:2000]}
 
 
-def tags(reason: str) -> list[dict[str, str]]:
-    # A tag on every hand-launched run, so the run list says why it exists.
-    return [{"key": "muffin/reason", "value": reason}]
+def tags(reason: str, max_runtime: int | None = None) -> list[dict[str, str]]:
+    # A tag on every hand-launched run, so the run list says why it exists. Without
+    # `dagster/max_runtime` the run monitor allows the instance default, six hours.
+    out = [{"key": "muffin/reason", "value": reason}]
+    if max_runtime:
+        out.append({"key": "dagster/max_runtime", "value": str(max_runtime)})
+    return out
 
 
 def main() -> None:
@@ -56,6 +60,7 @@ def main() -> None:
         p.add_argument("--assets", required=True)
         p.add_argument("--reason", required=True)
         p.add_argument("--dry-run", action="store_true")
+        p.add_argument("--max-runtime", type=int, help="seconds; the run monitor ends the run past it")
         if name == "backfill":
             p.add_argument("--partitions", required=True)
         else:
@@ -91,7 +96,7 @@ def main() -> None:
                 "partitionNames": [p for p in args.partitions.split(",") if p],
                 "fromFailure": False,
                 "title": args.reason,
-                "tags": tags(args.reason),
+                "tags": tags(args.reason, args.max_runtime),
             }
         }
         mutation = """mutation($params: LaunchBackfillParams!) { launchPartitionBackfill(backfillParams: $params) {
@@ -111,7 +116,7 @@ def main() -> None:
                 },
                 "mode": "default",
                 "runConfigData": {},
-                "executionMetadata": {"tags": tags(args.reason)},
+                "executionMetadata": {"tags": tags(args.reason, args.max_runtime)},
             }
         }
         mutation = """mutation($executionParams: ExecutionParams!) { launchRun(executionParams: $executionParams) {

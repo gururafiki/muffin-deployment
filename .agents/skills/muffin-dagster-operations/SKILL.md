@@ -21,7 +21,7 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 | Services | `muffin_dagster-webserver`, `muffin_dagster-daemon`, `muffin_muffin-ingest` (code location; runs are its child processes) |
 | Run storage | database `dagster`: `runs`, `run_tags`, `event_logs`, `asset_daemon_asset_evaluations`, `job_ticks`, `instigators` |
 | Raw Parquet | `/var/lib/muffin-ingest/raw/<asset>/<partition>.parquet` in the `muffin_muffin-ingest` container |
-| Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run` |
+| Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run`. `run_monitoring` (since 2026-10-04) ends a run past its `dagster/max_runtime` tag: 300 s on the short scheduled jobs, 1,800 s on `nightly_prices`, six hours on anything without one, and fails a run stuck starting for 300 s |
 | Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool; the two short lanes carry `dagster/priority: 1` and go first, since 2026-09-25). `nightly_prices` resumes after the last key the previous night asked for (`muffin/sweep_last` on every run); `heartbeat` at :07 hourly (no pool). Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; The day-partitioned price lane (`daily_prices`, `raw_price_bars`, the day `price_bar`) and the `ingest` ledger were deleted 2026-10-04: a symbol the provider rejected alone is a `miss` in `market.identifier_probe` (provider `yfinance`), skipped for 30 days while the security keeps that symbol. |
 
 ## Last night, in order
@@ -56,7 +56,12 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 
 `scripts/run_events.py` over the run's `STEP_FAILURE` and `ENGINE_EVENT` rows. The exception is in
 `event_specific_data.error`. A run that died before any step (for example, importing definitions)
-has it on an `ENGINE_EVENT`. `user_message` and the `PIPELINE_FAILURE` event carry no reason.
+has it on an `ENGINE_EVENT`. `user_message` is empty.
+
+**A run the monitor ended** shows only `DagsterExecutionInterruptedError` on its step. The reason,
+"Exceeded maximum runtime of N seconds", is on the run's `PIPELINE_FAILURE` in
+`dagster_event.message`, which the script prints. Raise the job's `dagster/max_runtime` only after
+reading why the run took that long.
 
 ## Why an automation condition did not fire
 
@@ -97,6 +102,10 @@ ssh muffin "$G backfill --assets raw_price_history,price_bar_history --partition
 ssh muffin "$G materialize --assets security_return --reason <why>" < scripts/dagster_gql.py
 ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 ```
+
+- **`--max-runtime SECONDS` gives a hand-launched run its own limit.** Without it the monitor
+  allows six hours. The monitor checks at its next poll, so a run can overshoot by about two
+  minutes: on 2026-10-04 a run with a 30 s limit was cancelled after 104 s.
 
 - **Name the checks you want.** `materialize` runs an asset's checks only when they are listed in
   `--checks asset:check,…`. Without the flag the launch sends an empty check selection, which means
