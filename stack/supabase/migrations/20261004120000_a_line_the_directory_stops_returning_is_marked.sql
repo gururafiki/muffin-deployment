@@ -9,8 +9,8 @@
 -- would mint them by the thousand.
 --
 -- MARKED, NEVER DELETED: `security_listing` holds a foreign key to the line, and the history stays
--- readable. The muffin-ingest asset `directory_absence` sets the mark; the stage-2 write clears it
--- whenever a walk returns the line again.
+-- readable. The muffin-ingest asset `venue_listing_absence` sets the mark through
+-- `mark_venue_absence`; the stage-2 write clears it whenever a walk returns the line again.
 --
 -- NAMED FOR WHAT IT MEASURES, `absent_since`, not `delisted_at`: the evidence is "the latest
 -- complete walks able to see this line did not return it". For a US line past the 15,000-result
@@ -21,7 +21,7 @@ alter table market.venue_listing add column if not exists absent_since timestamp
 
 comment on column market.venue_listing.absent_since is
   'When the latest complete walks able to see this line stopped returning it; null while returned. '
-  'Set by the Dagster asset directory_absence, cleared by the next walk that returns it.';
+  'Set by market.mark_venue_absence (the Dagster asset venue_listing_absence), cleared by the next walk that returns it.';
 
 -- LAST SEEN NEVER MOVES BACKWARDS. Stage 2 stamps each line with the fetch time of the page it came
 -- from, and re-parsing an older raw file (a range re-run, a fix to the parser) would otherwise move
@@ -42,6 +42,138 @@ drop trigger if exists venue_listing_keeps_its_latest_sighting on market.venue_l
 create trigger venue_listing_keeps_its_latest_sighting
   before update of last_seen_at on market.venue_listing
   for each row execute function market.venue_listing_keeps_its_latest_sighting();
+
+-- THE MARK. The Dagster asset `venue_listing_absence` reads, from the raw files, each query's
+-- current walk — complete or not, when it started, whether it hit OpenFIGI's 15,000-result cap,
+-- and the last FIGI it holds — and passes them here. The rules live in the database, where CI tests
+-- them against real Postgres; the facts live with the files they are read from.
+--
+-- A WALK VOUCHES ONLY FOR WHAT IT COULD SEE, and nothing is judged from an unfinished walk:
+--   * the venue's own query (`US.common`) vouches for its scope's lines, or, when it is CAPPED,
+--     only for lines up to the last FIGI it holds — walks are ordered by FIGI, so the window is
+--     exactly the lines it could have returned;
+--   * past that window only the aliases can see a line (`US.arca`), and they vouch for it only
+--     when every alias of the scope has finished a walk.
+-- A line is marked when it was last seen before the start of the latest complete walk able to see
+-- it. Any walk that returns it stamps it, so a line `US.arca` returned stays unmarked even if
+-- `US.common` did not.
+--
+-- A MASS MARK IS REFUSED, not applied. If fewer than half the unmarked lines of a window were seen
+-- since its walk began, the likelier story is that stage 2 has not stamped the walk yet (or a
+-- venue's code changed) than that most of a venue delisted in a month: the window is skipped and
+-- named. This is the 1,369-security lesson: when nothing answers, blame the provider, not the
+-- universe.
+create or replace function market.mark_venue_absence(p_walks jsonb)
+ returns jsonb
+ language plpgsql
+ set search_path to 'market', 'pg_catalog', 'pg_temp'
+as $function$
+declare
+  s            record;
+  v_present    integer;
+  v_seen       integer;
+  v_n          integer;
+  v_marked     integer := 0;
+  v_judged     integer := 0;
+  v_unfinished text[]  := '{}';
+  v_refused    text[]  := '{}';
+  v_by_scope   jsonb   := '{}';
+begin
+  if to_regclass('pg_temp.walk') is not null then drop table pg_temp.walk; end if;
+  create temp table walk on commit drop as
+  select q.query_key, q.files_under, q.security_type2, q.maps_to_composite,
+         coalesce((w.value ->> 'complete')::boolean, false)  as complete,
+         (w.value ->> 'started_at')::timestamptz              as started_at,
+         coalesce((w.value ->> 'capped')::boolean, false)    as capped,
+         nullif(w.value ->> 'window_end', '')                 as window_end
+    from market.directory_query q
+    left join jsonb_each(p_walks) w on w.key = q.query_key;
+
+  for s in
+    select d.query_key, d.files_under, d.security_type2, d.complete, d.started_at, d.capped,
+           d.window_end,
+           a.aliases, a.aliases_complete, a.aliases_started
+      from walk d
+      left join lateral (
+        select count(*) as aliases,
+               bool_and(x.complete and x.started_at is not null) as aliases_complete,
+               min(x.started_at) as aliases_started
+          from walk x
+         where x.maps_to_composite
+           and x.files_under = d.files_under and x.security_type2 = d.security_type2) a on true
+     where not d.maps_to_composite
+     order by d.query_key
+  loop
+    if not s.complete or s.started_at is null or (s.capped and s.window_end is null) then
+      v_unfinished := v_unfinished || s.query_key;
+      continue;
+    end if;
+
+    -- 1. The venue's own query: its whole scope, or its window when capped.
+    select count(*) filter (where v.last_seen_at >= s.started_at), count(*)
+      into v_seen, v_present
+      from market.venue_listing v
+     where v.exch_code = s.files_under and v.security_type = s.security_type2
+       and v.absent_since is null
+       and (not s.capped or v.figi collate "C" <= s.window_end collate "C");
+    if v_seen * 2 < v_present then
+      v_refused := v_refused || s.query_key;
+    else
+      update market.venue_listing v
+         set absent_since = now()
+       where v.exch_code = s.files_under and v.security_type = s.security_type2
+         and v.absent_since is null
+         and v.last_seen_at < s.started_at
+         and (not s.capped or v.figi collate "C" <= s.window_end collate "C");
+      get diagnostics v_n = row_count;
+      v_marked := v_marked + v_n;
+      v_judged := v_judged + 1;
+      if v_n > 0 then v_by_scope := v_by_scope || jsonb_build_object(s.query_key, v_n); end if;
+    end if;
+
+    -- 2. Past a capped window: the aliases, when every one has finished.
+    if s.capped and s.aliases > 0 then
+      if not coalesce(s.aliases_complete, false) then
+        v_unfinished := v_unfinished || (s.query_key || ' past ' || s.window_end);
+        continue;
+      end if;
+      select count(*) filter (where v.last_seen_at >= s.aliases_started), count(*)
+        into v_seen, v_present
+        from market.venue_listing v
+       where v.exch_code = s.files_under and v.security_type = s.security_type2
+         and v.absent_since is null
+         and v.figi collate "C" > s.window_end collate "C";
+      if v_seen * 2 < v_present then
+        v_refused := v_refused || (s.query_key || ' past ' || s.window_end);
+      else
+        update market.venue_listing v
+           set absent_since = now()
+         where v.exch_code = s.files_under and v.security_type = s.security_type2
+           and v.absent_since is null
+           and v.last_seen_at < s.aliases_started
+           and v.figi collate "C" > s.window_end collate "C";
+        get diagnostics v_n = row_count;
+        v_marked := v_marked + v_n;
+        v_judged := v_judged + 1;
+        if v_n > 0 then
+          v_by_scope := v_by_scope || jsonb_build_object(s.query_key || ' past ' || s.window_end, v_n);
+        end if;
+      end if;
+    end if;
+  end loop;
+
+  return jsonb_build_object(
+    'windows_judged', v_judged,
+    'marked', v_marked,
+    'marked_by_window', v_by_scope,
+    'unfinished', to_jsonb(v_unfinished),
+    'refused', to_jsonb(v_refused),
+    'absent', (select count(*) from market.venue_listing where absent_since is not null));
+end;
+$function$;
+
+revoke all on function market.mark_venue_absence(jsonb) from public;
+grant execute on function market.mark_venue_absence(jsonb) to ingest_rw;
 
 -- THE THREE READERS. Their single definitions live in stack/supabase/schemas/ and are regenerated
 -- from this migration; the view keeps its columns, so `create or replace` is enough.
