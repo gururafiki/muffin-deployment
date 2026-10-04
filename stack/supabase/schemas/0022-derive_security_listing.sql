@@ -25,7 +25,9 @@ begin
          count(*) over (partition by i.security_id, v.exch_code) as lines_on_venue
     from market.venue_listing v
     join market.security_identifier i
-      on i.kind_code = 'share_class_figi' and i.value = v.share_class_figi;
+      on i.kind_code = 'share_class_figi' and i.value = v.share_class_figi
+   -- A LINE THE DIRECTORY NO LONGER RETURNS IS NOT A LISTING. Step 3 then retracts it.
+   where v.absent_since is null;
   get diagnostics v_lines = row_count;
   select count(distinct security_id) into v_securities from derived_line;
 
