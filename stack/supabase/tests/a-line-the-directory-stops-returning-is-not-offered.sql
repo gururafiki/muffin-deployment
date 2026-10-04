@@ -12,7 +12,9 @@
 --   T1004 tracked     two lines of one tracked share class: only the present one is derived, and
 --                     the absent one is retracted although it was derived before
 --   T1004 track       the Track RPC refuses the absent line, as an admin, and promotes its twin
---   T1004 sighting    an older `last_seen_at` written over a newer one leaves the newer
+--   T1004 sighting    an older `last_seen_at` written over a newer one leaves the newer, and
+--                     leaves a mark; only a newer sighting clears it — by plain update and by the
+--                     upsert stage 2 actually sends
 
 \set ON_ERROR_STOP on
 
@@ -84,19 +86,65 @@ begin
   end if;
 end $$;
 
--- 4. A sighting never moves backwards, and a newer one moves forward.
+-- 4. A sighting never moves backwards, an older one never clears a mark, and a newer one does both.
 do $$
 declare
   newest timestamptz;
+  marked timestamptz := now() - interval '2 days';
 begin
   select last_seen_at into newest from market.venue_listing where figi = 'BBGT1004P1';
+  -- THE MARK WRITES ONLY `absent_since`; it must not trip the trigger.
+  update market.venue_listing set absent_since = marked where figi = 'BBGT1004P1';
+  if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is distinct from marked then
+    raise exception 'the mark did not land: the fixture proves nothing';
+  end if;
+
   update market.venue_listing set last_seen_at = newest - interval '30 days' where figi = 'BBGT1004P1';
   if (select last_seen_at from market.venue_listing where figi = 'BBGT1004P1') <> newest then
     raise exception 'an older sighting overwrote a newer one';
   end if;
+  if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is distinct from marked then
+    raise exception 'an older sighting cleared a mark a newer walk earned';
+  end if;
+
+  -- AN EQUAL SIGHTING IS A RE-FILING OF THE SAME PAGE, not new evidence.
+  update market.venue_listing set last_seen_at = newest, absent_since = null where figi = 'BBGT1004P1';
+  if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is distinct from marked then
+    raise exception 'a re-filed sighting cleared a mark';
+  end if;
+
   update market.venue_listing set last_seen_at = newest + interval '1 day' where figi = 'BBGT1004P1';
   if (select last_seen_at from market.venue_listing where figi = 'BBGT1004P1') <> newest + interval '1 day' then
     raise exception 'a newer sighting did not move last_seen_at forward';
+  end if;
+  if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is not null then
+    raise exception 'a newer sighting did not clear the mark';
+  end if;
+end $$;
+
+-- 5. The same through the statement stage 2 sends: an upsert whose SET lists every column the rows
+--    carry, and never `absent_since`.
+update market.venue_listing set absent_since = now() - interval '2 days' where figi = 'BBGT1004P1';
+insert into market.venue_listing (figi, exch_code, ticker, name, provider_symbol, last_seen_at)
+values ('BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked', 'TPA.ZA', now() - interval '90 days')
+on conflict (figi) do update
+   set exch_code = excluded.exch_code, last_seen_at = excluded.last_seen_at,
+       name = excluded.name, provider_symbol = excluded.provider_symbol, ticker = excluded.ticker;
+do $$
+begin
+  if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is null then
+    raise exception 're-filing an older page through the upsert cleared a mark';
+  end if;
+end $$;
+insert into market.venue_listing (figi, exch_code, ticker, name, provider_symbol, last_seen_at)
+values ('BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked', 'TPA.ZA', now() + interval '3 days')
+on conflict (figi) do update
+   set exch_code = excluded.exch_code, last_seen_at = excluded.last_seen_at,
+       name = excluded.name, provider_symbol = excluded.provider_symbol, ticker = excluded.ticker;
+do $$
+begin
+  if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is not null then
+    raise exception 'a newer page through the upsert did not clear the mark';
   end if;
 end $$;
 

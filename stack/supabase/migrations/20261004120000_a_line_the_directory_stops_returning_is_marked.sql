@@ -10,7 +10,7 @@
 --
 -- MARKED, NEVER DELETED: `security_listing` holds a foreign key to the line, and the history stays
 -- readable. The muffin-ingest asset `venue_listing_absence` sets the mark through
--- `mark_venue_absence`; the stage-2 write clears it whenever a walk returns the line again.
+-- `mark_venue_absence`; a NEWER sighting clears it, in the trigger below.
 --
 -- NAMED FOR WHAT IT MEASURES, `absent_since`, not `delisted_at`: the evidence is "the latest
 -- complete walks able to see this line did not return it". For a US line past the 15,000-result
@@ -23,17 +23,24 @@ comment on column market.venue_listing.absent_since is
   'When the latest complete walks able to see this line stopped returning it; null while returned. '
   'Set by market.mark_venue_absence (the Dagster asset venue_listing_absence), cleared by the next walk that returns it.';
 
--- LAST SEEN NEVER MOVES BACKWARDS. Stage 2 stamps each line with the fetch time of the page it came
--- from, and re-parsing an older raw file (a range re-run, a fix to the parser) would otherwise move
--- it back and let the absence rule mark a line a newer walk returned. A rule every writer must
--- remember is a trigger.
+-- LAST SEEN NEVER MOVES BACKWARDS, AND ONLY A NEWER SIGHTING CLEARS A MARK. Stage 2 stamps each
+-- line with the fetch time of the page it came from. Re-filing an older raw file (a range re-run, a
+-- fix to the parser, an alias walked before the venue's own) would otherwise move the sighting
+-- back, letting the absence rule mark a line a newer walk returned — or clear a mark a newer walk
+-- earned, so that the line is offered again until the next day's mark. A rule every writer must
+-- remember is a trigger. The mark itself writes only `absent_since`, so it does not fire this.
 create or replace function market.venue_listing_keeps_its_latest_sighting()
  returns trigger
  language plpgsql
  set search_path to 'market', 'pg_catalog', 'pg_temp'
 as $function$
 begin
-  new.last_seen_at := greatest(old.last_seen_at, new.last_seen_at);
+  if new.last_seen_at > old.last_seen_at then
+    new.absent_since := null;
+  else
+    new.last_seen_at := old.last_seen_at;
+    new.absent_since := old.absent_since;
+  end if;
   return new;
 end;
 $function$;
