@@ -74,12 +74,16 @@ begin
     v_symbol := v_listing.ticker;
   end if;
 
+  -- THE ONE WRITER OF THE SYMBOL MAP'S INPUTS OUTSIDE DAGSTER refreshes it itself, so the security
+  -- a person just tracked resolves on its own page at once rather than at the next tick.
+  perform market.refresh_symbol_map();
+
   return jsonb_build_object(
     'figi', p_figi,
     'promoted', true,
     'securityId', v_security_id,
     'symbol', v_symbol,
-    'note', 'sector and returns arrive on the next security-profiles / security-performance run'
+    'note', 'the sector arrives on the next security-profiles run; prices and returns on the price lane''s history pass'
   );
 end;
 $function$;
