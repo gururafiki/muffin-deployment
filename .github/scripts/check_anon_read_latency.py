@@ -98,6 +98,15 @@ QUERIES = [
     ("stock metrics catalogue", "security_metric_series?select=metric_code,metric_name,category,unit,is_derived&symbol=eq.AAPL&period_type=eq.annual"),
     ("stock statement table", "security_metric_series?select=metric_code,metric_name,unit,as_of,value,currency_code,is_derived&symbol=eq.AAPL&period_type=eq.annual&category=eq.income_statement&order=as_of.desc&limit=600"),
     ("stock statement table, local listing", "security_metric_series?select=metric_code,as_of,value,currency_code&symbol=eq.005930.KS&period_type=eq.annual&category=eq.income_statement&order=as_of.desc&limit=600"),
+    # The Markets search, both halves exactly as `use-security-search.ts` sends them, on every
+    # keystroke past two characters. Neither was probed until 2026-10-04, while the directory under
+    # `untracked_listing` went from 0 rows to 99,459 and then gained four security types. A SHORT
+    # query is not the worst case: two letters match 48 rows early in name order and stop, while a
+    # selective name has to read most of the view to find its few. Measured as anon that day, best
+    # of three: directory 125 ms for "ba" and 236 ms for "hollywood", tracked 223 ms for "ba".
+    ("markets search, tracked", "security_current?select=security_id,name,symbol,sector_id,country_iso2&security_type_code=in.(equity,etf)&or=(symbol.ilike.ba*,name.ilike.*ba*)&order=name&limit=25"),
+    ("markets search, directory, broad", "untracked_listing?select=figi,composite_figi,ticker,name,exch_code,country_iso2,provider_symbol&or=(ticker.ilike.ba*,name.ilike.*ba*)&order=name&limit=48"),
+    ("markets search, directory, selective", "untracked_listing?select=figi,composite_figi,ticker,name,exch_code,country_iso2,provider_symbol&or=(ticker.ilike.hollywood*,name.ilike.*hollywood*)&order=name&limit=48"),
 ]
 
 
