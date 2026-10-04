@@ -562,7 +562,7 @@ jobs:
           if ! diff -ru stack/supabase/schemas /tmp/extracted > /tmp/bundle.diff; then
             echo "::error::the repeatable bundle no longer matches the migrations — regenerate it"
             head -60 /tmp/bundle.diff
-            echo "regenerate: download the `repeatable-bundle` artifact from this run and commit it"
+            echo "regenerate: download the \`repeatable-bundle\` artifact from this run and commit it"
             exit 1
           fi
           echo "  ok  $(ls /tmp/extracted | wc -l | tr -d ' ') objects match the migrations"
