@@ -37,6 +37,18 @@ SAMPLE = 1000
 SAME_YEAR_MAX = 300
 COLLAPSE_WINDOW = 7
 
+# A ROTATING SIXTEENTH OF THE UNIVERSE, BY THE FIRST HEX DIGIT OF `security_id`, NEVER THE WHOLE
+# SERIES. To return 1,000 rows ordered by security, the view resolves every symbol first: ~49,000
+# revenue rows for 12,385 symbols. Measured 2026-10-04, that is 0.6 s warm and 6.4 s through
+# PostgREST with a cold cache, under the 8-second ceiling of `authenticator`; it was cancelled
+# there twice that day (10:00 and 18:27 UTC). The range pushes into the view, so a sixteenth
+# resolves ~4,700 rows: 1.25 s on a cold range. The day picks the sixteenth, so sixteen days
+# cover every security.
+_DIGIT = datetime.date.today().toordinal() % 16
+RANGE = f"&security_id=gte.{_DIGIT:x}0000000-0000-0000-0000-000000000000" + (
+    f"&security_id=lt.{_DIGIT + 1:x}0000000-0000-0000-0000-000000000000" if _DIGIT < 15 else ""
+)
+
 
 def get(path: str):
     req = urllib.request.Request(
@@ -44,8 +56,14 @@ def get(path: str):
         headers={"apikey": SRV, "Authorization": f"Bearer {SRV}",
                  "Accept-Profile": "market", "User-Agent": UA},
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read() or b"[]")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read() or b"[]")
+    except urllib.error.HTTPError as e:
+        # PostgREST names the cause in the body, and a traceback drops it: the 10:00 UTC failure on
+        # 2026-10-04 was a bare 500, and only once this printed the body did it read 57014.
+        print(f"::error::{path.split('?')[0]}: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:300]}")
+        sys.exit(1)
 
 
 def pairs_by_gap(rows, key_fields):
@@ -65,7 +83,7 @@ def main() -> int:
     # 1. The serving view.
     view = get(
         "security_metric_series?select=security_id,metric_code,period_type,as_of"
-        f"&metric_code=eq.{METRIC}&period_type=eq.annual&limit={SAMPLE}"
+        f"&metric_code=eq.{METRIC}&period_type=eq.annual&limit={SAMPLE}{RANGE}"
         "&order=security_id,as_of"
     )
     if not view:
@@ -80,12 +98,13 @@ def main() -> int:
             print(f"::error::  {sid[:8]} {mc} {pt}: two period ends {gap} day(s) apart")
         fail = 1
     else:
-        print(f"  ok   security_metric_series: one point per fiscal period ({len(view)} rows sampled)")
+        print(f"  ok   security_metric_series: one point per fiscal period ({len(view)} rows sampled, "
+              f"ids {_DIGIT:x}…)")
 
     # 2. The raw table, past the window.
     raw = get(
         "security_metric?select=security_id,metric_code,period_type,as_of"
-        f"&metric_code=eq.{METRIC}&period_type=eq.annual&limit={SAMPLE}"
+        f"&metric_code=eq.{METRIC}&period_type=eq.annual&limit={SAMPLE}{RANGE}"
         "&order=security_id,as_of"
     )
     drifted = [(k, g) for k, g in pairs_by_gap(raw, ("security_id", "metric_code", "period_type"))

@@ -510,8 +510,9 @@ jobs:
           fi
 
           # 10. THE APP'S OWN READS MUST ANSWER INSIDE THE ANON CEILING. `anon` has a 3-second
-          #     statement timeout and `service_role` has none, so a slow view fails for the APP
-          #     while every check above — all of which run as service_role — reports it healthy.
+          #     statement timeout and `service_role` inherits the 8-second one of `authenticator`,
+          #     the role PostgREST connects as, so a slow view fails for the APP while every check
+          #     above — all of which run as service_role — reports it healthy.
           #
           #     Three incidents, none of which a correctness check could see: `fund_sector_weight`
           #     answered service_role in 7.2s and gave anon 57014 while the Markets donut was
