@@ -32,6 +32,11 @@ gh pr merge <n> -R gururafiki/<repo> --squash --delete-branch
 - `gh pr merge` merges whatever the checks said, and a watcher's exit code is not their verdict.
   Read the rollup first.
 - A squash merge orphans the umbrella's pin, so re-pin the submodule and push the umbrella.
+- **A stacked PR is CLOSED, not retargeted, when its parent merges with `--delete-branch`.**
+  Measured 2026-10-04: merging muffin-ingest#92 deleted the base of #93, and GitHub closed #93
+  instead of moving it to `main`. Retarget the child first (`gh pr edit <child> --base main`). If it
+  has already closed, reopening needs the base branch restored AND the head the PR closed with; a
+  force-push while it was closed makes `gh pr reopen` fail with "Could not open the pull request".
 - `muffin-ingest` joined Tier 1 on 2026-09-19: ruleset 23699949 requires `checks`, `definitions`
   and `image`.
 
