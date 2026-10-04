@@ -1,3 +1,38 @@
+-- The symbol map is rebuilt by those who change what it is built from, and `refresh_facets` keeps
+-- only the screener's spine. Stage 2d of the umbrella's
+-- docs/specs/2026-09-26-finishing-the-universe-family.md.
+--
+-- WHY. `market.symbol_security` resolves a symbol to a security for every chart. The edge resource
+-- `facets-refresh` rebuilt it every ten minutes beside the screener's spine. Its inputs are written
+-- by three Dagster assets (symbology adopts a symbol, the N-PORT lane mints a security, the listing
+-- derivation moves a primary) and by one RPC outside Dagster, `promote_listing`. So the refresh
+-- belongs with them: the Dagster asset `symbol_security` runs it when one of the three
+-- materialises, and the Track button runs it inline, so a security tracked by hand resolves at
+-- once.
+--
+-- MEASURED 2026-10-04 on production: 0.31-0.33 s for 12,402 rows, cheap enough for the Track button.
+-- The plan's ten-minute floor in Dagster is therefore not built: its only purpose was the Track
+-- button, which now needs none. The asset keeps a daily floor against a writer nobody listed.
+
+create or replace function market.refresh_symbol_map()
+ returns jsonb
+ language plpgsql
+ security definer
+ set search_path to 'market', 'pg_catalog'
+as $function$
+declare
+  v_started timestamptz := clock_timestamp();
+begin
+  refresh materialized view concurrently market.symbol_security;
+  return jsonb_build_object(
+    'rows', (select count(*) from market.symbol_security),
+    'duration_ms', round(extract(epoch from clock_timestamp() - v_started) * 1000));
+end;
+$function$;
+
+revoke all on function market.refresh_symbol_map() from public;
+grant execute on function market.refresh_symbol_map() to ingest_rw;
+
 CREATE OR REPLACE FUNCTION market.promote_listing(p_figi text)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -85,5 +120,20 @@ begin
     'symbol', v_symbol,
     'note', 'the sector arrives on the next security-profiles run; prices and returns on the price lane''s history pass'
   );
+end;
+$function$;
+
+CREATE OR REPLACE FUNCTION market.refresh_facets()
+ RETURNS TABLE(rows_refreshed bigint, refreshed_at timestamp with time zone)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'market', 'pg_catalog'
+AS $function$
+begin
+  -- THE SYMBOL MAP IS NOT REFRESHED HERE SINCE 2026-10-04. Its inputs are written by Dagster and by
+  -- the Track button, which refresh it through `refresh_symbol_map`; this keeps the screener's spine.
+  refresh materialized view concurrently market.security_facets;
+  return query
+    select count(*)::bigint, max(f.refreshed_at) from market.security_facets f;
 end;
 $function$;
