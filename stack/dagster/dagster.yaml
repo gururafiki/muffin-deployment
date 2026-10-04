@@ -81,8 +81,27 @@ concurrency:
     # guarantee that nothing bursts. Firing resources back to back is what tripped yfinance's rate
     # limit and negative-cached ~8,300 securities in one afternoon.
     #
-    # A pool bounds CONCURRENCY and cannot express a RATE, so requests per second and per day stay
-    # with the limiter and `ingest.provider_budget`. Both are needed: the pool stops two runs
-    # touching one provider at once, the budget stops one run spending a day's quota in a minute.
+    # A pool bounds CONCURRENCY and cannot express a RATE, so requests per second stay with each
+    # provider's own pacing (yfinance 4 s a call, OpenFIGI 3 s a page). Both are needed: the pool
+    # stops two runs touching one provider at once, the pacing stops one run bursting. (The pacing
+    # used to share the job with the ingest ledger's `provider_budget`, retired 2026-10-04.)
     default_limit: 1
     granularity: run
+
+# A RUN THAT HANGS IS ENDED BY DAGSTER, NOT BY SOMEONE NOTICING. With `granularity: run`, a run
+# holds its pool slot until it ends, so one stuck provider call blocks every later run on that pool
+# for as long as nobody looks. Measured in 1.13.22: the monitor's run-timeout check runs for every
+# launcher and terminates through `DefaultRunLauncher.terminate`; only the worker HEALTH check needs
+# launcher support, which `DefaultRunLauncher` lacks, so a run whose process died mid-roll is still
+# the roll's to fail (`muffin-roll-ingest.sh`).
+#
+# `max_runtime_seconds` is the DEFAULT for runs with no `dagster/max_runtime` tag: automation and
+# backfill runs, whose p99 over 14 days was 211 s. Six hours is far above anything legitimate (the
+# longest real run in 30 days is a 43-minute price backfill) and still ends a hang the same night.
+# The one longer run on record is the case for it: venue walk `d89bb306` on 2026-09-21 hung for
+# 26.8 hours, holding the OpenFIGI pool, until it was failed.
+# Scheduled jobs carry their own, tighter tag, set in muffin-ingest from measured run times.
+run_monitoring:
+  enabled: true
+  start_timeout_seconds: 300
+  max_runtime_seconds: 21600
