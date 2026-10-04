@@ -44,6 +44,14 @@ begin
                               'reason', 'unknown figi — the venue sweep has not catalogued it');
   end if;
 
+  -- A LINE THE DIRECTORY STOPPED RETURNING IS NOT OFFERED, so it cannot be tracked by hand either:
+  -- minting a security for a delisted company spends a month of provider calls on nothing.
+  if v_listing.absent_since is not null then
+    return jsonb_build_object('figi', p_figi, 'promoted', false,
+                              'reason', 'the venue directory has not returned this listing since '
+                                        || to_char(v_listing.absent_since, 'YYYY-MM-DD'));
+  end if;
+
   v_security_id := gen_random_uuid();
 
   insert into market.security (security_id, name, security_type_code, country_iso2, is_tradeable)

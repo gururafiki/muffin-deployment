@@ -16,7 +16,7 @@ SELECT figi,
     country_iso2,
     provider_symbol
    FROM market.venue_listing l
-  WHERE name IS NOT NULL AND NOT (EXISTS ( SELECT 1
+  WHERE name IS NOT NULL AND absent_since IS NULL AND NOT (EXISTS ( SELECT 1
            FROM market.security_identifier si
           WHERE si.kind_code = 'figi'::text AND si.value = l.composite_figi)) AND NOT (EXISTS ( SELECT 1
            FROM market.security_provider_symbol ps
