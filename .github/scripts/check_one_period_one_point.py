@@ -44,8 +44,14 @@ def get(path: str):
         headers={"apikey": SRV, "Authorization": f"Bearer {SRV}",
                  "Accept-Profile": "market", "User-Agent": UA},
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read() or b"[]")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read() or b"[]")
+    except urllib.error.HTTPError as e:
+        # PostgREST names the cause in the body, and a traceback drops it. This answered a bare 500
+        # once, at 10:00 UTC on 2026-10-04, while its two queries measure ~0.5 s on the node.
+        print(f"::error::{path.split('?')[0]}: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:300]}")
+        sys.exit(1)
 
 
 def pairs_by_gap(rows, key_fields):

@@ -75,8 +75,15 @@ def get(path: str, offset: int = 0, limit: int = 1000):
             "Range": f"{offset}-{offset + limit - 1}",
         },
     )
-    with urllib.request.urlopen(req, timeout=90) as r:
-        return json.loads(r.read() or b"[]")
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return json.loads(r.read() or b"[]")
+    except urllib.error.HTTPError as e:
+        # POSTGREST NAMES THE CAUSE IN THE BODY, AND A TRACEBACK DROPS IT. This check failed with a
+        # bare `HTTP Error 500` on every run from at least 2026-10-01 to 10-04, and the cause had to
+        # be found by timing its query on the node.
+        print(f"::error::{path.split('?')[0]}: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:300]}")
+        sys.exit(1)
 
 
 def get_all(path: str, cap: int = 60_000):
@@ -120,6 +127,15 @@ def recent_securities(limit: int) -> list[str]:
     so a row cap manufactures exactly the failure the check reports — which is how `limit=4000`
     once put ASML's FY2021 split at a ratio of 0.39. Scoping by SECURITY and then fetching each
     one whole keeps every split complete, which is the property the assertion depends on.
+
+    THE SAMPLE READS THE TABLE, NOT THE VIEW. `security_segment_latest` dense-ranks the whole table
+    before it can sort, so on 2026-10-04, at 1.44M rows, ONE page of this walk cost 6.4 s and the
+    walk is several pages, each paying it again, under the 8-second ceiling of the role PostgREST
+    connects as. Every run from at least 2026-10-01 died here with HTTP 500 before a single split
+    was checked. `security_segment` answers the same question — which securities were written most
+    recently — in 0.22-0.30 s a page, and its first page already held 60 securities. The rows
+    themselves still come from the view in `main`, so this changes WHICH securities are checked,
+    never what they are checked against.
     """
     seen: list[str] = []
     known: set[str] = set()
@@ -128,7 +144,7 @@ def recent_securities(limit: int) -> list[str]:
     # thousand rows to gather the sample. Bounded twice: by the sample size and by the walk.
     while len(seen) < limit and offset < 20_000:
         page = get(
-            "security_segment_latest?select=security_id,as_of"
+            "security_segment?select=security_id,as_of"
             # Tie-broken for the same reason as the row fetch below. Here a duplicate is harmless
             # (the ids go into a set) but a SKIPPED row silently biases which securities are
             # sampled, which is worse — it is invisible.
@@ -165,9 +181,12 @@ def main() -> int:
     print(f"  sampling the {len(sample)} most recently written securities")
 
     rows = []
-    # ~100 ids per `in.()`: the filter is a URL, so the bound is a LENGTH budget, not a row budget.
-    for i in range(0, len(sample), 100):
-        chunk = ",".join(sample[i : i + 100])
+    # 20 ids per call. The URL's length budget allows ~100, but `get_all`'s cap applies PER CALL,
+    # and on 2026-10-04 the 80-security sample was 50,716 flat rows against that 60,000 cap: 85% of
+    # it, so one heavier sample would fail this guard on its own sample size again. At 20 a call
+    # holds ~13,000 rows.
+    for i in range(0, len(sample), 20):
+        chunk = ",".join(sample[i : i + 20])
         rows += get_all(
             "security_segment_latest?select=security_id,axis,member_code,parent_member,metric_code,"
             "period_type,period_ending,value,partition_id,currency_code,reconciled_to,accession_number"
