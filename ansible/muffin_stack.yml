@@ -281,12 +281,12 @@
         dest: /home/ubuntu/supabase/config.toml
         mode: "0644"
 
-    - name: Stage the roles the schema grants to
+    - name: Stage what the baseline needs and cannot carry (two roles, pg_cron)
       # Applied before `supabase db push` below. Not in `always/`, which runs AFTER the migrations
       # and could not help the baseline, whose grants name these roles.
       copy:
-        src: "{{ muffin_template_dir }}/supabase/app-roles.sql"
-        dest: /home/ubuntu/supabase/app-roles.sql
+        src: "{{ muffin_template_dir }}/supabase/before-migrations.sql"
+        dest: /home/ubuntu/supabase/before-migrations.sql
         mode: "0644"
 
     - name: Stage the Supabase CLI wrapper
@@ -770,21 +770,23 @@
         group: root
       no_log: true
 
-    # THE ROLES THE BASELINE GRANTS TO, BEFORE IT CAN RUN. `metrics_ro` and `ingest_rw` were created
-    # by legacy migrations, and roles are cluster-wide, so the schema dump that replaced them does
-    # not carry them. On a database built from the repo the baseline failed at its first policy
-    # (`role "metrics_ro" does not exist`, reproduced 2026-09-19). The file only ever CREATES: a
-    # role that exists keeps its LOGIN and password, which the tasks after the migrations set.
-    - name: Create the roles the schema grants to, if they do not exist
+    # WHAT THE BASELINE NEEDS BEFORE IT CAN RUN, AND A SCHEMA DUMP CANNOT CARRY. `metrics_ro` and
+    # `ingest_rw` were created by legacy migrations, and roles are cluster-wide, so the dump that
+    # replaced them does not carry them: on a database built from the repo the baseline failed at
+    # its first policy (`role "metrics_ro" does not exist`, reproduced 2026-09-19). `pg_cron` is the
+    # same shape: legacy 133 created it, and every migration scheduling a job skips without it. The
+    # file only ever CREATES: a role that exists keeps its LOGIN and password, which the tasks
+    # after the migrations set.
+    - name: Create the roles and the extension the migrations need, if they do not exist
       shell: |
         set -euo pipefail
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
         docker exec -i "$db" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-          < /home/ubuntu/supabase/app-roles.sql
+          < /home/ubuntu/supabase/before-migrations.sql
       args:
         executable: /bin/bash
-      register: _app_roles
-      changed_when: "'created' in _app_roles.stderr"
+      register: _before_migrations
+      changed_when: "'created' in _before_migrations.stderr"
 
     # BASELINE AN EXISTING DATABASE, ONCE — AND ONLY AN EXISTING ONE.
     #

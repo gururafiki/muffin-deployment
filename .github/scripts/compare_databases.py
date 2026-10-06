@@ -9,7 +9,7 @@ Used twice by `quality.yml`'s migrations job:
             or from a random id (`VOLATILE`).
 
   --counts  The reference against a database rebuilt from the repo — a new cluster, the roles from
-            `app-roles.sql`, then `supabase db push`. Both have since run the same migrations, which
+            `before-migrations.sql`, then `supabase db push`. Both have since run the same migrations, which
             write their own clock values, so this compares how many rows each table holds rather
             than what they say; `--values` has already proven the rows the baseline starts from.
 

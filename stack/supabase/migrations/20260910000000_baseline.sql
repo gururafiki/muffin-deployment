@@ -12,8 +12,8 @@
 -- client to stream the rows that follow it.
 --
 -- WHAT A DUMP OF THREE SCHEMAS CANNOT CARRY is declared elsewhere: the two roles it grants
--- to are created by `app-roles.sql` before `db push` runs, and the pg_cron jobs the legacy
--- files scheduled are declared by migration 20261006210000.
+-- to, and pg_cron, are created by `before-migrations.sql` before `db push` runs, and the
+-- pg_cron jobs the legacy files scheduled are declared by migration 20261006210000.
 --
 -- NOT INCLUDED, DELIBERATELY: `always/001-app.sql` and `always/003-security.sql`. Both are
 -- idempotent by design and must run on EVERY deploy — `003` revokes the DEFAULT PRIVILEGES so

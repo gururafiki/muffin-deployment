@@ -477,8 +477,8 @@ jobs:
           -- client to stream the rows that follow it.
           --
           -- WHAT A DUMP OF THREE SCHEMAS CANNOT CARRY is declared elsewhere: the two roles it grants
-          -- to are created by `app-roles.sql` before `db push` runs, and the pg_cron jobs the legacy
-          -- files scheduled are declared by migration 20261006210000.
+          -- to, and pg_cron, are created by `before-migrations.sql` before `db push` runs, and the
+          -- pg_cron jobs the legacy files scheduled are declared by migration 20261006210000.
           --
           -- NOT INCLUDED, DELIBERATELY: `always/001-app.sql` and `always/003-security.sql`. Both are
           -- idempotent by design and must run on EVERY deploy — `003` revokes the DEFAULT PRIVILEGES so
@@ -546,7 +546,7 @@ jobs:
       #
       # A SECOND CLUSTER, because roles are cluster-wide: in this job's own cluster the legacy set
       # created `metrics_ro` and `ingest_rw` already, and nothing could fail. It gets only the roles
-      # the Supabase image creates for itself, then exactly what a deploy runs: `app-roles.sql`,
+      # the Supabase image creates for itself, then exactly what a deploy runs: `before-migrations.sql`,
       # then `supabase db push` with the CLI version Ansible pins — the CLI itself, because a new
       # database is the one place it applies the baseline, and it splits the file its own way.
       - name: A database rebuilt from the repo is the reference
@@ -571,7 +571,7 @@ jobs:
           psql "$REBUILT" -tAc "select 1 from pg_roles where rolname = 'service_role'" | grep -q 1 \
             || { echo "::error::the rebuilt cluster never came up"; exit 1; }
 
-          psql "$REBUILT" -q -v ON_ERROR_STOP=1 -f stack/supabase/app-roles.sql
+          psql "$REBUILT" -q -v ON_ERROR_STOP=1 -f stack/supabase/before-migrations.sql
 
           v=$(sed -n 's/^supabase_cli_version: "\(.*\)"$/\1/p' ansible/roles/supabase_cli/defaults/main.yml)
           test -n "$v" || { echo "::error::no Supabase CLI pin found in the Ansible role"; exit 1; }
