@@ -454,7 +454,8 @@ jobs:
           fi
 
       # Regenerating is downloading this, never hand-editing: the text is pg_dump's own rendering,
-      # and the header is written here too, so the committed file IS the artifact, byte for byte.
+      # and the header is written here too, so a regenerated baseline is an artifact verbatim. Two
+      # runs' artifacts differ only in the clock values and random ids the check above excludes.
       - name: Publish the baseline the legacy migrations build, so it can be regenerated
         if: always()
         env:
