@@ -281,6 +281,14 @@
         dest: /home/ubuntu/supabase/config.toml
         mode: "0644"
 
+    - name: Stage the roles the schema grants to
+      # Applied before `supabase db push` below. Not in `always/`, which runs AFTER the migrations
+      # and could not help the baseline, whose grants name these roles.
+      copy:
+        src: "{{ muffin_template_dir }}/supabase/app-roles.sql"
+        dest: /home/ubuntu/supabase/app-roles.sql
+        mode: "0644"
+
     - name: Stage the Supabase CLI wrapper
       # `copy:` with a `src:`, like the observability collectors: a real file is lintable, is
       # runnable on the node before shipping, and cannot be mangled by Ansible rendering inline
@@ -762,16 +770,37 @@
         group: root
       no_log: true
 
-    # BASELINE THE EXISTING DATABASE, ONCE.
+    # THE ROLES THE BASELINE GRANTS TO, BEFORE IT CAN RUN. `metrics_ro` and `ingest_rw` were created
+    # by legacy migrations, and roles are cluster-wide, so the schema dump that replaced them does
+    # not carry them. On a database built from the repo the baseline failed at its first policy
+    # (`role "metrics_ro" does not exist`, reproduced 2026-09-19). The file only ever CREATES: a
+    # role that exists keeps its LOGIN and password, which the tasks after the migrations set.
+    - name: Create the roles the schema grants to, if they do not exist
+      shell: |
+        set -euo pipefail
+        db=$(docker ps -qf name=muffin_supabase-db | head -1)
+        docker exec -i "$db" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+          < /home/ubuntu/supabase/app-roles.sql
+      args:
+        executable: /bin/bash
+      register: _app_roles
+      changed_when: "'created' in _app_roles.stderr"
+
+    # BASELINE AN EXISTING DATABASE, ONCE — AND ONLY AN EXISTING ONE.
     #
-    # Production already HAS the schema those 204 files build, so the baseline must be recorded as
-    # applied rather than run — running it would try to recreate every table that exists. `migration
-    # repair --status applied` inserts the history row and nothing else.
+    # Production already HAS the schema those 204 files build, so there the baseline must be
+    # recorded as applied rather than run — running it would try to recreate every table that
+    # exists. `migration repair --status applied` inserts the history row and nothing else.
     #
-    # Guarded on the row's absence, so it is a no-op on every deploy after the first and on any node
-    # that was built after the baseline existed. `changed_when` reflects whether it actually did
+    # ON A NEW DATABASE THE SAME STEP WOULD SKIP THE SCHEMA ENTIRELY. This task used to mark the
+    # baseline applied whenever its history row was absent, which is also true of an empty database
+    # — so after a node rebuild `db push` would have skipped the baseline and failed on the first
+    # migration that needs a table it creates. So it marks only when the schema is already there,
+    # and otherwise leaves the baseline pending for `db push` to apply like any other migration.
+    #
+    # No-op on every deploy after the first. `changed_when` reflects whether it actually did
     # anything, so the play's recap does not claim a change it did not make.
-    - name: Baseline the migration history if it has never been recorded
+    - name: Baseline the migration history if the schema exists and it has never been recorded
       shell: |
         set -euo pipefail
         db=$(docker ps -qf name=muffin_supabase-db | head -1)
@@ -779,11 +808,17 @@
         recorded=$(docker exec "$db" psql -U postgres -tAc \
           "select count(*) from supabase_migrations.schema_migrations where version = '$version'" \
           </dev/null 2>/dev/null | tr -d ' ' || echo 0)
-        if [ "${recorded:-0}" = "0" ]; then
+        # NOT guarded like the line above: this query works on any database, so a failure here is
+        # the database being unreachable, and guessing either answer would be wrong.
+        built=$(docker exec "$db" psql -U postgres -tAc \
+          "select to_regclass('market.security') is not null" </dev/null | tr -d ' ')
+        if [ "${recorded:-0}" != "0" ]; then
+          echo ALREADY_BASELINED
+        elif [ "$built" = "t" ]; then
           /home/ubuntu/supabase/run-cli.sh migration repair --status applied "$version"
           echo BASELINED
         else
-          echo ALREADY_BASELINED
+          echo "NEW_DATABASE: the baseline stays pending and db push applies it"
         fi
       args:
         executable: /bin/bash
