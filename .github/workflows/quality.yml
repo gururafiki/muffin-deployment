@@ -426,9 +426,12 @@ jobs:
           # with no GRANT at all passed it — and that is what the first baseline was: a database
           # built from it gave anon nothing to read and left every function executable by PUBLIC.
           # SORTED, because re-granting reorders an ACL array (the always/ check below explains).
+          # `|| true` because a side with no privilege at all is a DIFFERENCE to report, and under
+          # `pipefail` grep's no-match status would end the step silently instead — which is
+          # exactly what the first run of this check did against the old, grant-less baseline.
           privs() {
             pgdump --schema-only --no-owner --schema=market --schema=api --schema=ingest "$1" \
-              | grep -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES)' | sort
+              | { grep -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES)' || true; } | sort
           }
           privs postgres > /tmp/privs-legacy.sql
           privs baseline > /tmp/privs-baseline.sql
