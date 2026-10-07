@@ -106,6 +106,18 @@ gh run watch -R gururafiki/muffin-deployment <run-id> --interval 30 --exit-statu
   database.
 - Deploys queue, never cancel (`concurrency: deploy-oracle`). A Galaxy 504 on the runner is
   transient: dispatch again.
+- **A deploy that fails while Terraform refreshes state has applied nothing.** `401` with
+  Cloudflare code `10000` on every Cloudflare resource means the `CLOUDFLARE_API_TOKEN` secret
+  stopped authenticating (2026-09-21, 2026-10-06). Replacing it is the user's credential action.
+  The token is account-owned (`cfat_`), so check it at `/accounts/{account_id}/tokens/verify`:
+  `/user/tokens/verify` answers 401 for a valid one. Rolls go over SSH and are unaffected.
+- **A change to how the database is built** (the baseline, `before-migrations.sql`, a migration
+  that schedules pg_cron): CI's `postgres:17-alpine` cannot show what breaks, because `postgres` is
+  a superuser there and pg_cron is absent. Prove it on production's own image in a throwaway
+  container on the node: `supabase/postgres:<tag>` started with
+  `-c config_file=/etc/postgresql/postgresql.conf` (which preloads pg_cron), and the pinned
+  Supabase CLI in `debian:12-slim` with `--network container:<db>`, against `127.0.0.1`. The CLI
+  leaves a root-owned `.temp`, so clean up with `sudo`.
 - Every deploy restarts Grafana; a dashboard left open across it shows "No Data" until refreshed.
 
 ## 3. Verify what is running
