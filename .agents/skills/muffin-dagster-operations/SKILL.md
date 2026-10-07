@@ -48,7 +48,9 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    ```
    A trading day's bars fill over a ROTATION, not in one night: `nightly_prices` extends ~2,500
    securities a night, each to its newest bar, so a date reaches ~11.6k bars about five nights
-   later. Judge a night by its runs' counters, not by yesterday's row count. Expect ~41 FX rates,
+   later. And at 00:00 UTC Yahoo has no close yet for part of the newest day: 465 of 1,654 on
+   2026-10-07, in 28 countries. Stage 2 refuses those, and the next visit's 7-day re-read fills
+   them. Judge a night by its runs' counters, not by yesterday's row count. Expect ~41 FX rates,
    549 index rows plus 77 sector rows, and `security_return` at the newest trading day — it rebuilds
    itself after `nightly_prices`. Launch it by hand only to recover a night.
 
