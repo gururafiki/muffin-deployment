@@ -13,6 +13,11 @@
 -- The three assertions are the three ways this can go wrong, and they pull in OPPOSITE directions:
 -- too narrow and the population is locked out again, too wide and every run re-fetches yfinance's
 -- same four periods for securities SEC cannot answer for at all.
+--
+-- 2026-10-10: THE HALF IS `no_sec`, NOT `no_currency`. "No row with a currency" stood in for "SEC
+-- has not answered", which held only while every Yahoo row lacked a currency. Phase 4's company lane
+-- writes Yahoo rows WITH one, so the half now asks for an SEC row directly; case F below is the
+-- security the old proxy would have dropped.
 
 \set ON_ERROR_STOP on
 
@@ -135,8 +140,8 @@ begin
   --    reporting one number that cannot distinguish "new" from "re-fetched".
   select want into w from market.pending_statements
    where security_id = '00000000-0000-0000-0000-000000008901';
-  if w is distinct from 'no_currency' then
-    raise exception 'pending_statements.want is % for a security queued to gain a currency', coalesce(w,'<null>');
+  if w is distinct from 'no_sec' then
+    raise exception 'pending_statements.want is % for a CIK holder queued for its SEC statements', coalesce(w,'<null>');
   end if;
 
   -- 3. IT CARRIES THE US TICKER, NOT THE FETCH SYMBOL. `SAP` resolves at SEC and `SAP.DE` does
@@ -231,7 +236,41 @@ begin
       'a security with statements, no currency and a CIK is NOT queued (% rows) — the CIK gate has '
       'disabled the no_currency population instead of scoping it to what SEC can answer', n;
   end if;
-  raise notice '  ok  the no_currency queue is scoped to CIK holders, and still contains them';
+  raise notice '  ok  the no_sec queue is scoped to CIK holders, and still contains them';
+end $$;
+
+-- ── 9. A CIK HOLDER WHOSE YAHOO ROWS CARRY A CURRENCY HAS STILL NOT BEEN ASKED OF SEC ────────────
+--
+-- The Dagster company lane writes Yahoo statements WITH the currency Yahoo states (2026-10-10). Under
+-- the old proxy, "no row with a currency", this security would leave the queue unasked, holding four
+-- Yahoo years where SEC holds eighteen, and nothing would report it. Restoring `x.currency is not
+-- null` in the view fails this block; case B above is the control that a real SEC row still ends it.
+insert into market.security (security_id, name, security_type_code, country_iso2, cik) values
+  ('00000000-0000-0000-0000-000000008906', 'T89 Yahoo With Currency', 'equity', 'ZK', 8906)
+on conflict (security_id) do nothing;
+insert into market.security_identifier (kind_code, value, security_id, source_code) values
+  ('ticker', 'T89F', '00000000-0000-0000-0000-000000008906', 'yfinance')
+on conflict (kind_code, value) do nothing;
+insert into market.listing (security_id, exch_code, symbol, is_primary) values
+  ('00000000-0000-0000-0000-000000008906', 'US', 'T89F', true)
+on conflict (security_id, exch_code) do nothing;
+insert into market.currency (code, name) values ('EUR','Euro') on conflict (code) do nothing;
+insert into market.security_statement (security_id, statement, period_ending, currency, data, source_code) values
+  ('00000000-0000-0000-0000-000000008906', 'income', date '2025-09-27', 'EUR', '{}'::jsonb, 'yfinance')
+on conflict do nothing;
+
+do $$
+declare w text;
+begin
+  select want into w from market.pending_statements
+   where security_id = '00000000-0000-0000-0000-000000008906';
+  if w is distinct from 'no_sec' then
+    raise exception
+      'a CIK holder with a US listing whose only statements are Yahoo''s, WITH a currency, is not '
+      'queued for SEC (want %) — the company lane''s currency would have ended SEC depth unasked',
+      coalesce(w, '<not queued>');
+  end if;
+  raise notice '  ok  a Yahoo row with a currency does not stand in for SEC''s filings';
 end $$;
 
 rollback;

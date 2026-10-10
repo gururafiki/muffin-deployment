@@ -18,6 +18,10 @@
 -- THE FIXTURE MAKES THE CANDIDATE RULES DISAGREE. Every security below has a CIK, a ticker and
 -- currency-less statements, so nothing separates them except the listing — and the `missing`
 -- control has no US listing either, which is what stops the fix being applied to the wrong half.
+--
+-- 2026-10-10: the SEC half is `no_sec`, "a CIK holder with no SEC row", where it was `no_currency`.
+-- The company lane writes Yahoo rows with a currency, which would have ended the old half unasked.
+-- These fixtures hold Yahoo rows without one, so they read the same under both rules.
 
 \set ON_ERROR_STOP on
 
@@ -66,7 +70,7 @@ do $$
 declare listed int; unlisted int; nothing_yet int;
 begin
   select count(*) into listed from market.pending_statements
-   where security_id = '00000000-0000-0000-0000-000000019701' and want = 'no_currency';
+   where security_id = '00000000-0000-0000-0000-000000019701' and want = 'no_sec';
   select count(*) into unlisted from market.pending_statements
    where security_id = '00000000-0000-0000-0000-000000019702';
   select count(*) into nothing_yet from market.pending_statements

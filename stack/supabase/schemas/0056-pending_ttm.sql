@@ -15,9 +15,5 @@ SELECT q.security_id
              JOIN market.metric mt ON mt.code = m.metric_code AND mt.is_flow
           WHERE m.period_type = 'quarter'::text
           GROUP BY m.security_id) q
-     LEFT JOIN ( SELECT t.security_id,
-            max(t.fetched_at) AS newest_ttm
-           FROM market.security_metric t
-          WHERE t.period_type = 'ttm'::text
-          GROUP BY t.security_id) d ON d.security_id = q.security_id
-  WHERE d.newest_ttm IS NULL OR d.newest_ttm < q.newest_quarter;
+     LEFT JOIN market.ttm_derivation d ON d.security_id = q.security_id
+  WHERE d.derived_at IS NULL OR d.derived_at < q.newest_quarter;

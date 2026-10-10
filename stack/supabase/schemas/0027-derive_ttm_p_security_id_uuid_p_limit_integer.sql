@@ -4,6 +4,17 @@ CREATE OR REPLACE FUNCTION market.derive_ttm(p_security_id uuid DEFAULT NULL::uu
 AS $function$
 declare v_written integer := 0;
 begin
+  -- THE PAGE, CHOSEN ONCE, so the marker below records exactly the securities evaluated. One named
+  -- security, or up to `p_limit` from the backlog. The backlog is an anti-join over the marker, so
+  -- successive pages advance whether or not a page produced a TTM.
+  create temporary table _ttm_page on commit drop as
+  select p.security_id from market.pending_ttm p
+   where p_security_id is null
+   limit p_limit;
+  if p_security_id is not null then
+    insert into _ttm_page (security_id) values (p_security_id);
+  end if;
+
   insert into market.security_metric
     (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at)
   select
@@ -20,14 +31,7 @@ begin
     from market.security_metric m
     join market.metric mt on mt.code = m.metric_code and mt.is_flow
     where m.period_type = 'quarter'
-      and (
-        p_security_id is not null
-          -- BOUNDED BY THE BACKLOG, not by a bare `limit` over the rows. A `limit` on the outer
-          -- select would take the same first N rows on every call; this takes N SECURITIES that
-          -- are actually out of date, and they leave the set once derived.
-          or m.security_id in (select security_id from market.pending_ttm limit p_limit)
-      )
-      and (p_security_id is null or m.security_id = p_security_id)
+      and m.security_id in (select security_id from _ttm_page)
     window w as (
       partition by m.security_id, m.metric_code
       order by m.as_of
@@ -46,6 +50,14 @@ begin
        >= market.source_priority(market.security_metric.source_code);
 
   get diagnostics v_written = row_count;
+
+  -- EVALUATED, WHATEVER IT FOUND. A security whose quarters cannot form a TTM leaves the backlog here
+  -- and returns only when a newer quarter arrives.
+  insert into market.ttm_derivation (security_id, derived_at)
+  select security_id, now() from _ttm_page
+  on conflict (security_id) do update set derived_at = excluded.derived_at;
+
+  drop table _ttm_page;
   return v_written;
 end;
 $function$;

@@ -187,3 +187,73 @@ end $$;
 rollback;
 
 \echo 'ok: a ttm needs four real quarters, and the page advances'
+
+-- ── AND A SECURITY THAT CANNOT FORM A TTM LEAVES THE BACKLOG AFTER ONE LOOK ─────────────────────
+--
+-- `pending_ttm` used to ask "is the newest TTM older than the newest quarter". A security whose four
+-- quarters span two years never gets a TTM, so it stayed pending for ever: 656 of 4,094 on
+-- 2026-10-10, a floor the backlog could never drain below. `derive_ttm` now records that it looked
+-- (`market.ttm_derivation`), and the backlog asks whether a quarter arrived after that. Removing
+-- the marker's insert, or restoring the old view, fails the first assertion; the second is what
+-- keeps the marker from becoming a permanent exclusion.
+
+begin;
+
+insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
+insert into market.data_source (code, name, priority) values ('sec-xbrl','SEC XBRL',275) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('derived','Computed',50) on conflict (code) do nothing;
+insert into market.currency (code, name) values ('USD','US Dollar') on conflict (code) do nothing;
+insert into market.countries (iso2, name, flag, drillable) values ('ZV','Ttmland','ZV',false)
+  on conflict (iso2) do nothing;
+insert into market.security (security_id, name, security_type_code, country_iso2) values
+  ('00000000-0000-0000-0000-000000010403', 'T104 Never A Year', 'equity', 'ZV')
+on conflict (security_id) do nothing;
+insert into market.security_metric
+  (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values
+  ('00000000-0000-0000-0000-000000010403','revenue','quarter',date '2024-03-31', 10,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010403','revenue','quarter',date '2024-06-30', 20,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010403','revenue','quarter',date '2025-09-30', 30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010403','revenue','quarter',date '2025-12-31', 40,'USD','sec-xbrl')
+on conflict do nothing;
+
+do $$
+declare n integer;
+begin
+  select count(*) into n from market.pending_ttm
+   where security_id = '00000000-0000-0000-0000-000000010403';
+  if n <> 1 then
+    raise exception 'a security with quarters and no evaluation is not in pending_ttm (% rows) — the fixture cannot exercise the rule', n;
+  end if;
+
+  perform market.derive_ttm(null, 400);
+
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010403' and period_type = 'ttm';
+  if n <> 0 then
+    raise exception 'the fixture formed a TTM (% rows) — it must be a security that cannot', n;
+  end if;
+  select count(*) into n from market.pending_ttm
+   where security_id = '00000000-0000-0000-0000-000000010403';
+  if n <> 0 then
+    raise exception
+      'a security whose quarters cannot form a TTM is still pending after it was evaluated — a '
+      'backlog with a floor that never drains, the 656 of 2026-10-10';
+  end if;
+
+  -- A NEWER QUARTER BRINGS IT BACK. `fetched_at` is set ahead because `now()` is transaction time
+  -- (see block 7 above).
+  insert into market.security_metric
+    (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at)
+  values ('00000000-0000-0000-0000-000000010403','revenue','quarter',date '2026-03-31',50,'USD','sec-xbrl',
+          now() + interval '1 second');
+  select count(*) into n from market.pending_ttm
+   where security_id = '00000000-0000-0000-0000-000000010403';
+  if n <> 1 then
+    raise exception 'a quarter that arrived after the evaluation did not re-queue the security — the marker has become a permanent exclusion';
+  end if;
+  raise notice '  ok  a security that cannot form a TTM leaves the backlog after one look, and a new quarter brings it back';
+end $$;
+
+rollback;
+
+\echo 'ok: the TTM backlog drains past the securities that cannot form one'

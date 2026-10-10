@@ -13,7 +13,7 @@ SELECT s.security_id,
     COALESCE(us.symbol, t.value) AS us_ticker,
         CASE
             WHEN NOT a.has_any THEN 'missing'::text
-            ELSE 'no_currency'::text
+            ELSE 'no_sec'::text
         END AS want,
     COALESCE(max(h.weight), 0::numeric) AS best_weight
    FROM market.security s
@@ -31,7 +31,7 @@ SELECT s.security_id,
      LEFT JOIN market.fund_holding_current h ON h.security_id = s.security_id
   WHERE s.security_type_code = 'equity'::text AND COALESCE(ps.symbol, t.value) IS NOT NULL AND (s.statements_missing_at IS NULL OR s.statements_missing_at < (now() - '30 days'::interval)) AND (NOT a.has_any OR t.value IS NOT NULL AND s.cik IS NOT NULL AND (s.statement_currency_missing_at IS NULL OR s.statement_currency_missing_at < (now() - '30 days'::interval)) AND NOT (EXISTS ( SELECT 1
            FROM market.security_statement x
-          WHERE x.security_id = s.security_id AND x.currency IS NOT NULL)) AND (EXISTS ( SELECT 1
+          WHERE x.security_id = s.security_id AND x.source_code = 'sec'::text)) AND (EXISTS ( SELECT 1
            FROM market.listing l
              JOIN market.exchange e ON e.exch_code = l.exch_code
           WHERE l.security_id = s.security_id AND e.country_iso2 = 'US'::text AND l.symbol IS NOT NULL)))
