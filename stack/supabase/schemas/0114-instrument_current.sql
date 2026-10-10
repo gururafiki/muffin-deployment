@@ -21,6 +21,11 @@ SELECT i.symbol,
     COALESCE(s.market_cap, i.market_cap) AS market_cap,
     COALESCE(s.currency_code, i.currency) AS currency,
     i.provider_sector,
-    i.updated_at
+    i.updated_at,
+        CASE
+            WHEN s.market_cap IS NOT NULL THEN s.market_cap_currency
+            ELSE i.currency
+        END AS market_cap_currency,
+    COALESCE(s.quote_currency, i.currency) AS quote_currency
    FROM market.instruments i
      LEFT JOIN market.security_current s ON s.security_id = i.security_id;

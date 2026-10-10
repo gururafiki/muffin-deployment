@@ -4319,7 +4319,7 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
               secAsked = false
             }
           }
-          // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the `no_currency` half of the backlog
+          // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the `no_sec` half of the backlog
           // can never drain. A US OTC line belonging to a foreign private issuer that files nothing
           // would otherwise be re-queued every run: yfinance re-writes the same four currency-less
           // periods, the view re-admits it, forever. Marked ONLY when this security was asked to
@@ -4335,7 +4335,11 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
           // `secOk` false for the whole run, so even a security we finished asking about could not
           // be recorded. A per-symbol 404 carries its own evidence and needs no tally in front of
           // it.
-          if (item.want === 'no_currency' &&
+          //
+          // `no_sec` WAS `no_currency` UNTIL 2026-10-10, and the half means "a CIK holder with no SEC
+          // row" rather than "no row with a currency": the Dagster company lane writes Yahoo rows WITH
+          // a currency, which would have dropped these securities from the backlog unasked.
+          if (item.want === 'no_sec' &&
               (secNoSuchSymbol || (secAsked && secRows === 0 && secOk))) {
             secNone++
             const { error } = await market

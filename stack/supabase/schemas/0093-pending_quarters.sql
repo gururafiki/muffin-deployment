@@ -19,6 +19,6 @@ SELECT s.security_id,
            FROM market.security_statement a
           WHERE a.security_id = s.security_id AND a.period_type = 'annual'::text)) AND NOT (EXISTS ( SELECT 1
            FROM market.security_statement q
-          WHERE q.security_id = s.security_id AND q.period_type = 'quarter'::text))
+          WHERE q.security_id = s.security_id AND (q.period_type = ANY (ARRAY['quarter'::text, 'half'::text]))))
   GROUP BY s.security_id, (COALESCE(ps.symbol, t.value))
   ORDER BY (COALESCE(max(h.weight), 0::numeric)) DESC;

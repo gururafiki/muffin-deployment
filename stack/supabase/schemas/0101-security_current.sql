@@ -14,7 +14,7 @@ SELECT s.security_id,
     COALESCE(s.provider_country_iso2, s.country_iso2) AS country_iso2,
     s.currency_code,
     s.is_tradeable,
-    s.market_cap,
+    COALESCE(f.market_cap, s.market_cap) AS market_cap,
     sym.symbol,
     isin.value AS isin,
     i.name AS issuer_name,
@@ -53,8 +53,16 @@ SELECT s.security_id,
           ORDER BY ds2.priority DESC, st2.as_of DESC
          LIMIT 1) AS industry_code,
     s.country_iso2 AS filed_country_iso2,
-    s.provider_country_iso2
+    s.provider_country_iso2,
+        CASE
+            WHEN f.market_cap IS NOT NULL THEN f.market_cap_currency
+            WHEN s.market_cap IS NOT NULL THEN s.currency_code
+            ELSE NULL::text
+        END AS market_cap_currency,
+    cur.currency_code AS quote_currency
    FROM market.security s
+     LEFT JOIN market.security_fundamentals f ON f.security_id = s.security_id
+     LEFT JOIN market.security_currency cur ON cur.security_id = s.security_id
      LEFT JOIN market.security_symbol sym ON sym.security_id = s.security_id
      LEFT JOIN market.security_identifier isin ON isin.security_id = s.security_id AND isin.kind_code = 'isin'::text
      LEFT JOIN market.issuer i ON i.issuer_id = s.issuer_id

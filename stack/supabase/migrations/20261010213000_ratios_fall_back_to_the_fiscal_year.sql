@@ -1,13 +1,28 @@
-do $$
-declare k char;
-begin
-  select c.relkind into k from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'market' and c.relname = 'security_ratio_series';
-  if k = 'm' then execute 'drop materialized view if exists market.security_ratio_series cascade';
-  elsif k = 'v' then execute 'drop view if exists market.security_ratio_series cascade';
-  end if;
-end $$;
-create view market.security_ratio_series as
+-- A RATIO FALLS BACK TO THE FISCAL YEAR WHERE THERE IS NO TTM, AND SAYS WHICH IT USED.
+--
+-- WHY. Decided 2026-10-10 (umbrella docs/specs/2026-10-10-yahoo-company-data.md, As built). A
+-- flow-based ratio (P/E, P/S, P/FCF, the yields, the margins) divided the price by a TTM and had
+-- nothing to show where none exists. Semi-annual reporters never have one: measured 2026-10-10,
+-- Yahoo's quarterly series for VOD.L, NESN.SW and BHP.AX carry balance-sheet items at the half-year
+-- dates and NO revenue, earnings or cash flow, so a TTM from two halves has nothing to sum. And the
+-- companion migration retracts the TTMs formed across a missing quarter, so a company whose fourth
+-- quarter cannot be derived loses its TTM.
+--
+-- THE RULE, PER SECURITY AND METRIC: a flow takes its TTM where the security has one for that
+-- metric, else its fiscal-year figure. Never both in one series: the two in one `lead()` partition
+-- would cut each other's spans and the pivot's `max()` would take the bigger, which is the defect
+-- this view's header already records for ttm and quarter.
+--
+-- SAID, NOT HIDDEN: `eps_basis` ('ttm' or 'annual') is the basis of the P/E on that bar, appended
+-- so `create or replace` keeps every grant. A net margin needs net income and revenue on the SAME
+-- basis, or it would divide a year by a trailing twelve months.
+--
+-- AND A HALF-YEAR BALANCE SHEET IS A BALANCE SHEET. Stocks (book value, assets, shares) take the
+-- latest quarter OR half. The company lane files a semi-annual reporter's interim balance sheet as
+-- a half, where the edge filed it as a quarter; without this, P/B would vanish for those companies
+-- the moment their rows are re-filed.
+
+create or replace view market.security_ratio_series as
 WITH spans AS (
          SELECT m.security_id,
             m.metric_code,
