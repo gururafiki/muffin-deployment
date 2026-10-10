@@ -257,3 +257,130 @@ end $$;
 rollback;
 
 \echo 'ok: the TTM backlog drains past the securities that cannot form one'
+
+-- ── AND A YEAR IS FOUR CONSECUTIVE QUARTERS, WITH SEC'S MISSING FOURTH DERIVED ──────────────────
+--
+-- SEC's XBRL writes Q1-Q3 and the 10-K carries the fourth, so the old 370-day rule summed
+-- Q1 + Q2 + Q3 + the next Q1: 81,515 TTM rows in 3,439 securities on 2026-10-10. These are Apple's
+-- real figures (bn USD). Its TTM revenue at 2025-12-27 was stored as 457.45; the true figure is
+-- 435.62, with the fiscal Q4 derived as 416.16 - 124.30 - 95.36 - 94.04 = 102.46.
+
+begin;
+
+insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
+insert into market.data_source (code, name, priority) values ('sec-xbrl','SEC XBRL',275) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('yfinance','yfinance',100) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('derived','Computed',50) on conflict (code) do nothing;
+insert into market.currency (code, name) values ('USD','US Dollar'), ('EUR','Euro') on conflict (code) do nothing;
+insert into market.countries (iso2, name, flag, drillable) values ('ZV','Ttmland','ZV',false)
+  on conflict (iso2) do nothing;
+insert into market.security (security_id, name, security_type_code, country_iso2) values
+  ('00000000-0000-0000-0000-000000010411', 'T104 Apple-shaped', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010412', 'T104 No Fourth Quarter', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010413', 'T104 Inconsistent Year', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010414', 'T104 Provider Q4 Nearby', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010415', 'T104 Two Currencies', 'equity', 'ZV')
+on conflict (security_id) do nothing;
+
+insert into market.security_metric
+  (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values
+  -- Apple: two fiscal years of Q1-Q3 plus their annuals, and the next Q1.
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2023-12-30',119.58,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2024-03-30', 90.75,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2024-06-29', 85.78,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','annual', date '2024-09-28',391.04,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2024-12-28',124.30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2025-03-29', 95.36,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2025-06-28', 94.04,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','annual', date '2025-09-27',416.16,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010411','revenue','quarter',date '2025-12-27',143.76,'USD','sec-xbrl'),
+  -- ...and the row the old rule wrote, which the new one must replace.
+  ('00000000-0000-0000-0000-000000010411','revenue','ttm',    date '2025-12-27',457.45,'USD','derived'),
+  -- No annual, so no fourth quarter: Q1, Q2, Q3 and the next Q1 span 364 days.
+  ('00000000-0000-0000-0000-000000010412','revenue','quarter',date '2024-12-28',124.30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010412','revenue','quarter',date '2025-03-29', 95.36,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010412','revenue','quarter',date '2025-06-28', 94.04,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010412','revenue','quarter',date '2025-12-27',143.76,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010412','revenue','ttm',    date '2025-12-27',457.45,'USD','derived'),
+  -- Three non-negative quarters that exceed their year: the inputs disagree.
+  ('00000000-0000-0000-0000-000000010413','revenue','quarter',date '2024-12-28', 50,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010413','revenue','quarter',date '2025-03-29', 40,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010413','revenue','quarter',date '2025-06-28', 30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010413','revenue','annual', date '2025-09-27',100,'USD','sec-xbrl'),
+  -- A provider's own Q4 three days from the year end, dated by month end as Yahoo dates it.
+  ('00000000-0000-0000-0000-000000010414','revenue','quarter',date '2024-12-28',124.30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010414','revenue','quarter',date '2025-03-29', 95.36,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010414','revenue','quarter',date '2025-06-28', 94.04,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010414','revenue','annual', date '2025-09-27',416.16,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010414','revenue','quarter',date '2025-09-30',102.47,'USD','yfinance'),
+  -- The year in USD, its quarters in EUR.
+  ('00000000-0000-0000-0000-000000010415','revenue','quarter',date '2024-12-28',124.30,'EUR','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010415','revenue','quarter',date '2025-03-29', 95.36,'EUR','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010415','revenue','quarter',date '2025-06-28', 94.04,'EUR','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010415','revenue','annual', date '2025-09-27',416.16,'USD','sec-xbrl')
+on conflict do nothing;
+
+do $$
+declare v numeric; n integer; s text;
+begin
+  perform market.derive_ttm(null, 400);
+
+  -- 1. THE FISCAL Q4 IS THE YEAR LESS ITS THREE QUARTERS, AND SAYS IT WAS COMPUTED.
+  select value, source_code into v, s from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010411' and metric_code = 'revenue'
+     and period_type = 'quarter' and as_of = date '2025-09-27';
+  if v is distinct from 102.46 or s is distinct from 'derived-q4' then
+    raise exception 'the fiscal Q4 is % from %, expected 102.46 from derived-q4 (416.16 - 124.30 - 95.36 - 94.04)',
+      coalesce(v::text, '<none>'), coalesce(s, '<none>');
+  end if;
+
+  -- 2. THE TTM IS FOUR CONSECUTIVE QUARTERS: 95.36 + 94.04 + 102.46 + 143.76, and the old row is gone.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010411' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2025-12-27';
+  if v is distinct from 435.62 then
+    raise exception 'Apple-shaped TTM revenue at 2025-12-27 is %, expected 435.62 — 457.45 is Q1+Q2+Q3+next Q1, a year with its fourth quarter missing and its first counted twice',
+      coalesce(v::text, '<none>');
+  end if;
+  -- ...and at the year end it is the year.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010411' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2025-09-27';
+  if v is distinct from 416.16 then
+    raise exception 'the TTM at the fiscal year end is %, expected the year itself, 416.16', coalesce(v::text, '<none>');
+  end if;
+
+  -- 3. A YEAR WITH A QUARTER MISSING IS NO YEAR, AND THE OLD ROW IS RETRACTED.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010412' and period_type = 'ttm';
+  if n <> 0 then
+    raise exception '% TTM rows for four quarters spanning 364 days — a quarter is missing, and the row the old rule wrote must not survive the rule', n;
+  end if;
+
+  -- 4. NO FOURTH QUARTER FROM INPUTS THAT DISAGREE: three non-negative quarters above their year.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010413' and source_code = 'derived-q4';
+  if n <> 0 then
+    raise exception 'a negative fourth quarter was derived from a non-negative year and quarters (% rows)', n;
+  end if;
+
+  -- 5. NONE WHERE A PROVIDER ALREADY STATES IT, even three days off the year end.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010414' and source_code = 'derived-q4';
+  if n <> 0 then
+    raise exception 'a fourth quarter was derived beside the provider''s own (% rows) — the same quarter twice, three days apart', n;
+  end if;
+
+  -- 6. NONE ACROSS TWO CURRENCIES.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010415' and source_code = 'derived-q4';
+  if n <> 0 then
+    raise exception 'a fourth quarter was derived from a USD year and EUR quarters (% rows)', n;
+  end if;
+
+  raise notice '  ok  a TTM is four consecutive quarters, and SEC''s fourth quarter is derived only where it can be';
+end $$;
+
+rollback;
+
+\echo 'ok: a year is four consecutive quarters, with the fourth derived where it can be'

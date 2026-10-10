@@ -25,6 +25,7 @@ SELECT i.symbol,
         CASE
             WHEN s.market_cap IS NOT NULL THEN s.market_cap_currency
             ELSE i.currency
-        END AS market_cap_currency
+        END AS market_cap_currency,
+    COALESCE(s.quote_currency, i.currency) AS quote_currency
    FROM market.instruments i
      LEFT JOIN market.security_current s ON s.security_id = i.security_id;

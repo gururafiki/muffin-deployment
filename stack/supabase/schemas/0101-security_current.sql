@@ -58,9 +58,11 @@ SELECT s.security_id,
             WHEN f.market_cap IS NOT NULL THEN f.market_cap_currency
             WHEN s.market_cap IS NOT NULL THEN s.currency_code
             ELSE NULL::text
-        END AS market_cap_currency
+        END AS market_cap_currency,
+    cur.currency_code AS quote_currency
    FROM market.security s
      LEFT JOIN market.security_fundamentals f ON f.security_id = s.security_id
+     LEFT JOIN market.security_currency cur ON cur.security_id = s.security_id
      LEFT JOIN market.security_symbol sym ON sym.security_id = s.security_id
      LEFT JOIN market.security_identifier isin ON isin.security_id = s.security_id AND isin.kind_code = 'isin'::text
      LEFT JOIN market.issuer i ON i.issuer_id = s.issuer_id

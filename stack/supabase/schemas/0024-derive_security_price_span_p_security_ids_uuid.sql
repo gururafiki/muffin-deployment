@@ -18,26 +18,31 @@ begin
      where exists (select 1 from market.security s where s.security_id = a.id)
   ),
   -- Two index probes per security, not a scan: the primary key is (security_id, trade_date) in
-  -- every yearly partition, so each end is a `limit 1` down that index.
+  -- every yearly partition, so each end is a `limit 1` down that index. The newest bar also brings
+  -- its label, the quote currency the price lane observed.
   span as (
-    select a.security_id, f.trade_date as first_date, l.trade_date as last_date
+    select a.security_id, f.trade_date as first_date, l.trade_date as last_date,
+           l.currency_code as quote_currency
       from asked a
       left join lateral (select b.trade_date from market.price_bar b
                           where b.security_id = a.security_id
                           order by b.trade_date limit 1) f on true
-      left join lateral (select b.trade_date from market.price_bar b
+      left join lateral (select b.trade_date, b.currency_code from market.price_bar b
                           where b.security_id = a.security_id
                           order by b.trade_date desc limit 1) l on true
   ),
   written as (
-    insert into market.security_price_span as ps (security_id, first_date, last_date, updated_at)
-    select security_id, first_date, last_date, now() from span
+    insert into market.security_price_span as ps
+      (security_id, first_date, last_date, quote_currency, updated_at)
+    select security_id, first_date, last_date, quote_currency, now() from span
     on conflict (security_id) do update
-       set first_date = excluded.first_date,
-           last_date  = excluded.last_date,
-           updated_at = excluded.updated_at
+       set first_date     = excluded.first_date,
+           last_date      = excluded.last_date,
+           quote_currency = excluded.quote_currency,
+           updated_at     = excluded.updated_at
      -- Cheap to re-run: an unchanged span is not rewritten.
-     where (ps.first_date, ps.last_date) is distinct from (excluded.first_date, excluded.last_date)
+     where (ps.first_date, ps.last_date, ps.quote_currency)
+           is distinct from (excluded.first_date, excluded.last_date, excluded.quote_currency)
     returning 1
   )
   select (select count(*) from asked),
