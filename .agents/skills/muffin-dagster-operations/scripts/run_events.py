@@ -46,11 +46,21 @@ for line in sys.stdin:
 
     payload = data.get("materialization") or data.get("evaluation") or data
     values = []
-    if "passed" in payload:
-        values.append(f"passed={payload['passed']}")
+    # A CHECK EVALUATION IS SHAPED DIFFERENTLY from a materialization, and this printed nothing for
+    # one until 2026-10-10: `success`, not `passed`, and `metadata` as a dict of label to value
+    # rather than a list of `metadata_entries`.
+    if payload.get("check_name"):
+        values.append(f"check={payload['check_name']}")
+    for flag in ("passed", "success"):
+        if flag in payload:
+            values.append(f"{flag}={payload[flag]}")
     for entry in payload.get("metadata_entries") or []:
         d = entry.get("entry_data") or {}
         value = d.get("value", d.get("path", d.get("text")))
         values.append(f"{entry.get('label')}={value}")
+    metadata = payload.get("metadata")
+    for label, d in (metadata.items() if isinstance(metadata, dict) else ()):
+        value = d.get("value", d.get("path", d.get("text"))) if isinstance(d, dict) else d
+        values.append(f"{label}={value}")
     if values:  # engine events with neither an error nor metadata are noise here
         print(where, " ".join(values))

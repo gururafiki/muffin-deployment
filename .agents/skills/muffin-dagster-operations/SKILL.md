@@ -50,7 +50,21 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    securities a night, each to its newest bar, so a date reaches ~11.6k bars about five nights
    later. And at 00:00 UTC Yahoo has no close yet for part of the newest day: 465 of 1,654 on
    2026-10-07, in 28 countries. Stage 2 refuses those, and the next visit's 7-day re-read fills
-   them. Judge a night by its runs' counters, not by yesterday's row count. Expect ~41 FX rates,
+   them. Judge a night by its runs' counters, not by yesterday's row count.
+
+   **Since 2026-10-10 the night asks Yahoo's chart directly** (`raw_price_chart`), so a security's
+   first visit loads its whole history (`plan_never_loaded`), and later visits extend it by a week
+   (`plan_extend`). A split since the load reloads it (`reloaded_after_split`), as does a load 90
+   days old (`plan_reload_due`). The outcome counters `answered + empty + absent + not_daily +
+   unreadable + transport + unasked + not_askable` sum to `requested`. In `price_bar_history`:
+   - `labels_changed` counts the securities whose newest bar changed label. It is large on a
+     security's first visit, while a guessed label is replaced, and about 0 after.
+   - `bars_unlabelled` covers codes `market.currency` lacks (named in `unknown_currencies`) and bars
+     before a change of unit or inside a bounce.
+   - `retracted` counts bars on dates the documents no longer hold; the first visits remove the
+     openbb lane's holiday filler.
+
+   Expect ~41 FX rates,
    549 index rows plus 77 sector rows, and `security_return` at the newest trading day — it rebuilds
    itself after `nightly_prices`. Launch it by hand only to recover a night.
 
@@ -100,11 +114,15 @@ The daemon stores an evaluation whenever the result changes:
 
 ```bash
 G='docker exec -i $(docker ps -qf name=muffin_dagster-webserver) python -'
-ssh muffin "$G backfill --assets raw_price_history,price_bar_history --partitions <security_id>,<security_id> --reason recovery-<date>" < scripts/dagster_gql.py
+ssh muffin "$G job --name nightly_prices --partitions <security_id>,<security_id> --reason live-subset-<date>" < scripts/dagster_gql.py
+ssh muffin "$G backfill --assets raw_price_chart,price_bar_history --partitions <security_id>,<security_id> --reason recovery-<date>" < scripts/dagster_gql.py
 ssh muffin "$G materialize --assets security_return --reason <why>" < scripts/dagster_gql.py
 ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 ```
 
+- **`job` runs the real job, one partition a run**, with the job's own checks and `run_tags`. That
+  is the shape a live tiny subset should take. `backfill` runs no checks, and `materialize` takes no
+  partition. Nothing launched by hand moves the price rotation, which reads only its schedule's runs.
 - **`--max-runtime SECONDS` gives a hand-launched run its own limit.** Without it the monitor
   allows six hours. The monitor checks at its next poll, so a run can overshoot by about two
   minutes: on 2026-10-04 a run with a 30 s limit was cancelled after 104 s.

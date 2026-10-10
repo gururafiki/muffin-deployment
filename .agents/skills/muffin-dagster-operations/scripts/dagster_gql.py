@@ -65,6 +65,11 @@ def main() -> None:
             p.add_argument("--partitions", required=True)
         else:
             p.add_argument("--checks", default="", help="asset:check,… to run in the same run")
+    job = sub.add_parser("job")
+    job.add_argument("--name", required=True, help="a job of the location, e.g. nightly_prices")
+    job.add_argument("--partitions", required=True, help="comma-separated; one run each")
+    job.add_argument("--reason", required=True)
+    job.add_argument("--dry-run", action="store_true")
     status = sub.add_parser("backfill-status")
     status.add_argument("--id", required=True)
     dry = sub.add_parser("schedule-dry-run")
@@ -79,6 +84,34 @@ def main() -> None:
     if args.command == "repos":
         query = "{ repositoriesOrError { __typename ... on RepositoryConnection { nodes { name location { name } } } ... on Error { message } } }"
         print(json.dumps(gql(query), indent=1))
+        return
+
+    if args.command == "job":
+        # THE REAL JOB, ONE PARTITION A RUN. Unlike `materialize` (the ad-hoc asset job, no
+        # partition) and `backfill` (no checks), this runs exactly what a schedule runs: the job's
+        # own assets, their checks and its `run_tags`. That is what a live tiny subset should drive.
+        # A backfill would group contiguous keys into one run; a partition per run keeps each
+        # subject's counters apart.
+        mutation = """mutation($p: ExecutionParams!) { launchRun(executionParams: $p) {
+            __typename ... on LaunchRunSuccess { run { runId status } }
+            ... on RunConfigValidationInvalid { errors { message } } ... on Error { message } } }"""
+        for key in [k for k in args.partitions.split(",") if k]:
+            params = {
+                "selector": {
+                    "repositoryLocationName": LOCATION,
+                    "repositoryName": REPOSITORY,
+                    "jobName": args.name,
+                },
+                "mode": "default",
+                "runConfigData": {},
+                "executionMetadata": {
+                    "tags": [{"key": "dagster/partition", "value": key}, *tags(args.reason)]
+                },
+            }
+            if args.dry_run:
+                print(json.dumps(params, indent=1))
+                continue
+            print(key, json.dumps(gql(mutation, {"p": params})))
         return
 
     if args.command == "backfill-status":
