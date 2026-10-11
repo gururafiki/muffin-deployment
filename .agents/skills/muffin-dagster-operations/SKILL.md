@@ -64,9 +64,27 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    - `retracted` counts bars on dates the documents no longer hold; the first visits remove the
      openbb lane's holiday filler.
 
+   **A short day is often a holiday.** Split it by market (the symbol's suffix) before calling it a
+   gap. On 2026-10-09 every Taiwanese and Korean bar was missing, and from 10-05 to 10-07 every
+   Shanghai and Shenzhen one.
+
    Expect ~41 FX rates,
    549 index rows plus 77 sector rows, and `security_return` at the newest trading day — it rebuilds
    itself after `nightly_prices`. Launch it by hand only to recover a night.
+4. **Where the night's time went.** Read the steps, not the runs: every run also spends ~15 s
+   starting up, which `run_s` includes.
+   ```sql
+   select e.event::json->'dagster_event'->>'step_key' step, count(*),
+          round(sum((e.event::json->'dagster_event'->'event_specific_data'->>'duration_ms')::numeric) / 1000) total_s
+     from event_logs e join runs r on r.run_id = e.run_id
+    where r.pipeline_name = 'nightly_prices' and r.create_timestamp > now() - interval '1 day'
+      and e.dagster_event_type = 'STEP_SUCCESS'
+    group by 1 order by 1;
+   ```
+   On 2026-10-11, `raw_price_chart` took 3,635 s: 25 requests a run, 1.4 s apart, so the spacing is
+   the bound. `price_bar_history` took 1,503 s, the two checks 556 s, and start-up about 1,540 s
+   across 100 runs. Deriving a rate from the night's total instead is how the chart lane's spacing
+   ended up at less than half the intended rate.
 
 ## Why a run failed
 
