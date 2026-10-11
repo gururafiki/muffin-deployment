@@ -100,10 +100,13 @@ jobs:
       #
       # THIS IS NOT A DEPLOY, and that is the point: no terraform, no ansible, no migrations
       # re-applied, no config restaged — so shipping an asset costs a minute instead of eleven.
-      # It is only correct because `image_ingest` is a MOVING tag (`:latest`) in all three places
-      # that set it (this repo's deploy workflow, `stack/config.example.yml`, and the compose
-      # default), so a later full deploy renders the same tag this roll pulled and the two
-      # converge. Pin that tag to a sha and this silently becomes something a deploy undoes.
+      #
+      # AND IT IS THE ONLY THING THAT MOVES THE INGEST IMAGE (Phase 4 decision 19). It pins the
+      # services to `<tag>@sha256:<the digest it pulled>`, and the deploy renders whatever the code
+      # location's spec holds, so a later deploy changes nothing and never restarts Dagster. The
+      # configured tag (`image_ingest`, `:latest` in this repo's deploy workflow,
+      # `stack/config.example.yml` and the compose default) still names what this roll pulls, and
+      # changing it is how a deploy is told to move.
       #
       # Anything touching `dagster.yaml`, `workspace.yaml`, the compose file or the schema is a
       # deploy, not a roll.

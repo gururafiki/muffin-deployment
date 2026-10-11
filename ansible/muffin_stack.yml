@@ -600,6 +600,42 @@
         state: "{{ 'restarted' if (_egress_script.changed or _egress_unit.changed) else 'started' }}"
         daemon_reload: true
 
+    # ONLY `roll-ingest` MOVES THE INGEST IMAGE (Phase 4 decision 19; muffin-umbrella
+    # docs/deferred/2026-09-26-a-deploy-rolls-the-ingest-image.md).
+    #
+    # The stack file names `:latest`, and `docker stack deploy` re-resolves a tag on every deploy, so
+    # every deploy used to roll ingest. An unrolled muffin-ingest merge went live mid-deploy
+    # (muffin-ingest#82). And the first deploy after ANY roll restarted all three Dagster services
+    # with no new image, because the roll wrote the bare tag and the deploy wrote `tag@digest`. Both
+    # kill the runs in flight; one cancelled a 303-run backfill.
+    #
+    # The roll now pins `<tag>@sha256:<digest>` itself, and this renders whatever the code location's
+    # spec holds, so Swarm finds nothing to change. Measured on the node 2026-10-11 with a throwaway
+    # stack: a pinned roll followed by a deploy of the same string created no task.
+    #
+    # The configured tag still decides: the pin is kept only while it belongs to `image_ingest`, so
+    # changing that value in config is how a deploy is told to move. A node with no ingest service
+    # yet, or one a bare-tag roll left behind, renders `image_ingest` as before.
+    - name: Read the image the ingest code location runs
+      command: docker service inspect muffin_muffin-ingest
+      register: _ingest_service
+      changed_when: false
+      failed_when: false
+
+    - name: Keep the image the last roll pinned
+      vars:
+        _rolled: "{{ (_ingest_service.stdout | from_json)[0].Spec.TaskTemplate.ContainerSpec.Image }}"
+      set_fact:
+        image_ingest: "{{ _rolled }}"
+      when:
+        - _ingest_service.rc == 0
+        - "'@sha256:' in _rolled"
+        - (_rolled.split('@')[0]) == (image_ingest | default('ghcr.io/gururafiki/muffin-ingest:latest'))
+
+    - name: Say which ingest image the stack file names
+      debug:
+        msg: "ingest image rendered: {{ image_ingest | default('ghcr.io/gururafiki/muffin-ingest:latest') }}"
+
     - name: Render the Swarm stack file
       template:
         src: "{{ muffin_template_dir }}/docker-compose.yaml"

@@ -11,15 +11,23 @@
 # restaged. If a change touches `dagster.yaml`, the workspace, the compose file or the schema, this
 # script is the wrong tool and a deploy is the right one.
 #
-# THE ONE DETAIL THAT MAKES OR BREAKS IT: the running spec carries the tag AND the digest Swarm
-# resolved at deploy time —
+# THE ONE DETAIL THAT MAKES OR BREAKS IT: the running spec carries the tag AND a digest —
 #
 #     ghcr.io/gururafiki/muffin-ingest:latest@sha256:31720d44042bb0...
 #
 # Passing that back to `docker service update --image` re-pins the OLD digest, so the command
 # succeeds, the tasks restart, and the node keeps running exactly the image it was already running.
-# A silent no-op that reads as a successful roll. The digest is therefore stripped, and the before
-# and after digests are printed so the roll can be seen to have done something.
+# A silent no-op that reads as a successful roll. So the old digest is stripped, the tag is pulled,
+# and the digest THE PULL resolved is pinned in its place. The before and after images are printed
+# so the roll can be seen to have done something.
+#
+# AND THE ROLL IS THE ONLY THING THAT MOVES THIS IMAGE (Phase 4 decision 19). It writes the same
+# `<tag>@sha256:<digest>` string `docker stack deploy` writes, and the deploy renders the string the
+# code location's spec holds, so a deploy finds nothing to change and never restarts Dagster. Until
+# 2026-10-11 the roll wrote the BARE tag, so the first deploy after any roll replaced all three
+# services (measured with a throwaway stack: a bare-tag roll then a deploy created a task, a pinned
+# roll then a deploy of the same string created none). See muffin-umbrella
+# docs/deferred/2026-09-26-a-deploy-rolls-the-ingest-image.md.
 set -euo pipefail
 
 SERVICES=(muffin_muffin-ingest muffin_dagster-daemon muffin_dagster-webserver)
@@ -92,6 +100,19 @@ if ! pull_output="$(docker pull "$IMAGE_TAG" 2>&1)"; then
 fi
 log "pulled $IMAGE_TAG"
 
+# THE DIGEST THE PULL RESOLVED, from the image the tag now names. Refuse rather than fall back to
+# the bare tag: a bare tag is exactly the string the next deploy would rewrite, which is a restart of
+# Dagster nobody asked for.
+REPO="${IMAGE_TAG%:*}"
+PULLED="$(docker image inspect "$IMAGE_TAG" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+          | grep -F "${REPO}@sha256:" | head -1 || true)"
+if [ -z "$PULLED" ]; then
+  echo "::error::cannot read the digest $IMAGE_TAG was pulled at; refusing to roll onto a bare tag"
+  exit 1
+fi
+PINNED="${IMAGE_TAG}@${PULLED#*@}"
+log "pinning $PINNED"
+
 # WHICH RUNS THIS ROLL IS ABOUT TO KILL — read as late as possible, after the pull, so a run started
 # in between is a matter of seconds rather than of however long the pull took.
 if ! interrupted="$(inflight_ids)"; then
@@ -111,9 +132,9 @@ for svc in "${SERVICES[@]}"; do
   BEFORE["$svc"]="$(running_image "$svc")"
   tag="${ref%%@*}"
   log "rolling $svc  (tag $tag, running ${BEFORE[$svc]:-unknown})"
-  # --force so the tasks are recreated even when the digest is unchanged; --image with the digest
-  # STRIPPED so the tag is re-resolved against the registry.
-  docker service update --quiet --force --image "$tag" "$svc" >/dev/null
+  # --force so the tasks are recreated even when the digest is unchanged; --image PINNED to what the
+  # pull just resolved, never the old digest and never the bare tag.
+  docker service update --quiet --force --image "$PINNED" "$svc" >/dev/null
 done
 
 log "waiting for the code location to serve"
@@ -188,6 +209,22 @@ done
 # rolling when nothing new has been pushed — but it has to be a thing this script observed rather
 # than a thing it failed to observe.
 [ "$unknown" -eq 0 ] || { echo "::error::the roll cannot say what is running"; exit 1; }
+
+# THE SPEC IS WHAT THE NEXT DEPLOY READS, so it is checked too: a service left on any other string
+# would be replaced by that deploy, which is the restart this roll exists to prevent.
+echo
+echo "== specs =="
+unpinned=0
+for svc in "${SERVICES[@]}"; do
+  spec="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
+  if [ "$spec" = "$PINNED" ]; then
+    printf '%-28s pinned\n' "$svc"
+  else
+    printf '%-28s ::error::spec is %s, not %s\n' "$svc" "$spec" "$PINNED"
+    unpinned=1
+  fi
+done
+[ "$unpinned" -eq 0 ] || { echo "::error::a deploy would replace the services left unpinned"; still_held; exit 1; }
 
 # FAIL WHAT THE ROLL KILLED. Only runs recorded before the update and still live now: a run that
 # finished before the container went was never interrupted, and one started since belongs to the

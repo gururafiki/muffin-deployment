@@ -108,6 +108,8 @@ jobs:
           image_ui: "ghcr.io/${{ github.repository_owner }}/agent-chat-ui-docker:latest"
           image_app: "ghcr.io/${{ github.repository_owner }}/muffin-ui:latest"
           image_nuq_postgres: "ghcr.io/${{ github.repository_owner }}/nuq-postgres-docker:latest"
+          # The TAG roll-ingest pulls. A deploy keeps the digest the last roll pinned and moves
+          # ingest only if this value changes (ansible/muffin_stack.yml, decision 19).
           image_ingest: "ghcr.io/${{ github.repository_owner }}/muffin-ingest:latest"
           dagster_subdomain: "${{ vars.DAGSTER_SUBDOMAIN || 'muffin-dagster' }}"
           registry_server: "ghcr.io"
