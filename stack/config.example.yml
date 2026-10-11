@@ -34,6 +34,8 @@ image_openbb: "ghcr.io/gururafiki/openbb-mcp-docker:latest"
 image_ui: "ghcr.io/gururafiki/agent-chat-ui-docker:latest"
 image_app: "ghcr.io/gururafiki/muffin-ui:latest"
 image_nuq_postgres: "ghcr.io/gururafiki/nuq-postgres-docker:latest"
+# The tag `roll-ingest` pulls. A deploy renders the digest the last roll pinned, not this tag, so it
+# never restarts Dagster; change this value to make a deploy move ingest (Phase 4 decision 19).
 image_ingest: "ghcr.io/gururafiki/muffin-ingest:latest"   # ingestion library + Dagster assets
 
 # === Container registry login (so the node can pull the private GHCR packages) ===

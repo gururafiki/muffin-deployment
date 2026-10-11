@@ -63,23 +63,27 @@ gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f ac
 - **Poll `gh run view <id> --json status` rather than piping `gh run watch` into `--log`.** On
   2026-09-24 that pipeline was still waiting ten minutes after a roll that had finished in ninety
   seconds; which half hung was not established. The polling loop returned as soon as the run did.
-- **The first deploy after a roll is a roll too.** The roll leaves the bare `:latest` tag in the
-  task spec and `docker stack deploy` pins the digest, so the next deploy restarts all three Dagster
-  services even with an unchanged image. Check a restart on the task (`docker service ps`, then
-  `docker inspect <task>`), never on the service's `UpdatedAt`, which moves on every deploy. On 2026-10-03 that failed a running
-  backfill: 303 runs cancelled. Land queued deploys before a roll, and deploy after one only with
-  nothing in flight. See `docs/deferred/2026-09-26-a-deploy-rolls-the-ingest-image.md`.
+- **Only the roll moves the ingest image** (Phase 4 decision 19, since muffin-deployment#431). The
+  roll pins `<tag>@sha256:<the digest it pulled>` into all three specs, and the deploy renders the
+  string the code location's spec holds, so a deploy finds nothing to change and does not restart
+  Dagster. Until a pinned roll has run, the specs still hold the bare `:latest` an older roll left,
+  and the next deploy restarts all three services: that is how a running backfill lost 303 runs on
+  2026-10-03. Check a restart on the task (`docker service ps`, then `docker inspect <task>`), never
+  on the service's `UpdatedAt`, which moves on every deploy. To make a deploy move ingest, change
+  `image_ingest`; it keeps a pinned digest only while that digest belongs to the configured tag.
+  See `docs/deferred/2026-09-26-a-deploy-rolls-the-ingest-image.md`.
 - **A roll kills in-flight runs.** Each run is a `multiprocessing` child of the code server
   (`dagster/_grpc/server.py`, `StartRun`). The roll warns (`::warning::N run(s) in flight`), goes
   ahead, and since muffin-deployment#387 reports the runs it killed as failed once the new location
   has loaded (`== interrupted runs ==`). Wait for long runs anyway (`muffin-dagster-operations`) —
   a failed run is still lost work. If the roll exits early it prints `::error::interrupted and still
   holding their pool slots: <ids>`, and those must be failed by hand.
-- **Read the roll's log.** A good roll prints `pulled <tag>`, `gRPC SERVING`, `muffin_ingest: LOADED`,
-  then `== images ==` with `<service> <old> -> <new>` for all three services, and
-  `== interrupted runs ==` when something was in flight. `unchanged` is right only if nothing new
-  was pushed. It fails loudly on `pull … failed`, `never reported SERVING`, `did not load` and
-  `cannot say what is running`.
+- **Read the roll's log.** A good roll prints `pulled <tag>`, `pinning <tag>@sha256:…`,
+  `gRPC SERVING`, `muffin_ingest: LOADED`, then `== images ==` with `<service> <old> -> <new>` for
+  all three services, `== specs ==` with `pinned` for all three, and `== interrupted runs ==` when
+  something was in flight. `unchanged` is right only if nothing new was pushed. It fails loudly on
+  `pull … failed`, `cannot read the digest`, `never reported SERVING`, `did not load`,
+  `cannot say what is running` and `a deploy would replace the services left unpinned`.
 - It logs free disk before pulling. If `/` is low, run `-f action=prune-images` first; that job fails
   below 5 GB free.
 - Dagster upgrade: compare `dagster/_core/storage/alembic/versions` between the two versions. New
