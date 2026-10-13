@@ -71,6 +71,13 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    Expect ~41 FX rates,
    549 index rows plus 77 sector rows, and `security_return` at the newest trading day — it rebuilds
    itself after `nightly_prices`. Launch it by hand only to recover a night.
+
+   **An FX weekday with no rates is not always a failure.** Since muffin-ingest#111 (2026-10-13),
+   `fx_rate` fails a weekday only when every body was produced before the day ended (a stale
+   cache). A day Yahoo left out of a fresh body materialises empty and is named in its
+   `provider_skipped_days` metadata. Each night also offers the days before its own, insert-only,
+   so a day Yahoo fills late arrives the next night by itself (`refilled`): Yahoo filled Monday
+   2026-10-12 about 21 hours after it ended.
 4. **Where the night's time went.** Read the steps, not the runs: every run also spends ~15 s
    starting up, which `run_s` includes.
    ```sql
