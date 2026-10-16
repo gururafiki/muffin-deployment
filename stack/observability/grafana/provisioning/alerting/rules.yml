@@ -302,6 +302,57 @@ groups:
       description: '`/` was already at 70% on 2026-08-27 and grows with every image pull: Docker uses the containerd image store, so images live in /var/lib/containerd (20 G) rather than the migrated data-root
         on /mnt/data (9% of 98 G), and daemon.json''s `data-root` does not control it. Cheap relief: `docker image prune -a` and reclaim the stale /var/lib/docker. The real fix is containerd''s own `root`
         — see todos.md.'
+  - uid: muffin-tls-cert-not-renewing
+    title: An origin certificate is not being renewed
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-prometheus
+      model:
+        refId: A
+        expr: round((min by (cn) (traefik_tls_certs_not_after) - time()) / 86400, 0.1)
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 25
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 1h
+    labels:
+      muffin: infra
+    annotations:
+      summary: 'The certificate for {{ $labels.cn }} expires in {{ $values.B }} days'
+      description: 'Traefik renews a Let''s Encrypt certificate by DNS-01 once it has 30 days left, and tries again daily, so a certificate under 25 days has failed about five renewals in a row.
+        Cloudflare is in Full (strict), so an expired origin certificate takes its host down.
+
+
+        Why this exists: Traefik read its Cloudflare token from a Swarm secret created on 2026-07-20 and never replaced, so after CLOUDFLARE_API_TOKEN changed every renewal failed with a 401,
+        daily from 2026-09-19. Nothing noticed for 27 days, until muffin., muffin-api. and supabase. were two days from expiry (muffin-deployment#434).
+
+
+        No data also alerts: it means Prometheus has stopped seeing Traefik''s certificates, and this guard is then blind.
+
+
+        RUNBOOK: `docker service logs muffin_traefik --since 48h 2>&1 | grep -i renew` names the failure (401: the token in the `cf_dns_api_token_*` secret is wrong; 429: Cloudflare is
+        rate-limiting after repeated failures). A deploy with a corrected CLOUDFLARE_API_TOKEN creates a new secret and restarts Traefik, which retries at start.'
   - uid: muffin-data-defect
     title: A data-correctness invariant is broken
     condition: C
