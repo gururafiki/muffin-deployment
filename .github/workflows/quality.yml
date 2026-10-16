@@ -62,6 +62,27 @@ jobs:
               print(f"::error::malformed `environment` in: {', '.join(bad)}")
               sys.exit(1)
           print(f"ok  {len(services)} services parsed")
+
+          # A ROLLED SERVICE LISTS ITS MOUNTS IN SOURCE ORDER. The roll's `docker service update`
+          # re-sorts a service's mounts by source, so any other order in this file makes the next
+          # deploy differ from the running spec, and Swarm replaces the task and kills the runs in
+          # it although the image is pinned (measured 2026-10-16). The services are the roll
+          # script's own list, so a service it starts rolling is checked without editing this.
+          import pathlib
+          roll = pathlib.Path('stack/muffin-roll-ingest.sh').read_text()
+          rolled = re.search(r'^SERVICES=\((.*)\)', roll, re.M).group(1).split()
+          for svc in rolled:
+              name = svc.removeprefix('muffin_')
+              if name not in services:
+                  print(f"::error::the roll names {svc}, which the stack does not define")
+                  sys.exit(1)
+              sources = [v.split(':', 1)[0] if isinstance(v, str) else v.get('source', '')
+                         for v in services[name].get('volumes') or []]
+              if sources != sorted(sources):
+                  print(f"::error::{name} lists its mounts as {sources}; the roll re-sorts them to "
+                        f"{sorted(sources)}, so the next deploy after a roll replaces the task")
+                  sys.exit(1)
+          print(f"ok  {len(rolled)} rolled services list their mounts in source order")
           PY
 
   # BOOT THE ORCHESTRATOR, DO NOT MERELY PARSE IT.

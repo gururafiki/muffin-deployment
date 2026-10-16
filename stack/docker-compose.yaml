@@ -1206,21 +1206,28 @@ services:
       # provider request.
       MUFFIN_RAW_ROOT: /var/lib/muffin-ingest/raw
     volumes:
+      # IN ORDER OF SOURCE PATH, AND THE ORDER IS LOAD-BEARING. The roll's
+      # `docker service update --force --image` re-sorts a service's mounts by source, so a deploy
+      # rendering any other order differs from the running spec and Swarm replaces the task,
+      # killing every run in it, although the image is pinned. Measured 2026-10-16: the first
+      # deploy after the 10-13 roll replaced this service and not the daemon or the webserver,
+      # whose lists were already in order. quality.yml's `compose` job keeps every rolled service
+      # in order.
       - /home/ubuntu/dagster:/opt/dagster/home:ro
-      # A SECOND MOUNT, WRITABLE, RATHER THAN LOOSENING THE FIRST. `DAGSTER_HOME` is read-only on
-      # purpose: Dagster's telemetry tried to write into it and crash-looped the daemon, and the
-      # answer was to turn telemetry off rather than hand three containers a writable config
-      # directory. Raw needs write access and has nothing to do with the instance config, so it
-      # gets its own mount — on /mnt/data, because / is a 45 GB boot volume at 74%.
+      # COMPUTE LOGS: written here and READ BY THE WEBSERVER, which is what renders the
+      # stdout/stderr tab. So this one mount appears twice, and the daemon — which executes no
+      # steps — is deliberately left out.
+      - /mnt/data/ingest/compute-logs:/var/lib/muffin-ingest/compute-logs
+      # RAW: A WRITABLE MOUNT OF ITS OWN, RATHER THAN LOOSENING THE FIRST. `DAGSTER_HOME` is
+      # read-only on purpose: Dagster's telemetry tried to write into it and crash-looped the
+      # daemon, and the answer was to turn telemetry off rather than hand three containers a
+      # writable config directory. Raw needs write access and has nothing to do with the instance
+      # config, so it gets its own mount — on /mnt/data, because / is a 45 GB boot volume at 74%.
       #
       # ONLY THIS SERVICE. `DefaultRunLauncher` executes a run as a subprocess of the code
       # location's gRPC server, so the runs that write raw live in THIS container; the daemon and
       # the webserver never touch the files.
       - /mnt/data/ingest/raw:/var/lib/muffin-ingest/raw
-      # COMPUTE LOGS ARE THE OPPOSITE: written here, READ BY THE WEBSERVER, which is what renders
-      # the stdout/stderr tab. So this one mount appears twice, and the daemon — which executes no
-      # steps — is deliberately left out.
-      - /mnt/data/ingest/compute-logs:/var/lib/muffin-ingest/compute-logs
     networks:
       - muffin-net
     deploy:
