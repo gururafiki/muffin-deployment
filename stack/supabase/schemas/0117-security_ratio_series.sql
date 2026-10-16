@@ -33,7 +33,7 @@ WITH spans AS (
             pb.trade_date AS date,
             pb.close,
             'daily'::text AS grain,
-            s.currency_code AS quote_currency,
+            pb.currency_code AS quote_currency,
             s.reporting_currency
            FROM market.price_bar pb
              JOIN market.symbol_security ss ON ss.security_id = pb.security_id
@@ -45,12 +45,13 @@ WITH spans AS (
             w.date,
             w.close,
             'weekly'::text AS grain,
-            s.currency_code AS quote_currency,
+            w.currency_code AS quote_currency,
             s.reporting_currency
            FROM ( SELECT DISTINCT ON (ss.symbol, (date_trunc('week'::text, pb.trade_date::timestamp with time zone))) ss.symbol,
                     pb.security_id,
                     pb.trade_date AS date,
-                    pb.close
+                    pb.close,
+                    pb.currency_code
                    FROM market.price_bar pb
                      JOIN market.symbol_security ss ON ss.security_id = pb.security_id
                   ORDER BY ss.symbol, (date_trunc('week'::text, pb.trade_date::timestamp with time zone)), pb.trade_date DESC) w
