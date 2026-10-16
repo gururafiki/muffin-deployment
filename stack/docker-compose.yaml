@@ -23,6 +23,10 @@ secrets:
     external: true
   cf_dns_api_token:
     external: true               # Cloudflare Zone:DNS:Edit token for Traefik DNS-01
+    # Named by a hash of the token, so a rotated token is a new secret and Traefik restarts onto
+    # it; a fixed name kept a dead token for four weeks (ansible/vars/docker_secrets.yml). The
+    # file stays /run/secrets/cf_dns_api_token, because the mount target is this KEY.
+    name: "{{ cf_dns_secret_name }}"
   portainer_admin_password:
     external: true               # see the note on the portainer service
 
