@@ -171,6 +171,11 @@
       include_vars:
         file: "{{ muffin_template_dir }}/secrets.yaml"
 
+    # docker-compose.yaml names a secret by a hash of its value; vars/docker_secrets.yml says why.
+    - name: Load the Docker secret names derived from their values
+      include_vars:
+        file: "{{ playbook_dir }}/vars/docker_secrets.yml"
+
     - name: Stage opensandbox config.toml
       copy:
         src: "../config/opensandbox/config.toml"
@@ -656,6 +661,10 @@
       include_vars:
         file: "{{ muffin_template_dir }}/secrets.yaml"
 
+    - name: Load the Docker secret names derived from their values
+      include_vars:
+        file: "{{ playbook_dir }}/vars/docker_secrets.yml"
+
     # All ghcr.io/gururafiki/* images are PUBLIC, so the node pulls them
     # anonymously — no registry login, and NO --with-registry-auth on the stack
     # deploy below. Actively CLEAR any stale ghcr.io credential (e.g. left by an
@@ -680,10 +689,12 @@
       loop:
         - { name: "postgres_password", value: "{{ postgres_password }}" }
         - { name: "firecrawl_postgres_password", value: "{{ firecrawl_postgres_password }}" }
-        - { name: "cf_dns_api_token", value: "{{ cf_dns_api_token }}" }
+        # Named by a hash of its value (vars/docker_secrets.yml), so a rotated Cloudflare token is
+        # a new secret and the stack deploy moves Traefik onto it.
+        - { name: "{{ cf_dns_secret_name }}", value: "{{ cf_dns_api_token }}" }
         # NOTE this task never UPDATES an existing secret — it is idempotent by tolerating
-        # "already exists". Rotating any of these means removing the docker secret first, which
-        # in turn requires removing the services that reference it.
+        # "already exists". Rotating any of the fixed-name ones means removing the docker secret
+        # first, which in turn requires removing the services that reference it.
         - { name: "portainer_admin_password", value: "{{ portainer_admin_password | default('') }}" }
       loop_control:
         label: "{{ item.name }}"
@@ -717,6 +728,18 @@
     # should be run with `docker run`, not `docker service create`.
     - name: docker stack deploy (images are public → anonymous pulls, no registry auth)
       command: "docker stack deploy --prune -c /home/ubuntu/docker-compose.yaml muffin"
+
+    # A rotated Cloudflare token leaves its old secret behind (vars/docker_secrets.yml). Swarm
+    # refuses to remove a secret a service still references, so this removes exactly the old
+    # versions and leaves the one Traefik now uses. Cleanup only: it never fails the deploy.
+    - name: Remove Cloudflare token secrets no service uses any more
+      shell: |
+        for s in $(docker secret ls --filter name=cf_dns_api_token | awk 'NR > 1 {print $2}'); do
+          if docker secret rm "$s" >/dev/null 2>&1; then echo "removed $s"; fi
+        done
+      register: cf_secret_cleanup
+      changed_when: "'removed' in cf_secret_cleanup.stdout"
+      failed_when: false
 
 # --- 6. Supabase post-deploy migrations ------------------------------------
 # App tables reference auth.users, which GoTrue creates on ITS first boot — so these
