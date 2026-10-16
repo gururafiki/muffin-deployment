@@ -52,11 +52,12 @@ insert into market.security_metric
   ('00000000-0000-0000-0000-000000021004','net_income','annual',date '2024-12-31',  100,'USD','sec-xbrl')
 on conflict do nothing;
 
-insert into market.price_bar (security_id, trade_date, close, source_code) values
-  ('00000000-0000-0000-0000-000000021001', date '2025-03-01', 40, 'yfinance'),
-  ('00000000-0000-0000-0000-000000021002', date '2025-03-01', 40, 'yfinance'),
-  ('00000000-0000-0000-0000-000000021003', date '2025-03-01', 40, 'yfinance'),
-  ('00000000-0000-0000-0000-000000021004', date '2025-03-01', 40, 'yfinance')
+-- Labelled, as the price lane labels every bar: the view takes the quote currency from the bar.
+insert into market.price_bar (security_id, trade_date, close, source_code, currency_code) values
+  ('00000000-0000-0000-0000-000000021001', date '2025-03-01', 40, 'yfinance', 'USD'),
+  ('00000000-0000-0000-0000-000000021002', date '2025-03-01', 40, 'yfinance', 'USD'),
+  ('00000000-0000-0000-0000-000000021003', date '2025-03-01', 40, 'yfinance', 'USD'),
+  ('00000000-0000-0000-0000-000000021004', date '2025-03-01', 40, 'yfinance', 'USD')
 on conflict (security_id, trade_date) do nothing;
 
 refresh materialized view market.symbol_security;

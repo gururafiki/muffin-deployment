@@ -65,8 +65,8 @@ insert into market.security_metric
   ('00000000-0000-0000-0000-000000010501','total_equity','quarter',date '2025-01-01', 500,'USD','sec-xbrl')
 on conflict do nothing;
 
--- C: no currency on either side. A yfinance-derived metric carries none, and a security promoted
--- from the directory may have none either — two unknowns are not a match.
+-- C: no currency on either side. A yfinance-derived metric carries none, and a bar the price lane
+-- could not label has none either — two unknowns are not a match. Its bar stays unlabelled.
 insert into market.security (security_id, name, security_type_code, country_iso2, currency_code) values
   ('00000000-0000-0000-0000-000000010503', 'T105 Unknown Currency', 'equity', 'ZW', null)
 on conflict (security_id) do nothing;
@@ -84,12 +84,13 @@ on conflict (security_id, trade_date) do nothing;
 -- Price bars either side of the second report, plus one for the ADR. In `price_bar` since
 -- 2026-09-26, the table the view reads. These dates are older than the daily arm's 400-day window,
 -- so the rows asserted below come from the WEEKLY arm — each date is alone in its week, so the
--- weekly bar is this bar and every ratio is unchanged.
-insert into market.price_bar (security_id, trade_date, close, source_code) values
-  ('00000000-0000-0000-0000-000000010501', date '2025-03-01', 40, 'yfinance'),
-  ('00000000-0000-0000-0000-000000010501', date '2025-06-30', 40, 'yfinance'),
-  ('00000000-0000-0000-0000-000000010501', date '2025-08-01', 40, 'yfinance'),
-  ('00000000-0000-0000-0000-000000010502', date '2025-03-01', 40, 'yfinance')
+-- weekly bar is this bar and every ratio is unchanged. Labelled USD, as the price lane labels a US
+-- line: the view takes the quote currency from the bar.
+insert into market.price_bar (security_id, trade_date, close, source_code, currency_code) values
+  ('00000000-0000-0000-0000-000000010501', date '2025-03-01', 40, 'yfinance', 'USD'),
+  ('00000000-0000-0000-0000-000000010501', date '2025-06-30', 40, 'yfinance', 'USD'),
+  ('00000000-0000-0000-0000-000000010501', date '2025-08-01', 40, 'yfinance', 'USD'),
+  ('00000000-0000-0000-0000-000000010502', date '2025-03-01', 40, 'yfinance', 'USD')
 on conflict (security_id, trade_date) do nothing;
 
 refresh materialized view market.symbol_security;
@@ -196,8 +197,8 @@ begin
   end if;
 
   -- 6. A BAR BEFORE THE FIRST REPORT HAS NO RATIO, rather than borrowing the first one backwards.
-  insert into market.price_bar (security_id, trade_date, close, source_code)
-  values ('00000000-0000-0000-0000-000000010501', date '2024-06-01', 40, 'yfinance')
+  insert into market.price_bar (security_id, trade_date, close, source_code, currency_code)
+  values ('00000000-0000-0000-0000-000000010501', date '2024-06-01', 40, 'yfinance', 'USD')
   on conflict (security_id, trade_date) do nothing;
   select count(*) into n from market.security_ratio_series
    where symbol = 'T105A' and date = date '2024-06-01';
