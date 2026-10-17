@@ -19,7 +19,7 @@ WITH gapped AS (
             sm.source_code,
             ds.priority,
                 CASE
-                    WHEN (sm.as_of - lag(sm.as_of) OVER (PARTITION BY sym.symbol, sm.security_id, sm.metric_code, sm.period_type ORDER BY sm.as_of)) <= 7 THEN 0
+                    WHEN (sm.as_of - lag(sm.as_of) OVER (PARTITION BY sym.symbol, sm.security_id, sm.period_type ORDER BY sm.as_of)) <= 7 THEN 0
                     ELSE 1
                 END AS starts_cluster
            FROM market.security_metric sm
@@ -35,23 +35,36 @@ WITH gapped AS (
             g.currency_code,
             g.source_code,
             g.priority,
-            g.starts_cluster,
-            sum(g.starts_cluster) OVER (PARTITION BY g.symbol, g.security_id, g.metric_code, g.period_type ORDER BY g.as_of) AS period_group
+            sum(g.starts_cluster) OVER (PARTITION BY g.symbol, g.security_id, g.period_type ORDER BY g.as_of) AS period_group,
+            count(*) OVER (PARTITION BY g.symbol, g.security_id, g.period_type, g.priority, g.as_of) AS rows_on_date
            FROM gapped g
+        ), anchored AS (
+         SELECT c.security_id,
+            c.symbol,
+            c.metric_code,
+            c.period_type,
+            c.as_of,
+            c.value,
+            c.currency_code,
+            c.source_code,
+            c.priority,
+            c.period_group,
+            first_value(c.as_of) OVER (PARTITION BY c.symbol, c.security_id, c.period_type, c.period_group ORDER BY c.priority DESC, c.rows_on_date DESC, c.as_of DESC) AS period_as_of
+           FROM clustered c
         )
- SELECT DISTINCT ON (c.symbol, c.security_id, c.metric_code, c.period_type, c.period_group) c.symbol,
-    c.security_id,
-    c.metric_code,
+ SELECT DISTINCT ON (a.symbol, a.security_id, a.metric_code, a.period_type, a.period_group) a.symbol,
+    a.security_id,
+    a.metric_code,
     m.name AS metric_name,
     m.category,
     m.unit,
     m.is_derived,
-    c.period_type,
-    c.as_of,
-    c.value,
-    COALESCE(c.currency_code, s.reporting_currency) AS currency_code,
-    c.source_code
-   FROM clustered c
-     JOIN market.metric m ON m.code = c.metric_code
-     JOIN market.security s ON s.security_id = c.security_id
-  ORDER BY c.symbol, c.security_id, c.metric_code, c.period_type, c.period_group, c.priority DESC, c.as_of DESC;
+    a.period_type,
+    a.period_as_of AS as_of,
+    a.value,
+    COALESCE(a.currency_code, s.reporting_currency) AS currency_code,
+    a.source_code
+   FROM anchored a
+     JOIN market.metric m ON m.code = a.metric_code
+     JOIN market.security s ON s.security_id = a.security_id
+  ORDER BY a.symbol, a.security_id, a.metric_code, a.period_type, a.period_group, a.priority DESC, (a.as_of = a.period_as_of) DESC, a.as_of DESC;
