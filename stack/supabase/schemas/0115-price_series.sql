@@ -11,7 +11,8 @@ create view market.price_series as
 SELECT ss.symbol,
     pb.trade_date AS date,
     pb.close,
-    'daily'::text AS grain
+    'daily'::text AS grain,
+    pb.currency_code
    FROM market.price_bar pb
      JOIN market.symbol_security ss ON ss.security_id = pb.security_id
   WHERE pb.trade_date > (CURRENT_DATE - 400)
@@ -19,10 +20,12 @@ UNION ALL
  SELECT w.symbol,
     w.date,
     w.close,
-    'weekly'::text AS grain
+    'weekly'::text AS grain,
+    w.currency_code
    FROM ( SELECT DISTINCT ON (ss.symbol, (date_trunc('week'::text, pb.trade_date::timestamp with time zone))) ss.symbol,
             pb.trade_date AS date,
-            pb.close
+            pb.close,
+            pb.currency_code
            FROM market.price_bar pb
              JOIN market.symbol_security ss ON ss.security_id = pb.security_id
           ORDER BY ss.symbol, (date_trunc('week'::text, pb.trade_date::timestamp with time zone)), pb.trade_date DESC) w;
