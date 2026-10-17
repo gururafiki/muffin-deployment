@@ -9,14 +9,16 @@ begin
 end $$;
 create view market.security_ratio_series as
 WITH spans AS (
-         SELECT m.security_id,
+         SELECT ss.symbol,
+            m.security_id,
             m.metric_code,
             m.value,
             m.currency_code,
             m.as_of,
             m.period_type,
-            lead(m.as_of) OVER (PARTITION BY m.security_id, m.metric_code ORDER BY m.as_of) AS next_as_of
-           FROM market.security_metric m
+            lead(m.as_of) OVER (PARTITION BY ss.symbol, m.security_id, m.metric_code ORDER BY m.as_of) AS next_as_of
+           FROM market.symbol_security ss
+             JOIN market.security_metric m ON m.security_id = ss.security_id
              JOIN market.metric mt ON mt.code = m.metric_code
           WHERE (mt.is_flow AND (m.period_type = 'ttm'::text OR m.period_type = 'annual'::text AND NOT (EXISTS ( SELECT 1
                    FROM market.security_metric t
@@ -116,7 +118,7 @@ WITH spans AS (
                     ELSE NULL::text
                 END) AS ni_basis
            FROM bars b
-             JOIN spans sp ON sp.security_id = b.security_id AND b.date >= sp.as_of AND (sp.next_as_of IS NULL OR b.date < sp.next_as_of)
+             JOIN spans sp ON sp.symbol = b.symbol AND sp.security_id = b.security_id AND b.date >= sp.as_of AND (sp.next_as_of IS NULL OR b.date < sp.next_as_of)
           GROUP BY b.symbol, b.security_id, b.date, b.close, b.grain, b.quote_currency, b.reporting_currency
         ), resolved AS (
          SELECT j.symbol,
