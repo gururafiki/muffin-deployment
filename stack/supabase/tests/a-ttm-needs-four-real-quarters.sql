@@ -384,3 +384,90 @@ end $$;
 rollback;
 
 \echo 'ok: a year is four consecutive quarters, with the fourth derived where it can be'
+
+-- ── AND A QUARTER TWO SOURCES REPORT IS ONE QUARTER ─────────────────────────────────────────────
+--
+-- SEC dates a quarter by its last day and Yahoo by the month end, so a 52/53-week filer's quarters
+-- arrive twice, days apart. Counted as rows, four of them cover two quarters and the window refuses
+-- every year; on 2026-10-17 that retracted every Apple TTM after 2025-06-28 and its P/E read 51.74
+-- instead of 39.15 (migration 20261017160000).
+--
+-- WHAT MAKES THE RULES DISAGREE. Yahoo's value is SEC's plus 1 on every shared quarter, and Yahoo
+-- alone reports the fiscal Q4 (SEC files the year), so:
+--   * counting rows (the old rule) gives no TTM at all;
+--   * letting Yahoo win gives 103 at 2026-03-31 and 143 at 2026-06-30;
+--   * letting SEC win, the rule, gives 100 at 2026-03-28 and 140 at 2026-06-27;
+--   * dropping a quarter only one source reports gives no TTM either, for want of a fourth.
+
+begin;
+
+insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
+insert into market.data_source (code, name, priority) values ('sec-xbrl','SEC XBRL',275) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('yfinance','yfinance',100) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('derived','Computed',50) on conflict (code) do nothing;
+insert into market.currency (code, name) values ('USD','US Dollar') on conflict (code) do nothing;
+insert into market.countries (iso2, name, flag, drillable) values ('ZV','Ttmland','ZV',false)
+  on conflict (iso2) do nothing;
+insert into market.security (security_id, name, security_type_code, country_iso2) values
+  ('00000000-0000-0000-0000-000000010421', 'T104 Two Sources, One Quarter', 'equity', 'ZV')
+on conflict (security_id) do nothing;
+
+insert into market.security_metric
+  (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values
+  -- SEC, on the fiscal calendar's Saturdays. No fourth quarter: the 10-K carries the year.
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2025-06-28', 10,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2025-12-27', 30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2026-03-28', 40,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2026-06-27', 50,'USD','sec-xbrl'),
+  -- Yahoo, on month ends, one more on every shared quarter, and the fourth quarter on its own.
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2025-06-30', 11,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2025-09-30', 20,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2025-12-31', 31,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2026-03-31', 41,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010421','revenue','quarter',date '2026-06-30', 51,'USD','yfinance')
+on conflict do nothing;
+
+do $$
+declare v numeric; n integer;
+begin
+  perform market.derive_ttm('00000000-0000-0000-0000-000000010421', 400);
+
+  -- 1. A TTM AT EACH OF SEC'S DATES THAT HAS FOUR QUARTERS BEHIND IT, ON SEC'S VALUES, with
+  --    Yahoo's lone fourth quarter counted: 10 + 20 + 30 + 40 and 20 + 30 + 40 + 50.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010421' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2026-03-28';
+  if v is distinct from 100 then
+    raise exception 'the TTM at SEC''s 2026-03-28 is %, expected 100 (10 + 20 + 30 + 40). None means the same quarter from two sources was counted as two; 103 elsewhere means Yahoo won',
+      coalesce(v::text, '<none>');
+  end if;
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010421' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2026-06-27';
+  if v is distinct from 140 then
+    raise exception 'the TTM at SEC''s 2026-06-27 is %, expected 140 (20 + 30 + 40 + 50)', coalesce(v::text, '<none>');
+  end if;
+
+  -- 2. AND NOT A SECOND SERIES ON YAHOO'S DATES. Two TTMs three days apart would make the ratio
+  --    view's spans flip between them.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010421' and period_type = 'ttm'
+     and as_of in (date '2025-12-31', date '2026-03-31', date '2026-06-30');
+  if n <> 0 then
+    raise exception '% TTM rows on Yahoo''s dates for quarters SEC also reports — the same year twice, days apart', n;
+  end if;
+
+  -- 3. THE QUARTERS THEMSELVES ARE KEPT. Choosing between them is the TTM's business; the rows
+  --    are each source's statement and stay readable.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010421' and period_type = 'quarter';
+  if n <> 9 then
+    raise exception '% quarter rows after the derivation, expected all 9 — the TTM must not delete a source''s quarters', n;
+  end if;
+
+  raise notice '  ok  a quarter two sources report is one quarter, and the higher-priority source stands for it';
+end $$;
+
+rollback;
+
+\echo 'ok: a quarter two sources report is one quarter'

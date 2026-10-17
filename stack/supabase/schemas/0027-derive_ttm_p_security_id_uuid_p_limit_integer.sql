@@ -69,6 +69,10 @@ begin
 
   -- 2. THE TTM: FOUR CONSECUTIVE QUARTERS OF A FLOW, IN ONE CURRENCY. 240-300 days from the first
   --    quarter's end to the last: above it a quarter is missing, below it one is in twice.
+  --    A QUARTER TWO SOURCES REPORT IS ONE QUARTER. SEC dates a quarter by its last day and Yahoo by
+  --    the month end, so a 52/53-week filer's quarters arrive twice, days apart, and the window
+  --    would refuse every year. Within ten days of each other the higher-priority source's row
+  --    stands for the quarter (the later date on a tie), the same ten days step 1 uses.
   create temporary table _ttm on commit drop as
   select q.security_id, q.metric_code, q.as_of, q.ttm_value, q.currency_code
     from (
@@ -82,6 +86,14 @@ begin
         join market.metric mt on mt.code = m.metric_code and mt.is_flow
         join _ttm_page pg on pg.security_id = m.security_id
        where m.period_type = 'quarter'
+         and not exists (
+               select 1 from market.security_metric o
+                where o.security_id = m.security_id and o.metric_code = m.metric_code
+                  and o.period_type = 'quarter'
+                  and o.as_of between m.as_of - 10 and m.as_of + 10
+                  and o.source_code <> m.source_code
+                  and (market.source_priority(o.source_code), o.as_of)
+                    > (market.source_priority(m.source_code), m.as_of))
       window w as (partition by m.security_id, m.metric_code
                    order by m.as_of rows between 3 preceding and current row)
     ) q
