@@ -10,8 +10,8 @@ description:
 
 # Change the market schema
 
-Done this way four times on 2026-10-17 (muffin-deployment#437, #439, #440, #441) and once on
-2026-10-18 (#443). Each step below caught something the step before it could not.
+Done this way four times on 2026-10-17 (muffin-deployment#437, #439, #440, #441) and twice on
+2026-10-18 (#443, #446). Each step below caught something the step before it could not.
 
 ## 1. The migration
 
@@ -120,3 +120,4 @@ After the deploy:
 | A before/after read of a serving view times out in the rolled-back check | a join from a temp table cannot carry the symbol filter into the view's window; read each symbol with a constant |
 | A diff shows no `diff` header lines | busybox `diff` prints none; grep `+++` |
 | `unterminated quoted string` in psql | an apostrophe in an `\echo` |
+| `MUTATION DID NOT APPLY`, and its fingerprint equals the restored one | the mutated view selects a column its `GROUP BY` lacks, so `create or replace` fails; add the column to the `GROUP BY` too (met 2026-10-18, #446) |

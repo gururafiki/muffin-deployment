@@ -232,7 +232,8 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // Each entry is a site where a batch that produced nothing writes a `*_missing_at`, and the
   // string is the proof that the endpoint answered for someone in this run.
   const gates: [string, string][] = [
-    ['security-statements',   'anyAnswer || (failed === 0 && written > 0)'],
+    // SEC only since 2026-10-18: the yfinance half and its `statements_missing_at` left the edge.
+    ['security-statements',   'secNoSuchSymbol || (secAsked && secRows === 0 && secOk)'],
     ['security-quarters',     'asked && anyAnswer'],
     // Marks only what isolation proved dead ALONE — never absence from a batched 200.
     // `iso.dead` IS the gate: fetchWithIsolation only populates it after asking each symbol alone
@@ -476,7 +477,7 @@ console.log('\nabsence classifier — a crash in the adapter is still an answer 
     'the absence classifier knows every wording, not just the tidy one',
     terms.join(' | '))
 
-  // THE `no_currency` HALF OF THE STATEMENTS BACKLOG IS MARKED ON PER-SYMBOL EVIDENCE, NOT ON A
+  // THE STATEMENTS BACKLOG IS MARKED ON PER-SYMBOL EVIDENCE, NOT ON A
   // RUN-LEVEL TALLY. `secOk` says the endpoint answered for SOMEONE this run — the right guard
   // against an outage, and guaranteed false once the answerable head has drained, which is how
   // this resource sat at `written: 240, remaining: 5972` on six identical runs.
@@ -1112,13 +1113,17 @@ console.log('\nsecurity-dividends — the 400 that means "this company pays none
 }
 
 
-// ── security-statements — the filing is the better record ────────────────────
+// ── security-statements — SEC only; Yahoo's statements are the company lane's ─
 //
 // 0 of 104,972 statement rows carried a reporting currency, while the `currency` column and the
 // code that reads `reported_currency` had both existed since migration 29 — yfinance simply never
 // sends it. SEC does, along with 18 annual periods against yfinance's 4. Both properties are
 // silent when lost: the rows still arrive, just shallower and unlabelled.
-console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
+//
+// Since 2026-10-18 the resource asks SEC alone. Yahoo's annual and quarterly statements are the
+// Dagster company lane's, labelled with their currency; the yfinance half this resource kept held 26
+// securities Yahoo answers nothing for, and would have been a second writer of the lane's rows.
+console.log('\nsecurity-statements — SEC only')
 {
   const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   const seg = idx.slice(idx.indexOf('resource === STATEMENTS_RESOURCE'))
@@ -1135,23 +1140,19 @@ console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
     /period=annual/.test(body),
     'SEC is asked for ANNUAL periods — period=quarter answers 422, measured',
   )
-  // BOTH indexes must exist. `indexOf` returns -1 for a missing needle and -1 is less than any
-  // real index, so a bare `sec < yfinance` PASSES when SEC is gone — an ordering guard that is
-  // satisfied by absence of the thing being ordered.
+  // THE EDGE NO LONGER ASKS YAHOO FOR STATEMENTS. The company lane writes the same rows (source
+  // `yfinance`, the same key) WITH the currency Yahoo states; an edge write of the same period would
+  // replace it with null.
+  check(
+    !/provider=yfinance/.test(body),
+    'the statements resource does not ask yfinance — Yahoo\'s statements are the Dagster company lane\'s, and a second writer would null the currency the lane wrote',
+  )
+  // SCOPED TO THE SEC REQUEST: the currency must be read from the answer SEC gave, so the write
+  // has to come after the call that produced it.
   check(
     body.indexOf('provider=sec') > -1 &&
-      body.indexOf('provider=yfinance') > -1 &&
-      body.indexOf('provider=sec') < body.indexOf('provider=yfinance'),
-    'SEC is tried BEFORE yfinance — the filing carries the currency and 18 periods, the fallback carries 4 and none',
-  )
-  // SCOPED TO THE SEC HALF, and that is the whole point of the guard. The yfinance branch below
-  // writes the identical line, so an unscoped `/currency: r.reported_currency/` matched even with
-  // the SEC write deleted — it passed a mutation and certified nothing. Position is what
-  // distinguishes them: the SEC write must land BEFORE the fallback's call.
-  check(
-    body.indexOf('currency: r.reported_currency') > -1 &&
-      body.indexOf('currency: r.reported_currency') < body.indexOf('provider=yfinance'),
-    'reported_currency is written to the currency COLUMN IN THE SEC BRANCH — the column has existed since migration 29 and is 0 of 104,972 because the fallback provider never sends it',
+      body.indexOf('currency: r.reported_currency') > body.indexOf('provider=sec'),
+    'reported_currency is written to the currency COLUMN from SEC\'s answer — the column has existed since migration 29 and was 0 of 104,972 before SEC was asked',
   )
   check(
     /source_code:\s*'sec'/.test(body),
@@ -1162,12 +1163,14 @@ console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
     'SEC is skipped when there is no US ticker rather than asked with a symbol it cannot resolve (SAP works, SAP.DE does not)',
   )
   check(
-    /group\.every\(\(g\) => rowsFor\.has/.test(body),
-    'yfinance is not called when the filing already answered — a 4-period series must not overwrite an 18-period one',
+    /secFailed\+\+/.test(body) && !/statements_missing_at/.test(body),
+    'a SEC failure is counted, NOT marked — and nothing here writes statements_missing_at, whose only writer was the yfinance half',
   )
+  // BOTH HALVES EXIT THROUGH SEC'S CACHE. A `missing` security (no statements at all) that SEC has
+  // nothing for must be recorded too, or it is re-asked on every run for ever.
   check(
-    /secFailed\+\+/.test(body) && !/usTicker[\s\S]{0,400}statements_missing_at/.test(body),
-    'a SEC failure is counted, NOT marked — yfinance is the fallback, and a foreign filer legitimately has nothing there',
+    !/want === 'no_sec'/.test(body),
+    'the SEC mark is not restricted to the no_sec half — a security with no statements that SEC has nothing for is recorded too',
   )
   // A THROTTLE MUST STILL TAKE THE FAILURE PATH, or the classifier's new SEC wordings could let a
   // rate limit mark a page. Ordering is load-bearing: `throttled` is tested BEFORE the absence
@@ -1176,11 +1179,11 @@ console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
     /throttled\(msg\)[\s\S]{0,120}throttledOut = true; break \}[\s\S]{0,1200}?noDataForSymbol\(msg\)/.test(body),
     'a throttle is classified BEFORE the absence wordings, so a refusal can never mark a symbol',
   )
-  // The widening needs its own exit, or the `no_currency` half re-asks for ever — the shape that
-  // has now cost this pipeline five separate resources.
+  // The backlog needs its own exit, or it re-asks for ever — the shape that has now cost this
+  // pipeline five separate resources.
   check(
     /update\(\{\s*statement_currency_missing_at:/.test(body),
-    'a company SEC has no filings for is recorded, so the no_currency half of the backlog can drain',
+    'a company SEC has no filings for is recorded, so the backlog can drain',
   )
   // THE RULE MOVED RATHER THAN RELAXED. The EMPTY-ANSWER path still carries all three conditions —
   // asked to completion, produced nothing, and the endpoint answered for someone this run — which
@@ -1198,7 +1201,6 @@ console.log('\nsecurity-statements — SEC first, yfinance as the fallback')
     'secOk is actually set when SEC returns rows — an success flag that is never raised marks nothing, and one that is never checked marks everything',
   )
 }
-
 
 // ── every source a function WRITES must be a source some migration CREATED ───────────────────
 //
