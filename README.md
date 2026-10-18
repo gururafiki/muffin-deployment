@@ -282,12 +282,12 @@ the `market` schema failed before `02` created it. The playbook now pipes the gl
 | `09-market-rls.sql` | **RLS on every `market` table** — public read policy, writes service-role only |
 
 Refresh resources (`POST /functions/v1/market-refresh` with `{"resource": "..."}`): the table
-under [The resources](#the-resources). `instrument-profile` (1 week) is the one that writes
-`market.instruments`, restricted to `asset_type = 'equity'`, since an ETF or a coin has no sector to
-fetch. The performance and price resources that were listed here (`sector-`, `country-`,
-`instrument-performance`, `instrument-prices`) moved to Dagster with the price family: returns are
-`market.performance` (a view over `security_return` and `index_return`) and the chart reads
-`market.price_series` (over `price_bar`).
+under [The resources](#the-resources). The performance and price resources that were listed here
+(`sector-`, `country-`, `instrument-performance`, `instrument-prices`) moved to Dagster with the
+price family: returns are `market.performance` (a view over `security_return` and `index_return`)
+and the chart reads `market.price_series` (over `price_bar`). `instrument-profile`, which wrote
+`market.instruments`' sector, industry and cap, retired on 2026-10-18: all 35 curated equities
+resolve to a security the Dagster company lane visits, and `instrument_current` reads it.
 
 **Forcing a refresh.** `begin_refresh` skips while data is inside its TTL, which is correct but
 gets in the way when the data is fresh and *wrong*. Pass `force` — **service-role only**, since
@@ -297,7 +297,7 @@ the anon key is public and a public cache-buster is a free way to hammer the pro
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_ROLE" -H "Authorization: Bearer $SERVICE_ROLE" \
   -H "Content-Type: application/json" \
-  -d '{"resource":"instrument-profile","force":true}'
+  -d '{"resource":"security-statements","force":true}'
 ```
 
 `force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
@@ -568,20 +568,21 @@ venues.
 
 | Resource | Writes | Upstream | TTL |
 |---|---|---|---|
-| `instrument-profile` | `instruments` sector/industry/cap | yfinance | 1 week |
-| `security-profiles` | `security_taxonomy` (sector) | yfinance | 1 day |
-| `security-industries` | `taxonomy_node` level 2, `security.market_cap` | yfinance | 1 day |
-| `security-fundamentals` | `security_fundamentals` | yfinance | 1 week |
-| `security-statements` | `security_statement` | yfinance | 1 week |
-| `security-refresh` | one security on demand: market cap, fundamentals, statements | yfinance | none |
+| `security-statements` | `security_statement` (annual, with the reporting currency) | SEC only, since 2026-10-18 | 10 min (a backlog) |
+| `security-xbrl` | `security_metric` (`sec-xbrl`), the quarterly depth | SEC company facts | 10 min |
+| `security-filing-history` | `security_filing`, `security.sic` | SEC submissions | 10 min |
+| `security-segments` | `security_segment` | each filing's XBRL instance | 10 min |
+| `security-refresh` | nothing itself: queues one security's Dagster `yahoo_companies` partition with `force: true` | — | 1 min |
 
 The table lists the main ones; the function's `EXTRA_TTL_MINUTES` map is the complete list, with
 each resource's TTL.
 
-**Retired: the price family (D2, 2026-09-12) and the universe family (2026-09-26).** Prices,
-returns and FX moved to Dagster (`muffin-ingest`), and `market.performance` became a view over
-`security_return` and `index_return`; fund holdings, the venue directory, symbology and the CIK and
-NSE registries followed. The rotation rows are disabled, and the function refuses a direct call with
+**Retired: the price family (D2, 2026-09-12), the universe family (2026-09-26) and the Yahoo
+company family (2026-10-18).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
+`market.performance` became a view over `security_return` and `index_return`; fund holdings, the
+venue directory, symbology and the CIK and NSE registries followed; then Yahoo's company data
+(`yahoo_companies`, a seventh of the universe a day from 03:30 UTC) and the metric derivation
+(`derived_security_metrics`, at :17 and :47). The rotation rows are disabled, and the function refuses a direct call with
 **410** and the lane that replaced it — before the admin gate, so the answer does not depend on who
 asks. Until 2026-09-25 an admin's call still reached the old handlers, and `fx-rates` would have
 written `market.fx_rate` beside the lane that owns it. The handlers themselves, their helper modules
@@ -600,6 +601,18 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `security-tickers`, `security-local-symbols`, `security-yahoo-symbols`, `security-symbol-repair` | Dagster symbology ladder (`security_symbology`) |
 | `promote-wave`, `promote-listing` | the `market.promote_listing` RPC, which the Track button calls; waves move to Dagster (Phase 3, stage 4) |
 | `sec-cik-map`, `in-symbols` | Dagster registries (`security_cik`, `security_nse_filer`) |
+| `derive-classifications` | Dagster `security_classification` — read `market.security_taxonomy` |
+| `security-profiles`, `security-industries` | Dagster company lane (`yahoo_companies`) — read `market.security_taxonomy` |
+| `security-profile-detail`, `security-management` | Dagster company lane — read `market.security_profile`, `market.security_officer` |
+| `security-fundamentals`, `security-share-stats` | Dagster company lane — read `market.security_fundamentals`, `security_share_stats`, `security_estimate` |
+| `security-quarters` | Dagster company lane — Yahoo's annual and quarterly statements, with their currency |
+| `instrument-profile` | Dagster company lane — read `market.instrument_current` |
+| `security-dividends` | Dagster price lane (`yahoo_corporate_action`, from the chart's events) — read `market.security_corporate_action` |
+| `security-metrics` | Dagster `derived_security_metrics` — read `market.security_metric` |
+
+The Yahoo company family's handlers stay until three clean days have passed (Phase 4 step 10, on or
+after 2026-10-21), so until then a rollback is deleting the `RETIRED` entries, re-enabling the rows
+and rescheduling `muffin-metrics`.
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both

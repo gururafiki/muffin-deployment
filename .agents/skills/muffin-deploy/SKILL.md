@@ -48,6 +48,18 @@ gh pr merge <n> -R gururafiki/<repo> --squash --delete-branch
 | schema, compose, nginx, `dagster.yaml`, Grafana provisioning, Ansible, Terraform | `deploy.yml` | 9–11 min (2026-09-12/13) |
 | muffin-ui, muffin-agent, docker-wrapper images | their image build dispatches `deploy` | muffin-ui image ~11 min (2026-09-13) |
 
+### When not to ship (UTC)
+
+| Window | What runs |
+|---|---|
+| 00:00–02:15 | the price night: `nightly_prices`, `daily_fx`, `daily_indices`. A roll kills their runs. |
+| 03:00 | the symbology lane's daily stale-miss tick (`new_symbols_needed`), which launches runs |
+| 03:30–~06:00 | the company lane (`yahoo_companies`, since 2026-10-18) holds the `yfinance` and `sql` pools; the derived runs created meanwhile wait until it ends (05:51 on its first day) |
+| while `muffin-db-backup.sh` runs | every deploy ends with a full `pg_dump`, and anon reads time out while it runs: measure latency only after `pgrep -fc '[m]uffin-db-backup.sh'` reads 0 |
+
+A deploy no longer restarts the Dagster services (the roll pins the digest, #431 and #436), so
+only a roll kills runs. A deploy inside a window still competes with the runs for the database.
+
 ### Roll the ingest image
 
 ```bash
@@ -133,4 +145,7 @@ gh run watch -R gururafiki/muffin-deployment <run-id> --interval 30 --exit-statu
 - **Schema:** on the node,
   `select version, name from supabase_migrations.schema_migrations order by version desc limit 3`,
   then read the changed view as `anon` (`muffin-reach-deployed-services`).
-- **UI:** fetch the served bundle and grep for a string the change introduced.
+- **UI:** grep the served bundle for a string the change introduced. The public host is behind
+  Access, so read the files in the running container from the node:
+  `docker exec $(docker ps -qf name=muffin_muffin-ui) grep -rl '<string>' /usr/share/nginx/html`,
+  and check the container's `StartedAt` is after the deploy.

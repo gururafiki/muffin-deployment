@@ -10,6 +10,10 @@ Commands (arguments are plain tokens, so they survive the ssh single quotes):
                     unpartitioned assets, one run. An asset's checks run ONLY when named in
                     --checks: the launch sends an explicit check selection, and an empty one means
                     none (a run on 2026-10-03 materialized `security_listing` without its check).
+    job             --name <job> --partitions <key>,<key> --reason <tag> [--max-runtime S]
+                    [--op-config op.key=value,…] [--dry-run]
+                    the real job, one partition a run. A GraphQL launch does NOT receive the job's
+                    `run_tags` (only scheduler-created runs do), so pass --max-runtime.
     backfill-status --id <backfillId>
     schedule-dry-run --schedule <name> --at 2026-09-26T00:00:00      read-only: what a tick would ask
 """
@@ -70,6 +74,12 @@ def main() -> None:
     job.add_argument("--partitions", required=True, help="comma-separated; one run each")
     job.add_argument("--reason", required=True)
     job.add_argument("--dry-run", action="store_true")
+    job.add_argument("--max-runtime", type=int, help="seconds; the job's own run_tags are NOT applied")
+    job.add_argument(
+        "--op-config",
+        default="",
+        help="op.key=value,… — e.g. raw_yahoo_company.force=true; values are JSON scalars or strings",
+    )
     status = sub.add_parser("backfill-status")
     status.add_argument("--id", required=True)
     dry = sub.add_parser("schedule-dry-run")
@@ -95,6 +105,16 @@ def main() -> None:
         mutation = """mutation($p: ExecutionParams!) { launchRun(executionParams: $p) {
             __typename ... on LaunchRunSuccess { run { runId status } }
             ... on RunConfigValidationInvalid { errors { message } } ... on Error { message } } }"""
+        # Plain tokens, so they survive the ssh quoting: `op.key=value`, comma-separated.
+        run_config: dict = {}
+        for item in [i for i in args.op_config.split(",") if i]:
+            path, value = item.split("=", 1)
+            op, field = path.split(".", 1)
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = value
+            run_config.setdefault("ops", {}).setdefault(op, {}).setdefault("config", {})[field] = parsed
         for key in [k for k in args.partitions.split(",") if k]:
             params = {
                 "selector": {
@@ -103,9 +123,12 @@ def main() -> None:
                     "jobName": args.name,
                 },
                 "mode": "default",
-                "runConfigData": {},
+                "runConfigData": run_config,
                 "executionMetadata": {
-                    "tags": [{"key": "dagster/partition", "value": key}, *tags(args.reason)]
+                    # The job's `run_tags` are merged only into runs a schedule or sensor creates:
+                    # a launch from here without --max-runtime gets the monitor's six hours.
+                    "tags": [{"key": "dagster/partition", "value": key},
+                             *tags(args.reason, args.max_runtime)]
                 },
             }
             if args.dry_run:
