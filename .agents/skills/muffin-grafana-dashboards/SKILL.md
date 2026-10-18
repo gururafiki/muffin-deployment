@@ -20,17 +20,19 @@ adding one.**
 
 | File (uid) | Shows | Reads |
 |---|---|---|
-| `dashboards/pipeline.json` (`muffin-pipeline`) | edge-function backlogs, run outcomes, throttling, pg_cron, drain rate | `refresh_run`, `backlog_sample`, `backlog_drain`, `universe_sample` |
+| `dashboards/pipeline.json` (`muffin-pipeline`) | edge-function backlogs, run outcomes, throttling, pg_cron, drain rate; **Dagster lanes**: runs by job, failed runs, queue wait, asset checks | `refresh_run`, `backlog_sample`, `backlog_drain`, `universe_sample`; `runs`, `run_tags`, `asset_check_executions` on `muffin-dagster` |
 | `dashboards/coverage.json` (`muffin-coverage`) | facet completeness by country, sector, type, tier, cap, style… | `coverage_sample` |
 | `dashboards/universe.json` (`muffin-universe`) | securities, identifiers, negative caches, rows and storage by table | `universe_sample`, `ticker_disagreement` |
-| `dashboards/providers.json` (`muffin-providers`) | http-cache hits, latency, bytes; egress by host and container | Prometheus |
+| `dashboards/providers.json` (`muffin-providers`) | http-cache hits, latency, bytes; egress by host and container; the ingest worker's own requests by provider and outcome, and their p95 | Prometheus (`muffin_ingest_provider_*` from the code location's exporter, job `muffin-ingest`) |
 | `dashboards/segments.json` (`muffin-segments`) | business-line parsing, curation queue, reconciliation | `security_segment_spine`, `security_filing`, `pending_*_segments` (live), `refresh_run` |
 | `dashboards/node.json` (`muffin-node`) | memory, CPU and disk per service; Traefik requests | Prometheus |
 | `provisioning/datasources/muffin.yml` | `muffin-prometheus`; `muffin-postgres` (db `postgres`) and `muffin-dagster` (db `dagster`), both as `metrics_ro` | |
-| `provisioning/alerting/rules.yml` | 12 alert rules | |
+| `provisioning/alerting/rules.yml` | 16 alert rules, two on `muffin-dagster`: a failed run in the last 6 hours, and an ERROR check that failed after passing within 14 days | |
 
-**No panel reads Dagster yet.** Runs, queue waits and asset counters for the ingestion lanes have no
-dashboard. The `muffin-dagster` datasource exists for them, and they extend `pipeline.json`.
+**The Dagster row reads Dagster's own run storage** (since 2026-10-18), so a new job or a new asset
+check appears on it by itself. The check alert fires on a REGRESSION only: a check red since it was
+written (the company rotation's staleness check, until 2026-10-24) is a known state, and alerting on
+it would make the rule red for a week.
 
 ## Which dashboard a change touches
 
@@ -41,6 +43,7 @@ dashboard. The `muffin-dagster` datasource exists for them, and they extend `pip
 | A new `market` table | `universe.json` rows and storage (sampled by `sample_universe`) |
 | A new provider or cache location | `providers.json`; label the location with an explicit `$provider`, never `$proxy_host` |
 | A new collector metric | the panel that plots it; CI fails on a metric nothing plots |
+| A new metric in muffin-ingest's exporter | `EXTERNAL` in `check_collector_metrics_are_plotted.py` (this repo's CI cannot read muffin-ingest), and the panel that plots it |
 
 ## Rules that each cost an incident
 
@@ -74,7 +77,9 @@ dashboard. The `muffin-dagster` datasource exists for them, and they extend `pip
    <panel SQL>;
    SQL
    ```
-   (`postgres` cannot `set role`; `supabase_admin` can.)
+   (`postgres` cannot `set role`; `supabase_admin` can.) A `muffin-dagster` panel reads Dagster's
+   database: `-d dagster`, and its `create_timestamp` is UTC without a zone, so compare it with
+   `now() at time zone 'utc'`.
 3. **Or through Grafana**, which expands macros itself: `POST https://muffin-grafana.rafiki.guru/api/ds/query`
    with the Access token headers and Grafana basic auth (`muffin-reach-deployed-services`), body
    `{"queries":[{"refId":"A","datasource":<panel's datasource>,"rawSql":<rawSql>,"format":<format>}],"from":"now-7d","to":"now"}`.

@@ -635,3 +635,83 @@ groups:
 
         RUNBOOK: `select j.jobname, d.status, d.start_time, d.return_message from cron.job_run_details d join cron.job j using (jobid) where j.jobname in (''muffin-coverage'', ''muffin-quality'') order
         by d.start_time desc limit 10;` (add ''muffin-segment-spine'' for the spine). A timeout names the statement; run the function by hand as `postgres` to measure it.'
+  - uid: muffin-dagster-run-failed
+    title: A Dagster run failed
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-dagster
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "-- A FAILED DAGSTER RUN, IN THE LAST SIX HOURS. Dagster OSS sends no notification of its own, and\n-- every lane that has left the edge (prices, the universe, the Yahoo company data) runs there, so\n-- without this a lane can fail for days with nothing saying so: from 2026-09-13 to 09-16 every\n-- run failed and nothing reported it. `create_timestamp` is UTC without a zone, hence the explicit\n-- `at time zone`.\nselect count(*)::float8 as value\n  from runs\n where status = 'FAILURE'\n   and create_timestamp > (now() at time zone 'utc') - interval '6 hours'"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: "{{ $values.B }} Dagster run(s) failed in the last 6 hours"
+      description: "Read the failed run's reason in the Dagster UI, or with `scripts/run_events.py` from the muffin-dagster-operations skill (STEP_FAILURE or ENGINE_EVENT; a run the monitor ended has its reason on PIPELINE_FAILURE). The Pipeline dashboard's 'Failed or cancelled Dagster runs' lists them with their `muffin/reason` and partition tags. A run a roll killed is failed by the roll on purpose, and reads as a failure here too: rolls avoid the run windows (00:00-02:15, 03:00, 03:30-06:00 UTC) for that reason. The alert clears six hours after the newest failure."
+  - uid: muffin-dagster-check-regressed
+    title: A Dagster asset check started failing
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-dagster
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "-- AN ERROR-SEVERITY CHECK THAT PASSED IN THE LAST 14 DAYS AND FAILS NOW: a regression, not a\n-- known state. Alerting on every failing ERROR check would fire all week from day one, because\n-- `no_company_is_far_behind_the_rotation` reads ERROR by design until the company lane's first\n-- rotation completes (2026-10-24) and has never passed. A gate red for a reason nobody acts on\n-- hides the next true positive. WARN checks never alert.\nwith latest as (\n  select distinct on (asset_key, check_name) asset_key, check_name, execution_status, evaluation_event\n    from asset_check_executions\n   where execution_status in ('SUCCEEDED', 'FAILED')\n     and create_timestamp > (now() at time zone 'utc') - interval '14 days'\n   order by asset_key, check_name, id desc)\nselect count(*)::float8 as value\n  from latest l\n where l.execution_status = 'FAILED'\n   and l.evaluation_event::json->'dagster_event'->'event_specific_data'->'severity'->>'__enum__'\n       = 'AssetCheckSeverity.ERROR'\n   and exists (select 1 from asset_check_executions p\n                where p.asset_key = l.asset_key and p.check_name = l.check_name\n                  and p.execution_status = 'SUCCEEDED'\n                  and p.create_timestamp > (now() at time zone 'utc') - interval '14 days')"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 15m
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: "{{ $values.B }} Dagster asset check(s) at ERROR severity failed after passing within 14 days"
+      description: "A check that passed recently and fails now has regressed: read its metadata in the Dagster UI (Asset checks), and the Pipeline dashboard's 'Asset checks: the latest evaluation of each'. A check that has never passed is a known state and does not fire this: `no_company_is_far_behind_the_rotation` reads ERROR until the company lane's first rotation completes (2026-10-24). WARN checks never fire it."
