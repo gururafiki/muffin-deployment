@@ -10,8 +10,8 @@ description:
 
 # Change the market schema
 
-Done this way four times on 2026-10-17 (muffin-deployment#437, #439, #440, #441). Each step below
-caught something the step before it could not.
+Done this way four times on 2026-10-17 (muffin-deployment#437, #439, #440, #441) and once on
+2026-10-18 (#443). Each step below caught something the step before it could not.
 
 ## 1. The migration
 
@@ -53,16 +53,22 @@ for each `/mut/*.sql`: apply it, print `SIG`, run `TEST` (it must be CAUGHT), an
 
 ```bash
 D=/tmp/claude-replay
-ssh muffin "rm -rf $D && mkdir -p $D/repo/stack $D/repo/.github $D/mut"   # rsync creates one level only
-rsync -a --delete stack/supabase/ muffin:$D/repo/stack/supabase/
-rsync -a .github/scripts/ muffin:$D/repo/.github/scripts/
-rsync -a <dir of mutated copies of the migration>/ muffin:$D/mut/
+timeout 60 ssh muffin "rm -rf $D && mkdir -p $D/repo/stack $D/repo/.github $D/mut"   # one level only
+timeout 120 rsync -a --delete stack/supabase/ muffin:$D/repo/stack/supabase/
+timeout 60 rsync -a .github/scripts/ muffin:$D/repo/.github/scripts/
+timeout 60 rsync -a <dir of mutated copies of the migration>/ muffin:$D/mut/
 { echo "TEST=stack/supabase/tests/<test>.sql"
   echo "NEW=stack/supabase/migrations/<migration>.sql"
   echo "SIG=\"select md5(pg_get_viewdef('market.<view>'::regclass))\""   # or pg_get_functiondef
   cat .agents/skills/muffin-schema-change/scripts/replay.sh
-} | ssh muffin 'bash -s' 2>&1 | grep -E '^ok|^tests|CAUGHT|MISSED|FAIL|DIFFERS|CHANGED'
+} | timeout 1500 ssh -o ServerAliveInterval=30 muffin 'bash -s' 2>&1 \
+  | grep -E '^ok|^tests|CAUGHT|MISSED|FAIL|DIFFERS|CHANGED'
 ```
+
+The replay takes 10-20 minutes with mutations, so run it in the background. **The `timeout` and
+the keepalive are what make it fail rather than hang** if this machine sleeps: without them, a
+replay and a rolled-back production check sat for five hours on 2026-10-18 with nothing running on
+the node.
 
 - **The first pass reports `BUNDLE DIFFERS`, and your test fails inside the full test loop.** The
   bundle step re-applied the stale `schemas/` file. Copy the regenerated file and run again:
@@ -100,7 +106,7 @@ After the deploy:
   `BASE=https://supabase.<domain> ANON=<anon key> python3 .github/scripts/check_anon_read_latency.py`;
 - read the served rows for the cases that motivated the change.
 
-## Traps, each met on 2026-10-17
+## Traps, each met on 2026-10-17 or 10-18
 
 | Symptom | Cause |
 |---|---|
@@ -109,5 +115,8 @@ After the deploy:
 | The rest of a script silently vanishes | `docker exec -i` inside `ssh … 'bash -s'` eats the script's stdin; use `< /dev/null` where the SQL is in `-c` |
 | `zsh: =====: not found` | zsh expands a word starting with `=`; never `echo =====` |
 | `set -- $q` loops over one word | zsh does not word-split; use a function |
+| A remote command prints nothing for hours, and the node runs nothing | this machine slept and the ssh connection died silently; `timeout` plus `-o ServerAliveInterval=30` |
+| `\gset` stops the script with no row printed | an unnamed column (`?column?`) is not a variable name; alias every column it sets |
+| A before/after read of a serving view times out in the rolled-back check | a join from a temp table cannot carry the symbol filter into the view's window; read each symbol with a constant |
 | A diff shows no `diff` header lines | busybox `diff` prints none; grep `+++` |
 | `unterminated quoted string` in psql | an apostrophe in an `\echo` |
