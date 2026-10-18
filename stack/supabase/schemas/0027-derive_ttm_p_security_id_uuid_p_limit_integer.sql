@@ -16,7 +16,9 @@ begin
   end if;
 
   -- 1. THE FISCAL FOURTH QUARTER: the year less its three discrete quarters, same source and
-  --    currency, consecutive (Q1 to Q3 170-200 days, Q3 to the year end 80-100).
+  --    currency, consecutive (Q1 to Q3 165-200 days, Q3 to the year end 80-120). The bounds
+  --    admit 13-week quarters (182/91, a 53-week year 182/98 or 189/91) and the 12/12/12/16-week
+  --    calendar (168/112, a 53-week year 168/119) that Costco and PepsiCo file.
   create temporary table _q4 on commit drop as
   select a.security_id, a.metric_code, a.as_of, a.value - q.s3 as value, a.currency_code
     from market.security_metric a
@@ -36,8 +38,8 @@ begin
         and m.as_of < a.as_of) q
    where a.period_type = 'annual'
      and q.n = 3
-     and a.as_of - q.last_q between 80 and 100
-     and q.last_q - q.first_q between 170 and 200
+     and a.as_of - q.last_q between 80 and 120
+     and q.last_q - q.first_q between 165 and 200
      and q.same_ccy
      and not (q.nonneg and a.value >= 0 and a.value - q.s3 < 0)
      and not exists (
@@ -73,6 +75,10 @@ begin
   --    the month end, so a 52/53-week filer's quarters arrive twice, days apart, and the window
   --    would refuse every year. Within ten days of each other the higher-priority source's row
   --    stands for the quarter (the later date on a tie), the same ten days step 1 uses.
+  --    AND NO QUARTER IS IN A WINDOW TWICE. Two rows under 45 days apart (half a quarter) are one
+  --    quarter under two dates, or two overlapping quarters after a fiscal-year change. With a
+  --    quarter missing elsewhere the span still reads as a year, so the span alone cannot see it.
+  --    A 12-week quarter dated by the month end reads as short as ~54 days, and is kept.
   create temporary table _ttm on commit drop as
   select q.security_id, q.metric_code, q.as_of, q.ttm_value, q.currency_code
     from (
@@ -81,24 +87,33 @@ begin
              count(*)             over w as quarters,
              min(m.as_of)         over w as window_start,
              min(m.currency_code) over w as min_ccy,
-             max(m.currency_code) over w as max_ccy
-        from market.security_metric m
-        join market.metric mt on mt.code = m.metric_code and mt.is_flow
-        join _ttm_page pg on pg.security_id = m.security_id
-       where m.period_type = 'quarter'
-         and not exists (
-               select 1 from market.security_metric o
-                where o.security_id = m.security_id and o.metric_code = m.metric_code
-                  and o.period_type = 'quarter'
-                  and o.as_of between m.as_of - 10 and m.as_of + 10
-                  and o.source_code <> m.source_code
-                  and (market.source_priority(o.source_code), o.as_of)
-                    > (market.source_priority(m.source_code), m.as_of))
+             max(m.currency_code) over w as max_ccy,
+             min(m.gap)           over g as min_gap
+        from (
+          select m.security_id, m.metric_code, m.as_of, m.value, m.currency_code,
+                 m.as_of - lag(m.as_of) over (partition by m.security_id, m.metric_code
+                                              order by m.as_of) as gap
+            from market.security_metric m
+            join market.metric mt on mt.code = m.metric_code and mt.is_flow
+            join _ttm_page pg on pg.security_id = m.security_id
+           where m.period_type = 'quarter'
+             and not exists (
+                   select 1 from market.security_metric o
+                    where o.security_id = m.security_id and o.metric_code = m.metric_code
+                      and o.period_type = 'quarter'
+                      and o.as_of between m.as_of - 10 and m.as_of + 10
+                      and o.source_code <> m.source_code
+                      and (market.source_priority(o.source_code), o.as_of)
+                        > (market.source_priority(m.source_code), m.as_of))) m
+      -- `g` is the window's three gaps: each row's gap is to the row before it.
       window w as (partition by m.security_id, m.metric_code
-                   order by m.as_of rows between 3 preceding and current row)
+                   order by m.as_of rows between 3 preceding and current row),
+             g as (partition by m.security_id, m.metric_code
+                   order by m.as_of rows between 2 preceding and current row)
     ) q
    where q.quarters = 4
      and q.as_of - q.window_start between 240 and 300
+     and q.min_gap >= 45
      and q.min_ccy is not distinct from q.max_ccy;
 
   insert into market.security_metric
