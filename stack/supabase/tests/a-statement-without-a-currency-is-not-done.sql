@@ -18,6 +18,11 @@
 -- has not answered", which held only while every Yahoo row lacked a currency. Phase 4's company lane
 -- writes Yahoo rows WITH one, so the half now asks for an SEC row directly; case F below is the
 -- security the old proxy would have dropped.
+--
+-- 2026-10-18: SEC IS THE ONLY PROVIDER THIS QUEUE SERVES. The yfinance half (no statements at all)
+-- left the edge, since Yahoo's statements are the Dagster company lane's; see
+-- sec-is-only-asked-where-it-can-answer.sql for what that changed. Every case here holds statements
+-- already, so each reads the same before and after.
 
 \set ON_ERROR_STOP on
 
@@ -72,8 +77,8 @@ insert into market.security_statement (security_id, statement, period_ending, cu
 on conflict do nothing;
 
 -- C: statements exist without a currency and there is NO US ticker. SEC is addressable by US
---    ticker only, so re-queueing this buys nothing: the run would spend a call on yfinance and
---    write back the same four currency-less periods.
+--    ticker only, so re-queueing this buys nothing: SEC cannot parse the question, and the run
+--    would spend its calls on it every time.
 --
 --    MIGRATION 197 STRENGTHENED THIS, and this case now passes under either rule: the security has
 --    no US LISTING either, and a listing is the honest test — measured, 2,317 securities with a
@@ -91,8 +96,8 @@ on conflict do nothing;
 
 -- D: currency-less WITH a US ticker, but SEC has already been asked and had no filings for it.
 --    A US OTC line of a company that files nothing. Without an exit of its own this is re-queued
---    every run for ever: SEC answers nothing, yfinance re-writes the same currency-less periods,
---    the view re-admits it. That shape has now cost this pipeline five separate resources.
+--    every run for ever: SEC answers nothing and the view re-admits it. That shape has now cost
+--    this pipeline five separate resources.
 insert into market.security (security_id, name, security_type_code, country_iso2, cik, statement_currency_missing_at) values
   ('00000000-0000-0000-0000-000000008904', 'T89 Does Not File', 'equity', 'ZK', 8904, now())
 on conflict (security_id) do nothing;
@@ -126,7 +131,7 @@ on conflict (security_id, exch_code) do nothing;
 
 
 do $$
-declare n integer; w text; us text; sym text;
+declare n integer; w text; us text;
 begin
   -- 1. THE LOCKED-OUT POPULATION IS IN THE QUEUE.
   select count(*) into n from market.pending_statements
@@ -145,16 +150,13 @@ begin
   end if;
 
   -- 3. IT CARRIES THE US TICKER, NOT THE FETCH SYMBOL. `SAP` resolves at SEC and `SAP.DE` does
-  --    not, so sending the priced symbol asks a question the provider cannot parse and the
-  --    fallback silently becomes the only path.
-  select us_ticker, symbol into us, sym from market.pending_statements
+  --    not, so sending the priced symbol asks a question the provider cannot parse.
+  --    (`symbol` is still the priced one, kept for a reader of the queue; nothing asks with it
+  --    since the yfinance half left on 2026-10-18.)
+  select us_ticker into us from market.pending_statements
    where security_id = '00000000-0000-0000-0000-000000008901';
   if us is distinct from 'T89A' then
     raise exception 'pending_statements.us_ticker is % — SEC is addressable by the US ticker only', coalesce(us,'<null>');
-  end if;
-  -- ...while `symbol` stays the priced one, because that is what the yfinance fallback wants.
-  if sym is distinct from 'T89A.ZK' then
-    raise exception 'pending_statements.symbol is % — the yfinance fallback must still be asked with the symbol the bars are keyed on', coalesce(sym,'<null>');
   end if;
 
   -- 4. A SECURITY THAT ALREADY HAS ITS CURRENCY IS DONE. Without this the view can never empty.
@@ -171,7 +173,7 @@ begin
    where security_id = '00000000-0000-0000-0000-000000008903';
   if n <> 0 then
     raise exception
-      'a currency-less security with NO US ticker is queued (% rows) — SEC cannot answer for it, so the run would re-fetch yfinance''s same four currency-less periods', n;
+      'a currency-less security with NO US ticker is queued (% rows) — SEC cannot answer for it, so the run would spend three calls on a question SEC cannot parse, every run', n;
   end if;
   -- 6. A COMPANY SEC HAS NO FILINGS FOR IS OUT OF THE QUEUE. Not because it is finished — its
   --    statements still have no currency — but because we asked and the answer will not change
@@ -180,7 +182,7 @@ begin
    where security_id = '00000000-0000-0000-0000-000000008904';
   if n <> 0 then
     raise exception
-      'a security SEC has already been asked about and had nothing for is still queued (% rows) — this is the re-ask-forever shape: yfinance rewrites the same currency-less periods and the view re-admits it, every run, with the resource reporting ok', n;
+      'a security SEC has already been asked about and had nothing for is still queued (% rows) — this is the re-ask-forever shape: SEC answers nothing and the view re-admits it, every run, with the resource reporting ok', n;
   end if;
 
   -- 7. ...AND THE MARK EXPIRES. 30 days, not never — a company can begin filing, and a permanent

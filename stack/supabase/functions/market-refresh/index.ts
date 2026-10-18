@@ -3283,8 +3283,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     //
     // THREE CALLS PER SECURITY, AND THAT IS THE WHOLE DESIGN CONSTRAINT. Quarterly does not batch:
     // two symbols in one request return ZERO rows (measured against a local openbb-api, which is
-    // also why `STMT_BATCH` is already 1). Against a rate-limited provider that makes this the
-    // most expensive backlog per security in the system, so it is scoped to non-SEC equities that
+    // also why the statements resource asks one security at a time). Against a rate-limited
+    // provider that makes this the most expensive backlog per security in the system, so it is
+    // scoped to non-SEC equities that
     // already have ANNUAL statements — proof the provider answers for this symbol at all — and
     // ordered by fund weight, which is free of currency, market cap and country in a way that
     // `market_cap` is not.
@@ -4246,23 +4247,28 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // companies with only a `symbol` field to tell them apart. One symbol at a time keeps the
     // attribution structural rather than something to get right.
     if (resource === STATEMENTS_RESOURCE) {
+      // SEC ONLY, SINCE 2026-10-18. Yahoo's statements are the Dagster company lane's
+      // (`yahoo_companies`), annual and quarterly and labelled with their currency. This resource
+      // used to ask yfinance too, for a security with no statements at all, and by then that half
+      // held 26 securities Yahoo answers nothing for. Migration 20261018200000 narrowed the queue to
+      // what SEC can answer: a CIK, a US listing to spell the question with, and no `sec` row.
       const { data: pending, error: pErr } = await market
         .from('pending_statements')
-        .select('security_id,symbol,us_ticker,want')
+        .select('security_id,us_ticker,want')
         .order('best_weight', { ascending: false })
-        // 60, because it is three calls PER SECURITY — 180 requests a run, which fills the worker.
-        // It was briefly 300 on the assumption that batching worked; it does not (see STMT_BATCH).
+        // 60, because it is three calls PER SECURITY (income, balance, cash), 180 requests a run,
+        // which fills the worker. These endpoints do not batch: two symbols in one call answered
+        // nothing (measured 2026-08-13), and SEC is asked per filer anyway.
         .limit(scopeLimit ?? 60)
       if (pErr) throw new Error(`pending_statements read failed: ${pErr.message}`)
       const wanted = (pending ?? []).map((r) => ({
         securityId: r.security_id as string,
-        symbol: r.symbol as string,
         usTicker: (r.us_ticker as string | null) ?? null,
         want: (r.want as string | null) ?? 'missing',
       }))
       if (wanted.length === 0) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, written: 0, remaining: 0, note: 'every security has statements' })
+        return json({ resource, written: 0, remaining: 0, note: 'SEC has been asked about every filer' })
       }
       let fromSec = 0
       let secFailed = 0
@@ -4274,212 +4280,77 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
 
       const deadline = Date.now() + 60_000
       let written = 0
-      let none = 0
-      let failed = 0
       let throttledOut = false
+      const answered = new Set<string>()
 
-      // BATCHED, at ten symbols a call.
-      //
-      // This fetched ONE security at a time — three calls each, for income, balance and cash — on
-      // the reasoning that a multi-symbol response "interleaves periods from different companies
-      // with only a `symbol` to separate them". A symbol IS enough to separate them: it is exactly
-      // how `security-fundamentals` and `security-performance` attribute their batched responses,
-      // and `equity/fundamental/metrics` — the same router family, the same provider — has been
-      // called with `symbolList()` all along.
-      //
-      // The cost of not batching was the whole schedule: 60 securities a run against a backlog of
-      // 8,851, four cron runs a day, is about five weeks. Ten per call makes it days.
-      //
-      // NOT ASSUMED, THOUGH. `symbolsAnswered` counts the distinct symbols a batched response
-      // actually attributes, and it is reported: if this provider silently answers for only the
-      // first symbol, that number is 1 per batch and says so on the first run. The failure mode
-      // if it does is a backlog that does not drain — visible and harmless — rather than
-      // securities wrongly marked, because marking still requires the run to have written
-      // something.
-      // ONE. Measured 2026-08-13 the moment the batched version deployed:
-      //
-      //   symbolsAsked 50   symbolsAnswered 0   written 0   failed 0   none 0
-      //
-      // `equity/fundamental/income|balance|cash` do NOT accept several symbols, even though
-      // `equity/fundamental/metrics` — same router family, same provider — does. That is precisely
-      // the "route convention is not perfectly regular" warning in CLAUDE.md, and I batched on the
-      // family resemblance rather than a measurement.
-      //
-      // The reporting is what made this a five-minute revert instead of a silent outage: `written`
-      // and `none` both zero says the run did nothing AND blamed nobody, and `symbolsAnswered` says
-      // why. Keep them — if a future openbb release makes these endpoints batch, this number will
-      // say so.
-      const STMT_BATCH = 1
-      const symbolsAnswered = new Set<string>()
-      for (let i = 0; i < wanted.length && Date.now() < deadline - 6_000; i += STMT_BATCH) {
-        const group = wanted.slice(i, i + STMT_BATCH)
-        const bySymbol = new Map(group.map((g) => [g.symbol.toUpperCase(), g]))
-        const rowsFor = new Map<string, Record<string, unknown>[]>()
-        const answered = new Set<string>()
-
-        // SEC FIRST, WHERE THERE IS A US TICKER TO ASK WITH.
-        //
-        // It is the only provider here that returns `reported_currency`, and it returns 18 annual
-        // periods against yfinance's 4 — measured on AAPL, 2008-09-27 .. 2025-09-27. Asked one
-        // symbol at a time because SEC is per-filer; that is the same shape this resource already
-        // has (STMT_BATCH is 1 — the batched version was measured returning nothing).
-        //
-        // ANNUAL ONLY: `period=quarter` answers 422. So this deepens history without changing
-        // frequency, and anything wanting 20 years of quarters needs companyfacts directly.
-        for (const item of group) {
-          if (!item.usTicker) continue
-          if (Date.now() > deadline - 8_000) break
-          const sym = item.symbol.toUpperCase()
-          // Per-security, not per-run. A tally cannot be evidence about one symbol: `secOk` says
-          // the endpoint produced rows for SOMEONE, `secAsked` that we finished asking about THIS
-          // one, and only both together justify recording that SEC has nothing for it.
-          let secAsked = true
-          let secRows = 0
-          // Set when SEC states, per symbol, that it cannot resolve this security at all. That is
-          // evidence about the SYMBOL, so it justifies the mark on its own — unlike an empty
-          // answer, which needs the run-level `secOk` to rule out an outage.
-          let secNoSuchSymbol = false
-          for (const kind of ['income', 'balance', 'cash'] as const) {
-            const remaining = deadline - Date.now()
-            if (remaining < 5_000) break
-            try {
-              const got = await fetcher(
-                `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(item.usTicker)}` +
-                  `&provider=sec&period=annual&limit=25`,
-                Math.min(20_000, remaining),
-              )
-              for (const r of got) {
-                const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
-                if (!period) continue
-                answered.add(sym)
-                symbolsAnswered.add(sym)
-                const list = rowsFor.get(sym) ?? []
-                list.push({
-                  security_id: item.securityId,
-                  statement: kind,
-                  period_ending: period,
-                  // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is both
-                // an annual period and a fourth-quarter one, so the two must be able to coexist.
-                period_type: 'annual',
-                  // THE POINT OF THIS PROVIDER. 0 of 104,972 rows carried a currency before it.
-                  currency: r.reported_currency ? String(r.reported_currency) : null,
-                  data: r,
-                  source_code: 'sec',
-                  as_of: new Date().toISOString(),
-                })
-                rowsFor.set(sym, list)
-              }
-              if (got.length > 0) { fromSec++; secRows += got.length; secOk = true }
-            } catch (e) {
-              // A SEC failure is NOT a statement failure — yfinance below is the fallback, and a
-              // foreign filer with a US line legitimately has nothing here. Counted, not marked.
-              const msg = e instanceof Error ? e.message : String(e)
-              if (throttled(msg)) { secFailed++; secAsked = false; throttledOut = true; break }
-              // …BUT A 404 THAT NAMES THE SYMBOL IS THE ANSWER, NOT A FAILURE TO GET ONE.
-              //
-              // openbb's SEC provider resolves symbol -> CIK through SEC's own ticker map, so a US
-              // OTC foreign-ordinary line absent from that map can never be served — `AIBRF`
-              // (AIB Group, 16.08% fund weight) and `BWAGF` return `ContentTypeError -> 404` for
-              // every statement kind while AAPL answers in the same seconds.
-              //
-              // Treating that as a failure set `secAsked = false`, so the "SEC has nothing for
-              // this company" branch below could never run and the security stayed in the
-              // `no_currency` half of the backlog for ever. Measured 2026-09-06:
-              // `written: 240, secFailed: 180, fromSec: 0, remaining: 5972` BYTE-IDENTICAL on six
-              // consecutive runs, the head of a weight-ordered queue held by the heaviest holdings
-              // in the universe, and 2,922 securities with NO statements at all starved behind
-              // 3,050 that could never be fixed. Same shape as the Form 4 `BBVXF` 400 and today's
-              // dividends 400: three outcomes, not two — answered, answered-with-nothing, and did
-              // not answer.
-              if (noDataForSymbol(msg)) { secNoSuchSymbol = true; continue }
-              secFailed++
-              secAsked = false
-            }
-          }
-          // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the `no_sec` half of the backlog
-          // can never drain. A US OTC line belonging to a foreign private issuer that files nothing
-          // would otherwise be re-queued every run: yfinance re-writes the same four currency-less
-          // periods, the view re-admits it, forever. Marked ONLY when this security was asked to
-          // completion AND the endpoint answered for someone in this run — a failure or a deadline
-          // is not evidence.
-          //
-          // THE RUN-LEVEL GATE APPLIES TO AN EMPTY ANSWER, NOT TO A NAMED REFUSAL. `secOk` says
-          // the endpoint produced rows for SOMEONE this run, which is the right guard against an
-          // outage being recorded as a page of dead securities — and it is exactly wrong once a
-          // weight-ordered backlog's answerable head has drained, because then NO security in the
-          // page answers, the tally never becomes true, and the page can never be marked. That is
-          // the `security-profile-detail` stall, and this resource had it too: `fromSec: 0` made
-          // `secOk` false for the whole run, so even a security we finished asking about could not
-          // be recorded. A per-symbol 404 carries its own evidence and needs no tally in front of
-          // it.
-          //
-          // `no_sec` WAS `no_currency` UNTIL 2026-10-10, and the half means "a CIK holder with no SEC
-          // row" rather than "no row with a currency": the Dagster company lane writes Yahoo rows WITH
-          // a currency, which would have dropped these securities from the backlog unasked.
-          if (item.want === 'no_sec' &&
-              (secNoSuchSymbol || (secAsked && secRows === 0 && secOk))) {
-            secNone++
-            const { error } = await market
-              .from('security')
-              .update({ statement_currency_missing_at: new Date().toISOString() })
-              .eq('security_id', item.securityId)
-            if (error) throw new Error(`statement_currency_missing_at update failed: ${error.message}`)
-          }
-          if (throttledOut) break
-        }
-        if (throttledOut) break
-
+      for (const item of wanted) {
+        // The view requires a US listing, so this is defence, not a filter: SEC resolves `SAP` and
+        // never `SAP.DE`, and a question it cannot parse must not be asked.
+        if (!item.usTicker) continue
+        if (Date.now() > deadline - 8_000) break
+        const rows: Record<string, unknown>[] = []
+        // Per-security, not per-run. A tally cannot be evidence about one symbol: `secOk` says
+        // the endpoint produced rows for SOMEONE, `secAsked` that we finished asking about THIS
+        // one, and only both together justify recording that SEC has nothing for it.
+        let secAsked = true
+        let secRows = 0
+        // Set when SEC states, per symbol, that it cannot resolve this security at all. That is
+        // evidence about the SYMBOL, so it justifies the mark on its own — unlike an empty
+        // answer, which needs the run-level `secOk` to rule out an outage.
+        let secNoSuchSymbol = false
         for (const kind of ['income', 'balance', 'cash'] as const) {
           const remaining = deadline - Date.now()
-          if (remaining < 5_000) break
-          // Already answered by the filing, which is the better record — do not spend a call
-          // overwriting an 18-period series with a 4-period one.
-          if (group.every((g) => rowsFor.has(g.symbol.toUpperCase()))) break
+          if (remaining < 5_000) { secAsked = false; break }
           try {
+            // ANNUAL ONLY: `period=quarter` answers 422. Quarters come from SEC's XBRL company
+            // facts (`security-xbrl`) and from Yahoo through the company lane.
             const got = await fetcher(
-              `/api/v1/equity/fundamental/${kind}?symbol=${symbolList(group.map((g) => g.symbol))}` +
-                `&provider=yfinance&limit=4`,
+              `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(item.usTicker)}` +
+                `&provider=sec&period=annual&limit=25`,
               Math.min(20_000, remaining),
             )
             for (const r of got) {
-              // Attributed BY SYMBOL, never by position: the provider returns a row per period, so
-              // a batch is inherently out of order and positional pairing would file one company's
-              // balance sheet under another's name.
-              const sym = String(r.symbol ?? (group.length === 1 ? group[0].symbol : '')).toUpperCase()
-              const item = bySymbol.get(sym)
-              if (!item) continue
-              answered.add(sym)
-              symbolsAnswered.add(sym)
               const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
               if (!period) continue
-              const list = rowsFor.get(sym) ?? []
-              list.push({
+              answered.add(item.securityId)
+              rows.push({
                 security_id: item.securityId,
                 statement: kind,
                 period_ending: period,
-                // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is both
-                // an annual period and a fourth-quarter one, so the two must be able to coexist.
+                // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is
+                // both an annual period and a fourth-quarter one, so the two must be able to coexist.
                 period_type: 'annual',
+                // THE POINT OF THIS PROVIDER: SEC states the reporting currency, and 20-F filers
+                // report in their own (EUR, DKK, PEN, TWD among the first 522 rows).
                 currency: r.reported_currency ? String(r.reported_currency) : null,
                 data: r,
-                source_code: 'yfinance',
+                source_code: 'sec',
                 as_of: new Date().toISOString(),
               })
-              rowsFor.set(sym, list)
             }
+            if (got.length > 0) { fromSec++; secRows += got.length; secOk = true }
           } catch (e) {
-            failed++
-            const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-            // Same rule as everywhere else: a refusal is about the endpoint, not these securities.
-            if (throttled(msg)) { throttledOut = true; break }
+            // A SEC failure is counted, never marked: a failure is not evidence the company does
+            // not file.
+            const msg = e instanceof Error ? e.message : String(e)
+            if (throttled(msg)) { secFailed++; secAsked = false; throttledOut = true; break }
+            // …BUT A 404 THAT NAMES THE SYMBOL IS THE ANSWER, NOT A FAILURE TO GET ONE.
+            //
+            // openbb's SEC provider resolves symbol -> CIK through SEC's own ticker map, so a US
+            // OTC foreign-ordinary line absent from that map can never be served — `AIBRF`
+            // (AIB Group, 16.08% fund weight) and `BWAGF` return `ContentTypeError -> 404` for
+            // every statement kind while AAPL answers in the same seconds.
+            //
+            // Treating that as a failure set `secAsked = false`, so the "SEC has nothing for
+            // this company" branch below could never run and the security stayed in the backlog
+            // for ever. Measured 2026-09-06: `written: 240, secFailed: 180, fromSec: 0,
+            // remaining: 5972` BYTE-IDENTICAL on six consecutive runs. Three outcomes, not two:
+            // answered, answered-with-nothing, and did not answer.
+            if (noDataForSymbol(msg)) { secNoSuchSymbol = true; continue }
+            secFailed++
+            secAsked = false
           }
         }
-        if (throttledOut) break
-
-        for (const item of group) {
-          const sym = item.symbol.toUpperCase()
-          const rows = rowsFor.get(sym) ?? []
-          const anyAnswer = answered.has(sym)
 
         if (rows.length > 0) {
           const { error } = await market
@@ -4488,62 +4359,61 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
               { onConflict: 'security_id,statement,period_ending,period_type' })
           if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
           written += rows.length
-        } else if (anyAnswer || (failed === 0 && written > 0)) {
-          // Answered with nothing, rather than not answered at all — record it so this security
-          // stops being re-asked. A provider failure is NOT marked, or one outage would silence
-          // thousands of companies for a month.
-          //
-          // `failed === 0` ALONE WAS THE HOLE, and it is a big one: when a throttled provider
-          // answers 200-with-no-rows instead of erroring, nothing fails and nothing answers, so
-          // this marked every security it touched. 5,613 carried `statements_missing_at` from a
-          // single afternoon. `written > 0` is the missing half — proof the endpoint produced rows
-          // for SOMEONE in this run, not merely that it declined to throw.
-          none++
+        }
+
+        // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the backlog can never drain. Marked ONLY
+        // when this security was asked to completion AND the endpoint answered for someone in this
+        // run (a failure or a deadline is not evidence), or when SEC named the symbol as unknown.
+        //
+        // THE RUN-LEVEL GATE APPLIES TO AN EMPTY ANSWER, NOT TO A NAMED REFUSAL. `secOk` says the
+        // endpoint produced rows for SOMEONE this run, which is the right guard against an outage
+        // being recorded as a page of dead securities — and it is exactly wrong once a
+        // weight-ordered backlog's answerable head has drained, because then NO security in the
+        // page answers, the tally never becomes true, and the page can never be marked. That is
+        // the `security-profile-detail` stall. A per-symbol 404 carries its own evidence and needs
+        // no tally in front of it.
+        //
+        // BOTH HALVES are marked here since 2026-10-18. A `missing` security (no statements at all)
+        // used to fall through to yfinance, and SEC's answer was recorded only under the yfinance
+        // half's `statements_missing_at`.
+        if (rows.length === 0 &&
+            (secNoSuchSymbol || (secAsked && secRows === 0 && secOk))) {
+          secNone++
           const { error } = await market
             .from('security')
-            .update({ statements_missing_at: new Date().toISOString() })
+            .update({ statement_currency_missing_at: new Date().toISOString() })
             .eq('security_id', item.securityId)
-          if (error) throw new Error(`statements_missing_at update failed: ${error.message}`)
+          if (error) throw new Error(`statement_currency_missing_at update failed: ${error.message}`)
         }
-        }
+        if (throttledOut) break
       }
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
       return json({
         resource,
         written,
-        // Which provider actually answered. `fromSec` is the number the whole change
-        // exists for: it is how many securities now carry a reporting currency and 18 periods
-        // rather than 4 and none.
+        // Statement kinds SEC answered with rows: up to three per security asked.
         fromSec,
         secFailed,
+        // Securities recorded as having nothing at SEC this run.
         secNone,
-        none,
-        failed,
         throttledOut,
-        // THE EVIDENCE THAT BATCHING WORKS, reported rather than assumed. This endpoint family was
-        // only ever called one symbol at a time here, so nothing had established that
-        // `income`/`balance`/`cash` attribute a multi-symbol response the way `metrics` does. If
-        // this comes back at roughly one per batch, the provider is answering for the first symbol
-        // only and the batch size must go back to 1.
-        symbolsAnswered: symbolsAnswered.size,
+        symbolsAnswered: answered.size,
         symbolsAsked: wanted.length,
         // THE BACKLOG, COUNTED — not what is left of this page.
         //
         // The page-scoped number is `unanswered` below. `remaining` used to be page-scoped too and
         // therefore reported 0 on a run that had asked 20 of 8,633 — which is indistinguishable
         // from a drained backlog, the single most dangerous reading in this pipeline (a backlog
-        // that empties by MARKING looks exactly like one that empties by WORKING). It also meant
-        // this resource's `remaining` and `security-industries`' `remaining` were different units
-        // with the same name, so comparing two runs was misleading by construction.
+        // that empties by MARKING looks exactly like one that empties by WORKING).
         //
         // Counted with `head: true`, so it is a `content-range` and not a page: a `.limit()` above
         // PGRST_DB_MAX_ROWS silently returns 1,000 and would report "1000" for ever however bad
         // things got.
         remaining: await backlogSize(market, 'pending_statements'),
-        // What this PAGE failed to answer for. Non-zero here with `remaining` still large is an
-        // ordinary partial run; non-zero here on every run is a provider problem.
-        unanswered: Math.max(0, wanted.length - symbolsAnswered.size - none),
+        // What this PAGE neither answered nor recorded. Non-zero here with `remaining` still large
+        // is an ordinary partial run; non-zero here on every run is a provider problem.
+        unanswered: Math.max(0, wanted.length - answered.size - secNone),
       })
     }
 
