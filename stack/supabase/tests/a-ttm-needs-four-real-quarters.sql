@@ -471,3 +471,183 @@ end $$;
 rollback;
 
 \echo 'ok: a quarter two sources report is one quarter'
+
+-- ── AND A TWELVE-WEEK QUARTER IS STILL A QUARTER ───────────────────────────────────────────────
+--
+-- Costco files a 12/12/12/16-week year: Q1 to Q3 is 168 days and Q3 to the year end 112 (119 in a
+-- 53-week year). The 13-week bounds (170-200 and 80-100) refused both, so it had no TTM at all and
+-- its P/E stood on its fiscal-year EPS (migration 20261018100000). These are Costco's real revenue
+-- figures (bn USD): FY2023 is a 53-week year, FY2025 a 52-week one.
+--
+-- WHAT MAKES THE RULES DISAGREE. Each Costco year fails BOTH old bounds, so the old rule and either
+-- half of the fix derive nothing. And three quarters of an old fiscal calendar before a year on a
+-- new one (Q3 to the year end 61 days) must still derive nothing, or the lower bound has gone too.
+
+begin;
+
+insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
+insert into market.data_source (code, name, priority) values ('sec-xbrl','SEC XBRL',275) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('derived','Computed',50) on conflict (code) do nothing;
+insert into market.currency (code, name) values ('USD','US Dollar') on conflict (code) do nothing;
+insert into market.countries (iso2, name, flag, drillable) values ('ZV','Ttmland','ZV',false)
+  on conflict (iso2) do nothing;
+insert into market.security (security_id, name, security_type_code, country_iso2) values
+  ('00000000-0000-0000-0000-000000010431', 'T104 Costco-shaped', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010432', 'T104 New Fiscal Year', 'equity', 'ZV')
+on conflict (security_id) do nothing;
+
+insert into market.security_metric
+  (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values
+  -- FY2023, 53 weeks: Q3 to the year end 119 days, Q1 to Q3 168.
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2022-11-20', 54.437,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2023-02-12', 55.266,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2023-05-07', 53.648,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','annual', date '2023-09-03',242.290,'USD','sec-xbrl'),
+  -- FY2025, 52 weeks: 112 and 168, then the next three quarters.
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2024-11-24', 62.151,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2025-02-16', 63.723,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2025-05-11', 63.205,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','annual', date '2025-08-31',275.235,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2025-11-23', 67.307,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2026-02-15', 69.597,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010431','revenue','quarter',date '2026-05-10', 70.527,'USD','sec-xbrl'),
+  -- The old calendar's Q1-Q3 (a January year end) before a year ending in December.
+  ('00000000-0000-0000-0000-000000010432','revenue','quarter',date '2025-04-30', 20,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010432','revenue','quarter',date '2025-07-31', 20,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010432','revenue','quarter',date '2025-10-31', 20,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010432','revenue','annual', date '2025-12-31',100,'USD','sec-xbrl')
+on conflict do nothing;
+
+do $$
+declare v numeric; n integer;
+begin
+  perform market.derive_ttm(null, 400);
+
+  -- 1. THE 16-WEEK FOURTH QUARTER IS DERIVED: 275.235 - 62.151 - 63.723 - 63.205.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010431' and metric_code = 'revenue'
+     and period_type = 'quarter' and as_of = date '2025-08-31' and source_code = 'derived-q4';
+  if v is distinct from 86.156 then
+    raise exception 'Costco-shaped FY2025 Q4 is %, expected 86.156 (275.235 - 62.151 - 63.723 - 63.205). None means a 12/12/12/16-week year was refused: Q1 to Q3 is 168 days and Q3 to the year end 112',
+      coalesce(v::text, '<none>');
+  end if;
+
+  -- 2. AND IN A 53-WEEK YEAR, a 17-week quarter: 242.290 - 54.437 - 55.266 - 53.648.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010431' and metric_code = 'revenue'
+     and period_type = 'quarter' and as_of = date '2023-09-03' and source_code = 'derived-q4';
+  if v is distinct from 78.939 then
+    raise exception 'Costco-shaped FY2023 Q4 is %, expected 78.939 — a 53-week year puts Q3 119 days before the year end',
+      coalesce(v::text, '<none>');
+  end if;
+
+  -- 3. THE TTMs FORM: 63.723 + 63.205 + 86.156 + 67.307, and 86.156 + 67.307 + 69.597 + 70.527.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010431' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2025-11-23';
+  if v is distinct from 280.391 then
+    raise exception 'Costco-shaped TTM revenue at 2025-11-23 is %, expected 280.391', coalesce(v::text, '<none>');
+  end if;
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010431' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2026-05-10';
+  if v is distinct from 293.587 then
+    raise exception 'Costco-shaped TTM revenue at 2026-05-10 is %, expected 293.587', coalesce(v::text, '<none>');
+  end if;
+
+  -- 4. NOT FROM QUARTERS THAT DO NOT TILE THE YEAR: Q3 ends 61 days before the year does.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010432' and source_code in ('derived-q4', 'derived');
+  if n <> 0 then
+    raise exception '% rows derived from an old calendar''s Q1-Q3 before a new year end — those quarters are not the year''s', n;
+  end if;
+
+  raise notice '  ok  a 12/12/12/16-week year derives its fourth quarter, and quarters that do not tile a year still do not';
+end $$;
+
+rollback;
+
+\echo 'ok: a twelve-week quarter is still a quarter'
+
+-- ── AND A QUARTER COUNTED TWICE IS NOT A YEAR ───────────────────────────────────────────────────
+--
+-- The span alone cannot see one quarter under two dates when another is missing: the four rows
+-- still cover 240-300 days. Greif's 2025 change of fiscal year left Yahoo serving quarters from
+-- both calendars (06-30 and 07-31), and its TTM EPS at 2026-03-31 counted that summer twice. SEC
+-- re-dates a 52/53-week quarter (TRNS: 2025-09-27 and 09-30). Both are refused now (migration
+-- 20261018100000): two quarters under 45 days apart are one quarter twice.
+--
+-- WHAT MAKES THE RULES DISAGREE. Jack in the Box is a GENUINE year whose 12-week quarter Yahoo
+-- dates 59 days after the one before, so a threshold of 60 loses it; Greif's pair is 31 days apart,
+-- so a threshold of 30 keeps the doubled year.
+
+begin;
+
+insert into market.security_type (code, name) values ('equity','Equity') on conflict do nothing;
+insert into market.data_source (code, name, priority) values ('sec-xbrl','SEC XBRL',275) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('yfinance','yfinance',100) on conflict (code) do nothing;
+insert into market.data_source (code, name, priority) values ('derived','Computed',50) on conflict (code) do nothing;
+insert into market.currency (code, name) values ('USD','US Dollar') on conflict (code) do nothing;
+insert into market.countries (iso2, name, flag, drillable) values ('ZV','Ttmland','ZV',false)
+  on conflict (iso2) do nothing;
+insert into market.security (security_id, name, security_type_code, country_iso2) values
+  ('00000000-0000-0000-0000-000000010441', 'T104 Two Calendars', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010442', 'T104 Re-dated Quarter', 'equity', 'ZV'),
+  ('00000000-0000-0000-0000-000000010443', 'T104 Month-End Dates', 'equity', 'ZV')
+on conflict (security_id) do nothing;
+
+insert into market.security_metric
+  (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values
+  -- Greif's EPS from Yahoo: the old calendar's 07-31 beside the new one's 06-30, and no September.
+  ('00000000-0000-0000-0000-000000010441','revenue','quarter',date '2025-06-30', 1.41,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010441','revenue','quarter',date '2025-07-31', 1.65,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010441','revenue','quarter',date '2025-12-31', 4.455,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010441','revenue','quarter',date '2026-03-31', 0.33,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010441','revenue','quarter',date '2026-06-30', 2.025,'USD','yfinance'),
+  -- One quarter under two dates, three days apart, and the March quarter missing.
+  ('00000000-0000-0000-0000-000000010442','revenue','quarter',date '2025-09-27', 10,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010442','revenue','quarter',date '2025-09-30', 10,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010442','revenue','quarter',date '2025-12-27', 20,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010442','revenue','quarter',date '2026-06-27', 40,'USD','sec-xbrl'),
+  -- Jack in the Box: Q3 from SEC, then Yahoo's month ends; the 16-week Q1 reads 123 days, the
+  -- 12-week Q2 59.
+  ('00000000-0000-0000-0000-000000010443','revenue','quarter',date '2025-07-06', 30,'USD','sec-xbrl'),
+  ('00000000-0000-0000-0000-000000010443','revenue','quarter',date '2025-09-30', 40,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010443','revenue','quarter',date '2026-01-31', 50,'USD','yfinance'),
+  ('00000000-0000-0000-0000-000000010443','revenue','quarter',date '2026-03-31', 35,'USD','yfinance')
+on conflict do nothing;
+
+do $$
+declare v numeric; n integer;
+begin
+  perform market.derive_ttm(null, 400);
+
+  -- 1. NO YEAR FROM TWO CALENDARS: 1.41 + 1.65 + 4.455 + 0.33 = 7.845 is the summer twice.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010441' and period_type = 'ttm';
+  if n <> 0 then
+    raise exception '% TTM rows from quarters 31 days apart — one summer under two calendars, counted twice (Greif read 7.845)', n;
+  end if;
+
+  -- 2. NO YEAR FROM A RE-DATED QUARTER: 10 + 10 + 20 + 40 counts September twice and misses March.
+  select count(*) into n from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010442' and period_type = 'ttm';
+  if n <> 0 then
+    raise exception '% TTM rows from a quarter filed under two dates three days apart', n;
+  end if;
+
+  -- 3. BUT A 12-WEEK QUARTER DATED BY THE MONTH END IS A QUARTER: 30 + 40 + 50 + 35.
+  select value into v from market.security_metric
+   where security_id = '00000000-0000-0000-0000-000000010443' and metric_code = 'revenue'
+     and period_type = 'ttm' and as_of = date '2026-03-31';
+  if v is distinct from 155 then
+    raise exception 'Jack-in-the-Box-shaped TTM at 2026-03-31 is %, expected 155 — its 12-week quarter reads 59 days after the one before and is still a quarter',
+      coalesce(v::text, '<none>');
+  end if;
+
+  raise notice '  ok  a quarter counted twice is not a year, and a short gap from month-end dating still is';
+end $$;
+
+rollback;
+
+\echo 'ok: a quarter counted twice is not a year'
