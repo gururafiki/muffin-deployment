@@ -504,6 +504,166 @@
      "rawSql": "select backlog, state, depth, per_day, cache_per_day, days_to_empty, samples\n  from market.backlog_drain\n order by case state when 'draining_by_marking' then 0 when 'FLAT' then 1 when 'growing' then 2 else 3 end, depth desc"
     }
    ]
+  },
+  {
+   "type": "row",
+   "title": "Dagster lanes (ingestion that has left the edge)",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 64
+   },
+   "panels": []
+  },
+  {
+   "type": "table",
+   "title": "Dagster runs by job",
+   "description": "Every job that ran in the time range, from Dagster's own run storage (the `muffin-dagster` datasource, read as `metrics_ro`). `max_wait_s` is the longest a run queued before starting: the company lane holds the `yfinance` AND `sql` pools from 03:30 to about 06:00, so the asset jobs created meanwhile (`__ASSET_JOB`, which includes `derived_security_metrics`) wait up to two hours, and that is expected. A run that SUCCEEDED proves nothing about its data: read its counters with `muffin-dagster-operations`.",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 65
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-dagster"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-dagster"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select pipeline_name as job,\n       count(*) as runs,\n       count(*) filter (where status = 'SUCCESS') as succeeded,\n       count(*) filter (where status = 'FAILURE') as failed,\n       count(*) filter (where status = 'CANCELED') as canceled,\n       count(*) filter (where status not in ('SUCCESS', 'FAILURE', 'CANCELED')) as not_finished,\n       max(create_timestamp) as last_created,\n       round((percentile_cont(0.5) within group (order by end_time - start_time)\n              filter (where status = 'SUCCESS'))::numeric) as median_run_s,\n       round(max(start_time - extract(epoch from create_timestamp))::numeric) as max_wait_s\n  from runs\n where $__timeFilter(create_timestamp)\n group by 1\n order by 1"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "type": "table",
+   "title": "Failed or cancelled Dagster runs",
+   "description": "Every run in the time range that did not succeed, with the tags that say why it exists. The reason a run failed is in the Dagster UI (or `scripts/run_events.py`), on its STEP_FAILURE or ENGINE_EVENT; a run the monitor ended shows `DagsterExecutionInterruptedError`, with the reason on its PIPELINE_FAILURE. The alert 'A Dagster run failed' fires for six hours after any row appears here.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 73
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-dagster"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-dagster"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "select r.create_timestamp as created, left(r.run_id, 8) as run, r.pipeline_name as job, r.status,\n       (select t.value from run_tags t where t.run_id = r.run_id and t.key = 'muffin/reason') as reason,\n       (select t.value from run_tags t where t.run_id = r.run_id and t.key = 'dagster/partition') as partition\n  from runs r\n where $__timeFilter(r.create_timestamp)\n   and r.status in ('FAILURE', 'CANCELED')\n order by r.create_timestamp desc"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Queue wait per run, by job (seconds)",
+   "description": "How long each run waited between being created and starting, one point per run. Pools are run-granularity, so a long run holds its pool for its whole length: the price night serialises its 100 runs on `yfinance` and `sql`, and the company lane holds both from 03:30. A wait that grows on a day nothing else changed is a pool held by something stuck: a run left STARTED after a roll holds its slot until it is failed by hand.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 73
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-dagster"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-dagster"
+     },
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select create_timestamp as time,\n       pipeline_name as metric,\n       round((start_time - extract(epoch from create_timestamp))::numeric) as value\n  from runs\n where $__timeFilter(create_timestamp)\n   and start_time is not null\n order by 1"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "points",
+      "lineWidth": 1,
+      "fillOpacity": 0,
+      "showPoints": "always",
+      "pointSize": 5
+     },
+     "unit": "s"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "type": "table",
+   "title": "Asset checks: the latest evaluation of each, last 30 days",
+   "description": "Every Dagster asset check's most recent result, failures first, whatever the time range. `last_passed` separates a known state from news: `no_company_is_far_behind_the_rotation` reads ERROR until the company lane's first rotation completes (2026-10-24) and has never passed, while a check that passed last week and fails now has regressed, which is what the alert 'A Dagster asset check started failing' watches. WARN checks never alert. Checks evaluated in the last 30 days only, whatever the time picker says: Dagster keeps the history of checks on assets that were deleted (`raw_price_bars`, `ledger_health`), and without the window they would sit at the top for ever. A live check that stops being evaluated shows its age in `evaluated` long before it drops out.",
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 81
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-dagster"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-dagster"
+     },
+     "format": "table",
+     "rawQuery": true,
+     "rawSql": "with latest as (\n  select distinct on (asset_key, check_name)\n         asset_key, check_name, execution_status, create_timestamp, evaluation_event\n    from asset_check_executions\n   where execution_status in ('SUCCEEDED', 'FAILED')\n     and create_timestamp > (now() at time zone 'utc') - interval '30 days'\n   order by asset_key, check_name, id desc)\nselect l.check_name as \"check\",\n       trim(both '[]\"' from l.asset_key) as asset,\n       l.execution_status as status,\n       replace(l.evaluation_event::json->'dagster_event'->'event_specific_data'->'severity'->>'__enum__',\n               'AssetCheckSeverity.', '') as severity,\n       l.create_timestamp as evaluated,\n       (select max(p.create_timestamp) from asset_check_executions p\n         where p.asset_key = l.asset_key and p.check_name = l.check_name\n           and p.execution_status = 'SUCCEEDED') as last_passed\n  from latest l\n order by (l.execution_status = 'FAILED') desc, l.check_name"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   }
   }
  ]
 }

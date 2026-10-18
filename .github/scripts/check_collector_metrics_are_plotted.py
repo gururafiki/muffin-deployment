@@ -34,6 +34,16 @@ EMIT = re.compile(r"^\s*(?:#\s*(?:HELP|TYPE)\s+)?(muffin_[a-z0-9_]+)", re.M)
 # Also catch python collectors building names in f-strings / literals.
 EMIT_PY = re.compile(r"['\"](muffin_[a-z0-9_]+)")
 REF = re.compile(r"(muffin_[a-z0-9_]+)")
+# EMITTED BY ANOTHER REPOSITORY. The Dagster code location serves `muffin_ingest_*` from muffin-ingest's
+# `libs/muffin-ingest-lib/src/muffin_ingest/metrics.py` (Prometheus scrapes it as job `muffin-ingest`),
+# which this repository's CI cannot read. Named one by one rather than allowed by prefix, so a panel
+# with a misspelt name still fails as unfed.
+EXTERNAL = {
+    "muffin_ingest_provider_requests_total",
+    "muffin_ingest_provider_request_duration_seconds_bucket",
+    "muffin_ingest_provider_request_duration_seconds_sum",
+    "muffin_ingest_provider_request_duration_seconds_count",
+}
 
 def main() -> int:
     emitted = set()
@@ -44,6 +54,7 @@ def main() -> int:
         emitted |= set(EMIT.findall(txt)) | set(EMIT_PY.findall(txt))
     for f in sorted(PROXY.rglob("*.conf")):
         emitted |= set(EMIT_PY.findall(f.read_text()))
+    emitted |= EXTERNAL
     # `_total` counters are exposed by prometheus with no suffix change, but a panel may use
     # rate()/increase() on the base name -- normalise so the comparison is about the metric.
     # ONLY PromQL, never the whole file. Reading raw JSON matched `muffin_supabase-db-data` inside
