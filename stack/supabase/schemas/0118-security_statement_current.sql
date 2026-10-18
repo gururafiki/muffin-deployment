@@ -28,5 +28,5 @@ SELECT sym.symbol,
             ELSE NULL::text
         END AS reporting_currency
    FROM market.security_statement st
-     JOIN market.security_symbol sym ON sym.security_id = st.security_id
+     JOIN market.symbol_security sym ON sym.security_id = st.security_id
      JOIN market.security s ON s.security_id = st.security_id;

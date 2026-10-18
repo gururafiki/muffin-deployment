@@ -43,10 +43,26 @@ insert into market.security_statement (security_id, statement, period_ending, da
   ('00000000-0000-0000-0000-0000000066a3', 'income', '2026-06-30', '{"total_revenue": 1}', 'yfinance', now())
 on conflict (security_id, statement, period_ending, period_type) do nothing;
 
+-- The view resolves symbols through `market.symbol_security`, a materialised view, so rows inserted
+-- in this transaction are invisible to it until it is rebuilt (migration 20261018210000).
+refresh materialized view market.symbol_security;
+
 do $$
 declare
   bad text;
+  seen int;
 begin
+  -- A FLOOR FIRST. The check below asserts that no row disagrees, which an EMPTY view satisfies:
+  -- once the view read a materialised symbol map, the fixture's rows vanished until a refresh and
+  -- this test passed on nothing (found 2026-10-18).
+  select count(distinct security_id) into seen from market.security_statement_current
+   where security_id in ('00000000-0000-0000-0000-0000000066a1', '00000000-0000-0000-0000-0000000066a2',
+                         '00000000-0000-0000-0000-0000000066a3');
+  if seen <> 3 then
+    raise exception 'the statements view answered for % of the 3 fixture securities — the gate below '
+                    'would pass on rows it never saw', seen;
+  end if;
+
   -- The caller's rule, expressed here so the test fails for the reason the UI would.
   select string_agg(format('%s: country=%s -> label %s, expected %s',
                            s.name, coalesce(v.country_iso2,'<null>'),
