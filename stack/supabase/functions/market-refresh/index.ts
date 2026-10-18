@@ -51,6 +51,9 @@ import {
 } from './resources.ts'
 
 const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
+// Dagster's GraphQL, on the stack's overlay network. Not through http-cache, because it is not a
+// provider: the refresh button launches a run there (`launchCompanyRun`).
+const DAGSTER_GRAPHQL_URL = Deno.env.get('DAGSTER_GRAPHQL_URL') ?? 'http://dagster-webserver:3000/graphql'
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
@@ -208,7 +211,8 @@ async function writeCurrencyFor(
 
 /**
  * RESOURCES A FAMILY CUTOVER RETIRED, refused before anything else is decided: the price and
- * performance family on 2026-09-12 (D2), the universe family on 2026-09-26 (Phase 3).
+ * performance family on 2026-09-12 (D2), the universe family on 2026-09-26 (Phase 3), the Yahoo
+ * company family on 2026-10-18 (Phase 4).
  *
  * Their handlers are still in this file and their `cron_resource` rows are disabled, which stops
  * the SCHEDULE and nothing else. A direct call still reached them: an admin pressing Refresh in the
@@ -244,6 +248,77 @@ const RETIRED: Record<string, string> = {
   'sec-cik-map': 'Dagster registries (raw_sec_cik_map → security_cik) — read market.security.cik',
   'in-symbols': 'Dagster registries (raw_nse_equity_list → security_nse_filer)',
   'derive-classifications': 'Dagster security_classification — read market.security_taxonomy',
+  'security-profiles': 'Dagster company lane (yahoo_companies) — read market.security_taxonomy',
+  'security-profile-detail': 'Dagster company lane (yahoo_companies) — read market.security_profile',
+  'security-industries': 'Dagster company lane (yahoo_companies) — read market.security_taxonomy',
+  'security-fundamentals': 'Dagster company lane (yahoo_companies) — read market.security_fundamentals',
+  'security-share-stats': 'Dagster company lane (yahoo_companies) — read market.security_share_stats',
+  'security-management': 'Dagster company lane (yahoo_companies) — read market.security_officer',
+  'security-quarters': 'Dagster company lane (yahoo_companies) — read market.security_statement',
+  'security-dividends': 'Dagster price lane (yahoo_corporate_action) — read market.security_corporate_action',
+  'instrument-profile': 'Dagster company lane (yahoo_companies) — read market.instrument_current',
+  'security-metrics': 'Dagster derived_security_metrics — read market.security_metric',
+}
+
+/**
+ * LAUNCH THE COMPANY LANE FOR ONE SECURITY: the job's own run, one partition, as its schedule would.
+ *
+ * `force: true` is `CompanyRun.force` (muffin-ingest `defs/companies/raw.py`): ask for the summary and
+ * the statements whatever raw already holds. The run's assets claim the `yfinance` and `sql` pools, so
+ * it queues behind them like any other and a press during the price night waits its turn. Measured
+ * 2026-10-18: `dagster-webserver:3000` answers on `muffin-net` with no credential, which is why this
+ * stays inside the stack and never goes through Cloudflare Access.
+ */
+async function launchCompanyRun(
+  securityId: string,
+  symbol: string,
+): Promise<{ ok: true; runId: string } | { ok: false; error: string }> {
+  const mutation = `mutation($p: ExecutionParams!) { launchRun(executionParams: $p) {
+    __typename ... on LaunchRunSuccess { run { runId } }
+    ... on RunConfigValidationInvalid { errors { message } } ... on Error { message } } }`
+  const params = {
+    selector: {
+      repositoryLocationName: 'muffin_ingest',
+      repositoryName: '__repository__',
+      jobName: 'yahoo_companies',
+    },
+    mode: 'default',
+    runConfigData: { ops: { raw_yahoo_company: { config: { force: true } } } },
+    executionMetadata: {
+      tags: [
+        { key: 'dagster/partition', value: securityId },
+        { key: 'muffin/reason', value: `refresh button: ${symbol}` },
+        // THE JOB'S `run_tags` DO NOT REACH A RUN LAUNCHED HERE: only the scheduler merges them.
+        // Measured 2026-10-18, a launched run carried the pools but no `dagster/max_runtime`, so a
+        // hung one would have had six hours. One company takes ~30 s once it starts.
+        { key: 'dagster/max_runtime', value: '600' },
+      ],
+    },
+  }
+  let res: Response
+  try {
+    res = await fetch(DAGSTER_GRAPHQL_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: mutation, variables: { p: params } }),
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch (e) {
+    return { ok: false, error: `dagster unreachable: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) }
+  }
+  const body = await res.json().catch(() => null) as
+    | { data?: { launchRun?: Record<string, unknown> }; errors?: { message: string }[] }
+    | null
+  const launch = body?.data?.launchRun
+  if (launch?.__typename === 'LaunchRunSuccess') {
+    return { ok: true, runId: String((launch.run as { runId: string }).runId) }
+  }
+  const errors = launch?.errors as { message: string }[] | undefined
+  const why = (launch?.message as string | undefined) ??
+    errors?.map((e) => e.message).join('; ') ??
+    body?.errors?.[0]?.message ??
+    `HTTP ${res.status}`
+  return { ok: false, error: `${String(launch?.__typename ?? 'no answer')}: ${why}`.slice(0, 300) }
 }
 
 async function handle(req: Request): Promise<Response> {
@@ -440,7 +515,9 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // length of the TTL.
     [SEC_PROFILE_RESOURCE]: BACKLOG_TTL_MINUTES,
     [INDUSTRY_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [ONE_SECURITY_RESOURCE]: BACKLOG_TTL_MINUTES,
+    // ONE MINUTE: the claim is per resource, not per symbol, so the backlog TTL meant a press for
+    // one stock refused the next stock for ten minutes. Launching a run is cheap; the run queues.
+    [ONE_SECURITY_RESOURCE]: 1,
     [FUNDAMENTALS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [NEWS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [SHARE_STATS_RESOURCE]: BACKLOG_TTL_MINUTES,
@@ -4771,6 +4848,14 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
     // the resources it wraps are budgeted for a backlog and would refuse on their TTL, and because
     // fundamentals cost one of 25 daily calls — spending those on what someone is looking at is
     // the only shape that provider supports.
+    // ON DEMAND, THROUGH DAGSTER (Phase 4 decision 8). This handler used to fetch the profile, the
+    // fundamentals and Yahoo's statements itself through openbb, and wrote the metrics response's
+    // REPORTING currency into the listing's QUOTE currency on the way (`writeCurrencyFor`). The
+    // company lane owns all of that now, so a press launches this security's partition of
+    // `yahoo_companies` with `force: true`.
+    //
+    // It answers `queued`, never `refreshed`: the data arrives minutes later, and a button that said
+    // "refreshed" would invite a reload that shows nothing new.
     if (resource === ONE_SECURITY_RESOURCE) {
       const wanted = String(symbolScope ?? '').trim().toUpperCase()
       if (!wanted) return releaseAnd({ error: 'security-refresh needs a `symbol`' }, 400)
@@ -4781,171 +4866,34 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         .eq('symbol', wanted)
         .limit(1)
       if (findErr) throw new Error(`security lookup failed: ${findErr.message}`)
-      let target = (rows ?? [])[0]
+      let securityId = (rows ?? [])[0]?.security_id as string | undefined
 
       // Fall back to the PROVIDER symbol. A non-US security often has no `ticker` identifier at
       // all — only `005930.KS` in security_provider_symbol — so a display-symbol lookup alone
       // reports "unknown symbol" for a security we hold.
-      if (!target) {
+      if (!securityId) {
         const { data: viaProvider } = await market
           .from('security_provider_symbol')
           .select('security_id')
           .eq('provider_code', 'yfinance')
           .eq('symbol', wanted)
           .maybeSingle()
-        if (viaProvider?.security_id) {
-          target = { security_id: viaProvider.security_id, symbol: wanted, name: null }
-        }
+        securityId = (viaProvider?.security_id as string | undefined) ?? undefined
       }
-      if (!target) {
+      if (!securityId) {
         await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, symbol: wanted, refreshed: false, reason: 'unknown symbol' })
-      }
-      const securityId = target.security_id as string
-
-      // The address the price provider knows, which is not always the display ticker.
-      const { data: ps } = await market
-        .from('security_provider_symbol')
-        .select('symbol')
-        .eq('security_id', securityId)
-        .eq('provider_code', 'yfinance')
-        .maybeSingle()
-      const fetchSymbol = (ps?.symbol as string | undefined) ?? wanted
-
-      const out: Record<string, unknown> = { resource, symbol: wanted }
-
-      // Returns are not refreshed here. Since D2 they come from Dagster's security_return, and
-      // `market.performance` is a VIEW over it, so recomputing one symbol here spent a provider
-      // request and up to 15 s of the user's wait on an upsert that could only fail.
-
-      // 1. Profile: market cap, and the sector if it is still missing.
-      try {
-        const prof = await fetcher(
-          `/api/v1/equity/profile?symbol=${encodeURIComponent(fetchSymbol)}&provider=yfinance`,
-          15_000,
-        )
-        const cap = Number(prof[0]?.market_cap)
-        if (Number.isFinite(cap) && cap > 0) {
-          const { error } = await market
-            .from('security')
-            .update({ market_cap: cap, market_cap_at: new Date().toISOString() })
-            .eq('security_id', securityId)
-          if (error) throw new Error(`market_cap update failed: ${error.message}`)
-          out.marketCap = cap
-        }
-      } catch (e) {
-        out.profileError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
+        return json({ resource, symbol: wanted, queued: false, reason: 'unknown symbol' })
       }
 
-      // 2. Fundamentals — keyless, and it covers the non-US listings that defeated every provider
-      //    we hold a key for. Fetched by the PROVIDER symbol, like prices.
-      try {
-        const f = await fetchFundamentals(fetcher, fetchSymbol, 15_000)
-        if (!f) out.fundamentals = 'not covered'
-        else {
-          const { error } = await market.from('security_fundamentals').upsert(
-            {
-              security_id: securityId,
-              source_code: 'yfinance',
-              as_of: new Date().toISOString(),
-              pe_ratio: f.peRatio ?? null,
-              forward_pe: f.forwardPe ?? null,
-              peg_ratio: f.pegRatio ?? null,
-              price_to_book: f.priceToBook ?? null,
-              profit_margin: f.profitMargin ?? null,
-              gross_margin: f.grossMargin ?? null,
-              operating_margin: f.operatingMargin ?? null,
-              return_on_equity: f.returnOnEquity ?? null,
-              revenue_growth: f.revenueGrowth ?? null,
-              debt_to_equity: f.debtToEquity ?? null,
-              dividend_yield: f.dividendYield ?? null,
-              beta: f.beta ?? null,
-              enterprise_value: f.enterpriseValue ?? null,
-              raw: f.raw,
-            },
-            { onConflict: 'security_id' },
-          )
-          if (error) throw new Error(`fundamentals upsert failed: ${error.message}`)
-
-          // THE CURRENCY, which this path never wrote at all. Proven in production 2026-08-18 by
-          // corrupting Toyota's listing to USD and running `security-refresh`: it reported
-          // `fundamentals: updated` and left the wrong currency in place. This is the path a user's
-          // stock page triggers, so it was the one most likely to be looked at and the one that
-          // silently did nothing.
-          const { data: vcRows, error: vcErr } = await market
-            .from('venue_currency')
-            .select('suffix,quote_currency')
-          if (vcErr) throw new Error(`venue_currency read failed: ${vcErr.message}`)
-          const res = await writeCurrencyFor(
-            market,
-            securityId,
-            fetchSymbol,
-            (f.raw as Record<string, unknown> | undefined)?.currency,
-            (f.raw as Record<string, unknown> | undefined)?.market_cap,
-            new Map((vcRows ?? []).map((v) => [String(v.suffix), String(v.quote_currency)])),
-          )
-          out.currency = res.written ? 'updated' : 'not reported'
-          if (res.overruled) out.currencyOverruled = true
-
-          out.fundamentals = 'updated'
-        }
-      } catch (e) {
-        out.fundamentalsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
+      const launched = await launchCompanyRun(securityId, wanted)
+      if (!launched.ok) {
+        // Not an exception: Dagster answered, or did not, and the caller is told which. A security
+        // with no partition yet (promoted minutes ago) is refused here, by name.
+        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false, p_error: launched.error })
+        return json({ resource, symbol: wanted, queued: false, reason: launched.error })
       }
-
-      // 3. STATEMENTS, because on demand is the only route that reaches them in a useful time.
-      //
-      // `security-statements` fetches ONE security at a time — three calls each, and the endpoints
-      // do not accept several symbols (measured: `symbolsAsked 50, symbolsAnswered 0`). At 60 a run
-      // and four cron passes a day, an 8,791-deep backlog is about five weeks. So the securities a
-      // person actually opens would be among the last to get statements, which is exactly backwards.
-      //
-      // This costs three requests on a button a person pressed, for the one security they are
-      // looking at. The backlog stays as the background sweep; this is what makes the wait
-      // irrelevant for anything anyone cares about.
-      try {
-        const stRows: Record<string, unknown>[] = []
-        for (const kind of ['income', 'balance', 'cash'] as const) {
-          const got = await fetcher(
-            `/api/v1/equity/fundamental/${kind}?symbol=${encodeURIComponent(fetchSymbol)}` +
-              `&provider=yfinance&limit=4`,
-            12_000,
-          )
-          for (const r of got) {
-            const period = String(r.period_ending ?? r.date ?? '').slice(0, 10)
-            if (!period) continue
-            stRows.push({
-              security_id: securityId,
-              statement: kind,
-              period_ending: period,
-              // PART OF THE PRIMARY KEY SINCE MIGRATION 106 and NOT NULL: a fiscal-year end is both
-                // an annual period and a fourth-quarter one, so the two must be able to coexist.
-                period_type: 'annual',
-              currency: r.reported_currency ? String(r.reported_currency) : null,
-              data: r,
-              source_code: 'yfinance',
-              as_of: new Date().toISOString(),
-            })
-          }
-        }
-        if (stRows.length === 0) out.statements = 'not covered'
-        else {
-          const { error } = await market.from('security_statement').upsert(
-            dedupeBy(stRows, (r) => `${r.security_id}|${r.statement}|${r.period_ending}|${r.period_type}`),
-            { onConflict: 'security_id,statement,period_ending,period_type' },
-          )
-          if (error) throw new Error(`security_statement upsert failed: ${error.message}`)
-          out.statements = `${stRows.length} rows`
-        }
-      } catch (e) {
-        // Deliberately NOT written to `statements_missing_at`. A failure on a button press says
-        // nothing about whether the provider has statements for this security, and marking here
-        // would exclude it from the backlog for 30 days on the strength of one bad request.
-        out.statementsError = e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)
-      }
-
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ ...out, refreshed: true })
+      return json({ resource, symbol: wanted, queued: true, runId: launched.runId })
     }
 
     // Level 2 of the taxonomy: the sub-sector a sector page shows as chips. The data was already

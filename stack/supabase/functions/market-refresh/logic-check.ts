@@ -391,9 +391,18 @@ console.log('\ncurrency — the venue overrules a provider that contradicts it')
   // unbounded loops, three return sites.
   const fundFetches = [...index.matchAll(/fetchFundamentals\(|loadFundamentals\(/g)].length
   const currencyWrites = [...index.matchAll(/writeCurrencyFor\(/g)].length - 1 // minus the definition
-  check(fundFetches > 0 && currencyWrites >= fundFetches,
+  // ZERO FETCH SITES IS RIGHT ONLY BECAUSE THE FAMILY RETIRED (2026-10-18, Phase 4 step 9): the
+  // Dagster company lane owns fundamentals, and `security-refresh` launches it instead of fetching.
+  // The `fundFetches > 0` clause stopped a RENAMED fetch passing silently, so zero is accepted only
+  // while `security-fundamentals` is refused as retired. Step 10 deletes the handler and this block.
+  const fundamentalsRetired = /^\s{2}'security-fundamentals':/m.test(
+    index.match(/const RETIRED: Record<string, string> = \{[\s\S]*?\n\}/)?.[0] ?? '')
+  check((fundFetches > 0 || fundamentalsRetired) && currencyWrites >= fundFetches,
     'every path that fetches fundamentals also writes the currency',
-    `${fundFetches} fetch sites, ${currencyWrites} currency writes`)
+    `${fundFetches} fetch sites, ${currencyWrites} currency writes` +
+      (fundFetches === 0
+        ? `, and security-fundamentals is ${fundamentalsRetired ? '' : 'NOT '}retired`
+        : ''))
   // ONE implementation, not two that drift. The helper exists precisely because the inline
   // versions diverged.
   check(/^async function writeCurrencyFor\(/m.test(index),
