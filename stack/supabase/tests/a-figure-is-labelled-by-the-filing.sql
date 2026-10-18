@@ -101,6 +101,10 @@ insert into market.security_statement (security_id, statement, period_ending, cu
   ('00000000-0000-0000-0000-000000009106', 'income', date '2025-12-31', null, '{}'::jsonb, 'yfinance')
 on conflict do nothing;
 
+-- The view resolves symbols through `market.symbol_security`, a materialised view, so rows inserted
+-- in this transaction are invisible to it until it is rebuilt (migration 20261018210000).
+refresh materialized view market.symbol_security;
+
 do $$
 declare c text;
 begin
