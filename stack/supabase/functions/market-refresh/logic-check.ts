@@ -233,7 +233,7 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   // string is the proof that the endpoint answered for someone in this run.
   const gates: [string, string][] = [
     // SEC only since 2026-10-18: the yfinance half and its `statements_missing_at` left the edge.
-    ['security-statements',   'secNoSuchSymbol || (secAsked && secRows === 0 && secOk)'],
+    ['security-statements',   'emptyAnswer.length > 0 && secOk'],
     ['security-quarters',     'asked && anyAnswer'],
     // Marks only what isolation proved dead ALONE — never absence from a batched 200.
     // `iso.dead` IS the gate: fetchWithIsolation only populates it after asking each symbol alone
@@ -481,7 +481,7 @@ console.log('\nabsence classifier — a crash in the adapter is still an answer 
   // RUN-LEVEL TALLY. `secOk` says the endpoint answered for SOMEONE this run — the right guard
   // against an outage, and guaranteed false once the answerable head has drained, which is how
   // this resource sat at `written: 240, remaining: 5972` on six identical runs.
-  check(/secNoSuchSymbol \|\| \(secAsked && secRows === 0 && secOk\)/.test(handlerSrc),
+  check(/if \(rows\.length === 0 && secNoSuchSymbol\) \{\s*await markSecNone/.test(handlerSrc),
     'a named SEC 404 marks on its own evidence, without the run-level tally in front of it')
   check(/if \(noDataForSymbol\(msg\)\) \{ secNoSuchSymbol = true; continue \}/.test(handlerSrc),
     'a SEC 404 is classified as an absence rather than counted as a failure')
@@ -1193,8 +1193,18 @@ console.log('\nsecurity-statements — SEC only')
   // the head of a weight-ordered backlog for ever: with `fromSec: 0` the whole page is
   // unanswerable, so `secOk` can never become true.
   check(
-    /\(secAsked && secRows === 0 && secOk\)/.test(body),
-    'the EMPTY-ANSWER mark still requires the security to have been asked to completion AND the endpoint to have answered for someone — a failure, a throttle or a deadline is not evidence it does not file',
+    /rows\.length === 0 && secAsked && secRows === 0\) \{\s*emptyAnswer\.push/.test(body) &&
+      /if \(emptyAnswer\.length > 0 && secOk\)/.test(body),
+    'an EMPTY answer is held and marked only once the endpoint has answered for someone — a failure, a throttle or a deadline is not evidence it does not file',
+  )
+  // AND A RUN WHERE NOTHING ANSWERED ASKS A CONTROL FILER, or a queue of companies SEC has nothing
+  // for is asked on every run and never recorded (2026-10-18: REAX, OCTLF, CIB, `unanswered: 3`).
+  // Only then, and never past a throttle: a refused control proves nothing.
+  check(
+    /if \(emptyAnswer\.length > 0 && !secOk && !throttledOut && /.test(body) &&
+      /symbol=\$\{SEC_CONTROL_FILER\}/.test(body) &&
+      /if \(controlAnswered\) secOk = true/.test(body),
+    'a run where nothing answered asks a control filer before trusting its empty answers',
   )
   check(
     /secOk = true/.test(body),
