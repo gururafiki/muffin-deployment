@@ -34,8 +34,13 @@ A failed resource answers **HTTP 200 with `"ok": false`** and the reason.
 ```bash
 curl -sS -X POST "$BASE/functions/v1/market-refresh" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"security-profiles","force":true}'
+  -d '{"resource":"security-statements","force":true}'
 ```
+
+**A 410 names the lane that replaced the resource.** The Yahoo company family (profiles,
+industries, fundamentals, share stats, officers, quarters, dividends, metrics) left the edge on
+2026-10-18, after prices (2026-09-12) and the universe (2026-09-26). Diagnose those in Dagster
+(`muffin-dagster-operations`), not here.
 
 **A bare `error code: 502` with no body means the WORKER DIED** — look at memory or a runaway loop,
 not at your error handling. Application failures do not look like that any more.

@@ -23,6 +23,7 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
 | Raw Parquet | `/var/lib/muffin-ingest/raw/<asset>/<partition>.parquet` in the `muffin_muffin-ingest` container |
 | Instance config | `muffin-deployment/stack/dagster/dagster.yaml`: `max_concurrent_runs: 3`, pools `default_limit: 1`, `granularity: run`. `run_monitoring` (since 2026-10-04) ends a run past its `dagster/max_runtime` tag: 300 s on the short scheduled jobs, 1,800 s on `nightly_prices`, six hours on anything without one, and fails a run stuck starting for 300 s |
 | Nightly schedules (UTC) | `daily_fx`, `daily_indices` at 00:00 and `nightly_prices` at 00:00 (serialised by the `sql` pool; the two short lanes carry `dagster/priority: 1` and go first, since 2026-09-25). `nightly_prices` resumes after the last key the previous night asked for (`muffin/sweep_last` on every run); `heartbeat` at :07 hourly (no pool). Symbology: `new_symbols_needed` seeds the grid every 6 h, `symbology_rungs` (code location) requests the rungs, the default sensor adopts. **Nothing prunes** — `prune_dagster_storage` was deleted 2026-09-20 because it destroyed the partition grid the price sweep reads; The day-partitioned price lane (`daily_prices`, `raw_price_bars`, the day `price_bar`) and the `ingest` ledger were deleted 2026-10-04: a symbol the provider rejected alone is a `miss` in `market.identifier_probe` (provider `yfinance`), skipped for 30 days while the security keeps that symbol. |
+| Daily company lane (UTC) | `yahoo_companies` at 03:30, since 2026-10-18: a seventh of the universe a day (~1,810 companies) in runs of 100, each resuming after the previous day's last key, `dagster/max_runtime` 1,800 s. Each run holds the `yfinance` AND `sql` pools, so the day takes ~2 h 20 min and every `sql` lane created meanwhile waits until ~06:00. `derived_security_metrics` runs `derive_security_metrics` and `derive_ttm` at :17 and :47. The stock page's Refresh button launches one partition with `force: true`, `dagster/max_runtime=600` and `muffin/reason=refresh button: <SYMBOL>`. |
 
 ## Last night, in order
 
@@ -78,7 +79,19 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    `provider_skipped_days` metadata. Each night also offers the days before its own, insert-only,
    so a day Yahoo fills late arrives the next night by itself (`refilled`): Yahoo filled Monday
    2026-10-12 about 21 hours after it ended.
-4. **Where the night's time went.** Read the steps, not the runs: every run also spends ~15 s
+4. **The company lane (03:30).** Two sets of outcomes, each summing to `requested` together with
+   `not_askable` and `limited_out`:
+   - `raw_yahoo_summary`: `summary_answered + summary_empty + summary_absent + summary_unreadable +
+     summary_transport + summary_not_due + summary_unasked`;
+   - `raw_yahoo_statements`: `statements_fetched + statements_partial + statements_failed +
+     statements_not_due + statements_skipped + statements_unasked`.
+
+   Expect `throttled 0` and `crumb_rejected 0`. The first day (2026-10-18) read 1,726 answered + 35
+   not askable + 1 transport = 1,762. A visit with nothing due asks nothing: the summary is due
+   after 7 days, the statements after an earnings date or at 90 days. The checks
+   `statements_carry_a_currency` and `fundamental_units_are_conventional` must pass;
+   `no_company_is_far_behind_the_rotation` warns until the first rotation completes (2026-10-24).
+5. **Where the night's time went.** Read the steps, not the runs: every run also spends ~15 s
    starting up, which `run_s` includes.
    ```sql
    select e.event::json->'dagster_event'->>'step_key' step, count(*),
@@ -139,14 +152,21 @@ The daemon stores an evaluation whenever the result changes:
 
 ```bash
 G='docker exec -i $(docker ps -qf name=muffin_dagster-webserver) python -'
-ssh muffin "$G job --name nightly_prices --partitions <security_id>,<security_id> --reason live-subset-<date>" < scripts/dagster_gql.py
+ssh muffin "$G job --name nightly_prices --partitions <security_id>,<security_id> --reason live-subset-<date> --max-runtime 1800" < scripts/dagster_gql.py
+ssh muffin "$G job --name yahoo_companies --partitions <security_id> --reason refetch-<why> --max-runtime 600 --op-config raw_yahoo_company.force=true" < scripts/dagster_gql.py
 ssh muffin "$G backfill --assets raw_price_chart,price_bar_history --partitions <security_id>,<security_id> --reason recovery-<date>" < scripts/dagster_gql.py
 ssh muffin "$G materialize --assets security_return --reason <why>" < scripts/dagster_gql.py
 ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 ```
 
-- **`job` runs the real job, one partition a run**, with the job's own checks and `run_tags`. That
-  is the shape a live tiny subset should take. `backfill` runs no checks, and `materialize` takes no
+- **`job` runs the real job, one partition a run**, with the job's own checks. **Not with its
+  `run_tags`:** a GraphQL launch carries only the tags it sends, and `define_asset_job(run_tags=…)`
+  reaches only the runs a schedule or sensor creates. Measured 2026-10-18 on `yahoo_companies`: the
+  scheduled runs carry `dagster/max_runtime=1800`, and a GraphQL-launched run carried none. So pass
+  `--max-runtime` every time. That is the shape a live tiny subset should take.
+- **`--op-config op.key=value` sets run config.** A company-lane run fetches only what is due, so a
+  hand launch for a company visited this week asks nothing; `raw_yahoo_company.force=true` refetches
+  its summary and statements. For one stock, the Refresh button (`security-refresh`) does the same. `backfill` runs no checks, and `materialize` takes no
   partition. Nothing launched by hand moves the price rotation, which reads only its schedule's runs.
 - **`--max-runtime SECONDS` gives a hand-launched run its own limit.** Without it the monitor
   allows six hours. The monitor checks at its next poll, so a run can overshoot by about two

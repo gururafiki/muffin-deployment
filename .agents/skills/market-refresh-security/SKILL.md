@@ -1,7 +1,7 @@
 ---
 name: market-refresh-security
 description:
-  Refresh ONE security immediately — market cap, fundamentals and statements. Use when someone says a specific stock page looks stale, empty or
+  Refresh ONE security now: queue its Dagster company-lane run (profile, fundamentals, statements). Use when someone says a specific stock page looks stale, empty or
   wrong, or names a ticker to update. Costs a handful of requests, so it is the
   right tool for anything a person is actually looking at.
 license: GPL-3.0
@@ -12,34 +12,39 @@ metadata:
 
 # Refresh one security
 
-`security-refresh` does everything for a single symbol in one call: market cap, fundamentals and
-statements. Returns are not refreshed here: Dagster's `security_return` computes them nightly, and
-`market.performance` is a view over it.
+**Since 2026-10-18 `security-refresh` fetches nothing itself.** It queues the security's partition
+of the Dagster company lane (`yahoo_companies`) with `force: true`, which asks Yahoo for the summary
+and the annual and quarterly statements whatever is already held, then writes the profile, officers,
+fundamentals, share stats, estimates, classification and statements. The run queues behind the
+`yfinance` pool like any other and lands in a few minutes. Returns are not part of it: the price
+lane computes them nightly, and `market.performance` is a view over them.
 
 ```bash
 BASE=https://supabase.rafiki.guru
 SRV=<SUPABASE_SERVICE_ROLE_KEY>
 
-curl -sS --max-time 200 -X POST "$BASE/functions/v1/market-refresh" \
+curl -sS --max-time 60 -X POST "$BASE/functions/v1/market-refresh" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"security-refresh","symbol":"AAPL","force":true}'
+  -d '{"resource":"security-refresh","symbol":"AAPL"}'
 ```
 
-A healthy answer:
+A healthy answer names the run:
 
 ```json
-{"resource":"security-refresh","symbol":"688223.SS",
- "marketCap":45288108032,"fundamentals":"updated","statements":"12 rows","refreshed":true}
+{"resource":"security-refresh","symbol":"AAPL","queued":true,"runId":"47a63e88-0b60-4576-8934-21ed6782ff80"}
 ```
 
-## Why this exists rather than "wait for the backlog"
+Then read what the run wrote with `muffin-dagster-operations` (`scripts/run_events.py` over the run
+id). That AAPL run, on 2026-10-18, answered the summary, forced the statements
+(`statements_reason_forced=1`) and wrote 29 statement rows with `throttled=0`. The run carries
+`dagster/max_runtime=600` and `muffin/reason=refresh button: AAPL`.
 
-The statements backlog is **~5 weeks deep** — that resource fetches one security per call, because
-the provider does not accept several symbols on `income`/`balance`/`cash` (measured:
-`symbolsAsked 50, symbolsAnswered 0`). Without this path the securities someone actually opens would
-be *last* in the queue. Three requests on a page a person is looking at fixes that for them.
+## Why this exists rather than "wait for the rotation"
 
-The app exposes the same thing as an admin-only refresh button on the stock page.
+The company lane visits each company once a week (a seventh of the universe a day from 03:30 UTC),
+and fetches statements only after an earnings date or at 90 days. A page someone is looking at should
+not wait for that. The app exposes the same call as an admin-only Refresh button on the stock page,
+which says "queued" and that the figures arrive minutes later.
 
 ## Which symbol to pass
 
@@ -65,12 +70,11 @@ editing by hand (umbrella `docs/deferred/2026-09-24-the-yahoo-rung-is-an-operato
 
 | answer | meaning |
 |---|---|
-| `"skipped": true, "reason": "fresh or in flight"` | the TTL, or a run already going. `force` bypasses the TTL but **not** the in-flight lock — wait a minute |
-| `"fundamentals": "not covered"` | the provider genuinely has none for this symbol |
-| `"statements": "not covered"` | same; common for thin foreign listings |
+| `"skipped": true, "reason": "fresh or in flight"` | another press in the last minute (the TTL is 1 minute). Wait a minute |
+| `"queued": false, "reason": …` | nothing was launched: the symbol resolves to no security, or Dagster refused the launch, and `reason` says which |
 
 ## What it deliberately does NOT do
 
-It never writes `statements_missing_at` on failure. A bad request on a button press says nothing
-about whether the provider has statements for that security, and marking there would exclude it from
-the backlog for 30 days — the defect shape that once cost 8,300 securities.
+It never marks a security as having no data. A button press says nothing about what a provider holds,
+and the company lane records Yahoo's answers itself. It also does not move the rotation: a hand
+launch does not change which companies the next day's schedule visits.
