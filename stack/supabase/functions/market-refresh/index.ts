@@ -476,6 +476,9 @@ const SEGMENT_METRICS = [
 const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
 const METRICS_RESOURCE = 'security-metrics'
 const STATEMENTS_RESOURCE = 'security-statements'
+// A filer SEC certainly serves, asked when no security in a run got rows, so an empty answer can
+// be told from an endpoint that is not answering. `fetchWithIsolation` uses the same control.
+const SEC_CONTROL_FILER = 'AAPL'
 const QUARTERS_RESOURCE = 'security-quarters'
 const PROFILE_DETAIL_RESOURCE = 'security-profile-detail'
 const EARNINGS_RESOURCE = 'earnings-calendar'
@@ -4282,6 +4285,18 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       let written = 0
       let throttledOut = false
       const answered = new Set<string>()
+      // Securities SEC answered with no rows, held until the run can show the endpoint answers at
+      // all (below).
+      const emptyAnswer: string[] = []
+      let controlAnswered: boolean | null = null
+      const markSecNone = async (securityId: string) => {
+        secNone++
+        const { error } = await market
+          .from('security')
+          .update({ statement_currency_missing_at: new Date().toISOString() })
+          .eq('security_id', securityId)
+        if (error) throw new Error(`statement_currency_missing_at update failed: ${error.message}`)
+      }
 
       for (const item of wanted) {
         // The view requires a US listing, so this is defence, not a filter: SEC resolves `SAP` and
@@ -4361,31 +4376,47 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
           written += rows.length
         }
 
-        // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the backlog can never drain. Marked ONLY
-        // when this security was asked to completion AND the endpoint answered for someone in this
-        // run (a failure or a deadline is not evidence), or when SEC named the symbol as unknown.
+        // SEC HAS NOTHING FOR THIS COMPANY — recorded, or the backlog can never drain. A failure,
+        // a throttle or a deadline is not evidence, so only two answers are:
         //
-        // THE RUN-LEVEL GATE APPLIES TO AN EMPTY ANSWER, NOT TO A NAMED REFUSAL. `secOk` says the
-        // endpoint produced rows for SOMEONE this run, which is the right guard against an outage
-        // being recorded as a page of dead securities — and it is exactly wrong once a
-        // weight-ordered backlog's answerable head has drained, because then NO security in the
-        // page answers, the tally never becomes true, and the page can never be marked. That is
-        // the `security-profile-detail` stall. A per-symbol 404 carries its own evidence and needs
-        // no tally in front of it.
+        // A 404 THAT NAMES THE SYMBOL carries its own evidence and is marked at once. Requiring the
+        // run-level tally in front of it is the `security-profile-detail` stall: once a
+        // weight-ordered backlog's answerable head has drained, no security in the page answers,
+        // the tally never becomes true, and the page can never be marked.
         //
-        // BOTH HALVES are marked here since 2026-10-18. A `missing` security (no statements at all)
-        // used to fall through to yfinance, and SEC's answer was recorded only under the yfinance
-        // half's `statements_missing_at`.
-        if (rows.length === 0 &&
-            (secNoSuchSymbol || (secAsked && secRows === 0 && secOk))) {
-          secNone++
-          const { error } = await market
-            .from('security')
-            .update({ statement_currency_missing_at: new Date().toISOString() })
-            .eq('security_id', item.securityId)
-          if (error) throw new Error(`statement_currency_missing_at update failed: ${error.message}`)
+        // AN EMPTY ANSWER is evidence only once the run shows the endpoint answers at all, so it
+        // waits for `secOk` below. BOTH HALVES are marked since 2026-10-18. A `missing` security
+        // (no statements at all) used to fall through to yfinance, and SEC's answer was recorded
+        // only under the yfinance half's `statements_missing_at`.
+        if (rows.length === 0 && secNoSuchSymbol) {
+          await markSecNone(item.securityId)
+        } else if (rows.length === 0 && secAsked && secRows === 0) {
+          emptyAnswer.push(item.securityId)
         }
         if (throttledOut) break
+      }
+
+      // AN EMPTY ANSWER NEEDS PROOF THE ENDPOINT ANSWERS, AND A SMALL QUEUE NEVER SUPPLIES IT.
+      // `secOk` is set only when some security in the run got rows, so a queue holding only
+      // companies SEC has nothing for could never be marked: measured 2026-10-18, REAX, OCTLF and
+      // CIB were asked on every run (three calls each, `unanswered: 3`) and never recorded. A
+      // control filer settles it, as `fetchWithIsolation`'s control symbol does: rows for the
+      // control prove SEC is answering, so the empty answers are about the companies. A failed or
+      // empty control marks nothing, and costs one call, only on a run where nothing else answered.
+      if (emptyAnswer.length > 0 && !secOk && !throttledOut && deadline - Date.now() > 5_000) {
+        try {
+          const got = await fetcher(
+            `/api/v1/equity/fundamental/income?symbol=${SEC_CONTROL_FILER}&provider=sec&period=annual&limit=1`,
+            Math.min(20_000, deadline - Date.now()),
+          )
+          controlAnswered = got.length > 0
+          if (controlAnswered) secOk = true
+        } catch (_e) {
+          controlAnswered = false
+        }
+      }
+      if (emptyAnswer.length > 0 && secOk) {
+        for (const securityId of emptyAnswer) await markSecNone(securityId)
       }
 
       await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
@@ -4397,6 +4428,8 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
         secFailed,
         // Securities recorded as having nothing at SEC this run.
         secNone,
+        // Asked only when nothing else answered: true marks the empty answers, false or null none.
+        controlAnswered,
         throttledOut,
         symbolsAnswered: answered.size,
         symbolsAsked: wanted.length,
