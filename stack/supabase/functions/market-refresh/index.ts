@@ -4405,9 +4405,11 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
       // empty control marks nothing, and costs one call, only on a run where nothing else answered.
       if (emptyAnswer.length > 0 && !secOk && !throttledOut && deadline - Date.now() > 5_000) {
         try {
+          // PAST THE CACHE: http-cache keeps serving an expired 200 while its refresh fails, so a
+          // cached answer for AAPL would prove nothing about SEC (`FetchOptions`).
           const got = await fetcher(
             `/api/v1/equity/fundamental/income?symbol=${SEC_CONTROL_FILER}&provider=sec&period=annual&limit=1`,
-            Math.min(20_000, deadline - Date.now()),
+            Math.min(20_000, deadline - Date.now()), { uncached: true },
           )
           controlAnswered = got.length > 0
           if (controlAnswered) secOk = true
