@@ -227,3 +227,21 @@ PY
 
 This is how the NaN close on 2026-09-16 was found: 60 of 61 series ended on a bar whose
 `close` was `nan`.
+
+## Check stored request URLs for credentials
+
+Stage 1 stores each document's `url` beside its body, and raw files are kept for good. A keyed
+provider redacts its credential parameter in its adapter, as the Yahoo summary does with
+`crumb=redacted` (`dagster-ingestion-best-practices`, raw layer). After a keyed provider's first
+live run, confirm on the node that nothing slipped through:
+
+```bash
+ssh muffin 'docker exec -i $(docker ps -qf name=muffin_muffin-ingest) python -' < scripts/scan_raw_urls.py
+```
+
+It reads only the `url` column of every raw file. It flags any `crumb` other than `redacted`, any
+credential-named query parameter, and any URL containing the value of a credential variable in the
+container. It prints names and counts, never a value. On 2026-10-20 it read 61,588 files and 62,959
+URLs in about two minutes at a 134 MB peak, and every one of the 5,176 summary URLs carried
+`crumb=redacted`. Run it outside the run windows, because it shares the code-location container's
+memory limit with every run.
