@@ -50,6 +50,37 @@ industries, fundamentals, share stats, officers, quarters, dividends, metrics) l
 **A bare `error code: 502` with no body means the WORKER DIED** — look at memory or a runaway loop,
 not at your error handling. Application failures do not look like that any more.
 
+**Then ask whether the same report repeats.** A resource that fails on the same subject every run
+still reports `ok: true`, so the stalled-resource alert counts it as working. And a queue stuck on
+its last item sits under the backlog alerts' floors. This sweep lists every resource whose last
+eight `ok` runs carry an identical report that failed, or wrote nothing while work remained:
+
+```bash
+ssh muffin 'docker exec -i $(docker ps -qf name=muffin_supabase-db) psql -U postgres -d postgres -At -F " | "' <<'SQL'
+set statement_timeout = '30s';
+with r as (
+  select resource, written, failed, remaining,
+         left(coalesce(report->>'lastError', error, ''), 60) as last_error,
+         row_number() over (partition by resource order by started_at desc) as rn
+  from market.refresh_run
+  where started_at > now() - interval '3 days' and ok and not coalesce(skipped, false)
+)
+select resource, count(*) as runs, max(failed) as failed, max(written) as written,
+       max(remaining) as remaining, max(last_error) as last_error
+from r where rn <= 8
+group by resource
+having count(*) >= 6
+   and count(distinct (coalesce(written, -1), coalesce(failed, -1), coalesce(remaining, -1), last_error)) = 1
+   and (coalesce(max(failed), 0) > 0 or (coalesce(max(written), 0) = 0 and coalesce(max(remaining), 0) > 0));
+SQL
+```
+
+On 2026-10-20 it named exactly two resources, both invisible to every alert:
+- `earnings-history`, asking for the window ending 2016-06-30 every hour since 2026-09-06;
+- `security-segments`, failing on one 2014 10-Q every five minutes since 2026-09-30.
+
+Umbrella note: `docs/deferred/2026-10-20-a-resource-can-repeat-the-same-failure-for-weeks.md`.
+
 ## 2. Is the provider rate-limiting us?
 
 The single most common cause. yfinance under throttle answers **200 with no rows** rather than
