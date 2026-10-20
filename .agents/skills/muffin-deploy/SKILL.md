@@ -48,6 +48,15 @@ gh pr merge <n> -R gururafiki/<repo> --squash --delete-branch
 | schema, compose, nginx, `dagster.yaml`, Grafana provisioning, Ansible, Terraform | `deploy.yml` | 9–11 min (2026-09-12/13) |
 | muffin-ui, muffin-agent, docker-wrapper images | their image build dispatches `deploy` | muffin-ui image ~11 min (2026-09-13) |
 
+**A docker-wrapper image installed unpinned is a different image on every build day.**
+openbb-mcp-docker built `openbb[all]` with no pins, so rebuilding it to move one package
+(finvizfinance, 2026-10-20) would also have moved yfinance 1.5.2 → 1.7.0 and every openbb extension
+under the agent. Before rebuilding a wrapper to change one package:
+- pin everything else to the running image's own `pip freeze --all` (openbb-mcp-docker's
+  `constraints.txt`);
+- name the package you are moving, and assert its version in the build;
+- batch any muffin-deployment merges into it, because the wrapper's merge dispatches its own deploy.
+
 ### When not to ship (UTC)
 
 | Window | What runs |
@@ -58,7 +67,10 @@ gh pr merge <n> -R gururafiki/<repo> --squash --delete-branch
 | while `muffin-db-backup.sh` runs | every deploy ends with a full `pg_dump`, and anon reads time out while it runs: measure latency only after `pgrep -fc '[m]uffin-db-backup.sh'` reads 0 |
 
 A deploy no longer restarts the Dagster services (the roll pins the digest, #431 and #436), so
-only a roll kills runs. A deploy inside a window still competes with the runs for the database.
+only a roll kills runs. Nine deploys from 2026-10-18 to 10-20 left all three on the 10-18 roll.
+Every one of them came straight after a roll, though, so none has yet shown the pin holding against
+a newer `:latest`. Until one does, merge an ingest PR only when you are about to roll it. A deploy
+inside a window still competes with the runs for the database.
 
 ### Roll the ingest image
 
