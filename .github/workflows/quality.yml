@@ -947,6 +947,36 @@ jobs:
               sys.exit(1)
           print('  ok  every SQL datasource declares jsonData.database')
           PYCHK
+      # A SKILL WHOSE FRONTMATTER DOES NOT PARSE LOSES ITS DESCRIPTION, AND NOTHING SAYS SO. A plain
+      # YAML scalar cannot hold ": ", so a description reading "Refresh ONE security now: queue its
+      # run" broke `market-refresh-security` on 2026-10-18 (#448), and the agent's skill list then
+      # showed only its title, which is what decides whether the skill is ever picked.
+      - name: Offline check — every skill's frontmatter parses
+        run: |
+          python3 - <<'PYCHK'
+          import glob, sys, yaml
+          bad = []
+          paths = sorted(glob.glob('.agents/skills/*/SKILL.md'))
+          for path in paths:
+              text = open(path).read()
+              if not text.startswith('---'):
+                  bad.append(f'{path}: no frontmatter')
+                  continue
+              try:
+                  meta = yaml.safe_load(text.split('---', 2)[1]) or {}
+              except yaml.YAMLError as e:
+                  bad.append(f'{path}: {str(e).splitlines()[0]}')
+                  continue
+              for key in ('name', 'description'):
+                  if not isinstance(meta.get(key), str) or not meta[key].strip():
+                      bad.append(f'{path}: no `{key}`')
+          if bad or not paths:
+              print("::error::a skill's frontmatter does not parse")
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print(f"  ok  {len(paths)} skills' frontmatter parses")
+          PYCHK
       - name: Offline check — every collector metric is plotted, and every panel is fed
         run: python3 .github/scripts/check_collector_metrics_are_plotted.py
 

@@ -1,7 +1,8 @@
 ---
 name: market-refresh-security
 description:
-  Refresh ONE security now: queue its Dagster company-lane run (profile, fundamentals, statements). Use when someone says a specific stock page looks stale, empty or
+  Refresh ONE security now, by queueing its Dagster company-lane run (profile, fundamentals,
+  statements). Use when someone says a specific stock page looks stale, empty or
   wrong, or names a ticker to update. Costs a handful of requests, so it is the
   right tool for anything a person is actually looking at.
 license: GPL-3.0
