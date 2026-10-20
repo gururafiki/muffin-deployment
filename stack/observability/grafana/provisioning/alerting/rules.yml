@@ -313,7 +313,7 @@ groups:
       datasourceUid: muffin-prometheus
       model:
         refId: A
-        expr: round((min by (cn) (traefik_tls_certs_not_after) - time()) / 86400, 0.1)
+        expr: round((max by (cn) (traefik_tls_certs_not_after) - time()) / 86400, 0.1)
         instant: true
     - refId: B
       datasourceUid: __expr__
@@ -349,6 +349,13 @@ groups:
 
 
         No data also alerts: it means Prometheus has stopped seeing Traefik''s certificates, and this guard is then blind.
+
+
+        THE NEWEST CERTIFICATE FOR EACH NAME, not the oldest. Traefik goes on exporting a gauge for a certificate it has replaced: after
+        renewing supabase. on 2026-10-16 it reported the superseded certificate beside the new one, so `min by (cn)` read -1.6 days and
+        this rule fired from its first hour while the origin served a certificate valid to 2027-01-14 and acme.json held only that one
+        (measured 2026-10-20). A name whose NEWEST certificate is inside 25 days is a renewal that has not happened, which is the thing
+        to wake someone for.
 
 
         RUNBOOK: `docker service logs muffin_traefik --since 48h 2>&1 | grep -i renew` names the failure (401: the token in the `cf_dns_api_token_*` secret is wrong; 429: Cloudflare is
