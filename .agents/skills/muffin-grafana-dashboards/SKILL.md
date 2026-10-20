@@ -27,12 +27,29 @@ adding one.**
 | `dashboards/segments.json` (`muffin-segments`) | business-line parsing, curation queue, reconciliation | `security_segment_spine`, `security_filing`, `pending_*_segments` (live), `refresh_run` |
 | `dashboards/node.json` (`muffin-node`) | memory, CPU and disk per service; Traefik requests | Prometheus |
 | `provisioning/datasources/muffin.yml` | `muffin-prometheus`; `muffin-postgres` (db `postgres`) and `muffin-dagster` (db `dagster`), both as `metrics_ro` | |
-| `provisioning/alerting/rules.yml` | 16 alert rules, two on `muffin-dagster`: a failed run in the last 6 hours, and an ERROR check that failed after passing within 14 days | |
+| `provisioning/alerting/rules.yml` | 16 alert rules, two on `muffin-dagster`: a failed run in the last 6 hours, and an ERROR check that failed after passing within 14 days. The certificate rule reads each name's NEWEST certificate (`max by (cn)`): Traefik keeps a gauge for a replaced one | |
 
 **The Dagster row reads Dagster's own run storage** (since 2026-10-18), so a new job or a new asset
 check appears on it by itself. The check alert fires on a REGRESSION only: a check red since it was
 written (the company rotation's staleness check, until 2026-10-24) is a known state, and alerting on
 it would make the rule red for a week.
+
+## Which alerts are firing
+
+**Read this first in any check-in.** In October, three alerts fired for four days before anyone
+looked. Grafana logs every firing rule on each evaluation, so no API password is needed:
+
+```bash
+ssh muffin 'docker service logs muffin_grafana --since 30m 2>&1 | grep "Sending alerts" \
+  | sed -E "s/.*rule_uid=([a-z-]+).*/\1/" | sort | uniq -c'
+```
+
+Then replay that rule's own query (see *Verify a panel*) to see what it counts, and read the rows
+it counts. Two other log lines are worth knowing:
+- `Failed to evaluate rule … statement timeout` at 03:00 is the nightly `pg_dump` (03:00 to
+  03:04). A retry absorbs it.
+- `Notify for alerts failed … i/o timeout` means an email was lost. It happened once, on
+  2026-10-19.
 
 ## Which dashboard a change touches
 
