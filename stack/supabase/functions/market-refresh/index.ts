@@ -2637,10 +2637,25 @@ const PRICE_TARGETS_RESOURCE = 'security-price-targets'
           // Stamped whether or not it listed anything: a company that files nothing NSE indexes is
           // a fact for this season. A throw never reaches here, so an outage re-queues rather than
           // marking the company walked — the same rule `insider_fetched_at` follows.
-          const { error: tErr } = await market.from('security_filer')
-            .update({ history_walked_at: new Date().toISOString() })
+          const walkedAt = new Date().toISOString()
+          const { data: stamped, error: tErr } = await market.from('security_filer')
+            .update({ history_walked_at: walkedAt })
             .eq('security_id', item.security_id).eq('source_code', 'nse')
+            .select('security_id')
           if (tErr) throw new Error(`history_walked_at update failed: ${tErr.message}`)
+          // AN UPDATE THAT MATCHES NO ROW IS NOT AN ERROR, AND THAT KEPT SIX COMPANIES AT THE HEAD
+          // OF THIS QUEUE FOR TWO WEEKS. The filer row above is created only when NSE lists
+          // something, so a company asked under its listing symbol that NSE lists nothing for had
+          // no row to stamp: `walked: 6, mapped: 0, failed: 0` every 15 minutes from at least
+          // 2026-10-06, five REITs/InvITs and TD Power ahead of 289 companies never reached. The
+          // walk is recorded on the security instead. Not by inserting a filer row: that row means
+          // NSE lists the company, and the coverage model counts it as `held`.
+          if ((stamped ?? []).length === 0) {
+            const { error: sErr } = await market.from('security')
+              .update({ nse_history_walked_at: walkedAt })
+              .eq('security_id', item.security_id)
+            if (sErr) throw new Error(`nse_history_walked_at update failed: ${sErr.message}`)
+          }
         } catch (e) {
           failed++
           const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)

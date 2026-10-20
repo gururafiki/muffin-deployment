@@ -16,6 +16,10 @@ SELECT s.security_id,
      JOIN market.exchange e ON e.exch_code = l.exch_code
      LEFT JOIN market.security_filer sf ON sf.security_id = s.security_id AND sf.source_code = 'nse'::text
      LEFT JOIN market.fund_holding_current h ON h.security_id = s.security_id
-  WHERE s.security_type_code = 'equity'::text AND s.country_iso2 = 'IN'::text AND e.country_iso2 = 'IN'::text AND l.symbol IS NOT NULL AND (sf.history_walked_at IS NULL OR sf.history_walked_at < (now() - '90 days'::interval))
+  WHERE s.security_type_code = 'equity'::text AND s.country_iso2 = 'IN'::text AND e.country_iso2 = 'IN'::text AND l.symbol IS NOT NULL AND
+        CASE
+            WHEN sf.security_id IS NOT NULL THEN sf.history_walked_at IS NULL OR sf.history_walked_at < (now() - '90 days'::interval)
+            ELSE s.nse_history_walked_at IS NULL OR s.nse_history_walked_at < (now() - '90 days'::interval)
+        END
   GROUP BY s.security_id, sf.filer_id, l.symbol
   ORDER BY (COALESCE(max(h.weight), 0::numeric)) DESC, (COALESCE(sf.filer_id, l.symbol));
