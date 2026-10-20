@@ -1655,6 +1655,34 @@ console.log('\nrefresh_run — every invocation is recorded')
     `${keyed.filter((m) => /accession_number/.test(m[1])).length} of ${keyed.length}`)
 }
 
+// ── in-filings ─────────────────────────────────────────────────────────────────────────────────
+console.log('\nin-filings')
+{
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const seg = idx.slice(idx.indexOf('resource === IN_FILINGS_RESOURCE'))
+  const body = seg.slice(0, seg.indexOf('\n    if (resource === ', 1)).replace(/\/\/[^\n]*/g, '')
+
+  // A WALK THAT LISTS NOTHING MUST STILL BE RECORDED. The stamp is an UPDATE of a filer row that
+  // exists only when NSE listed something; an update that matches no row raises nothing, so the
+  // same six companies headed `pending_in_history` for two weeks (2026-10-06..20) with 289 behind
+  // them. The stamp must report what it matched, and a miss must land on the security.
+  check(
+    /update\(\{ history_walked_at: walkedAt \}\)\s*\.eq\('security_id', item\.security_id\)\.eq\('source_code', 'nse'\)\s*\.select\('security_id'\)/.test(body),
+    'the filer-row stamp reports the rows it matched',
+  )
+  check(
+    /if \(\(stamped \?\? \[\]\)\.length === 0\) \{\s*const \{ error: sErr \} = await market\.from\('security'\)\s*\.update\(\{ nse_history_walked_at: walkedAt \}\)/.test(body),
+    'a walk that matched no filer row is recorded on the security, so the queue moves past it',
+  )
+  // AND NEVER BY CREATING A FILER ROW FOR A COMPANY NSE LISTED NOTHING FOR: that row is what the
+  // coverage model reads as a held registration. The only filer write stays inside `listed > 0`.
+  const filerWrites = [...body.matchAll(/from\('security_filer'\)\.upsert\(/g)]
+  check(
+    filerWrites.length === 1 && /if \(listed\.length > 0\) \{[\s\S]{0,120}from\('security_filer'\)\.upsert\(/.test(body),
+    'a filer row is written only when NSE listed a filing',
+    `${filerWrites.length} upsert(s)`,
+  )
+}
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)
