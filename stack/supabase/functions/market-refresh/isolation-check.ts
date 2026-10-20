@@ -124,5 +124,29 @@ console.log('fetchWithIsolation')
     `calls=${calls.length}`)
 }
 
+// 9. THE CONTROL IS ASKED PAST THE CACHE. http-cache serves an expired 200 while its background
+//    refresh fails, so a URL asked regularly keeps its last good answer for ever. Measured
+//    2026-10-20: finviz refused openbb-api for three weeks while AAPL's cached price targets kept
+//    "answering" the control, and the helper reported the provider up and every symbol dead. This
+//    stub IS that cache: the control answers only when it may be served from cache, and the
+//    provider behind it answers nobody.
+{
+  const seen: { path: string; uncached: boolean }[] = []
+  const cachedControl = async (
+    path: string, _t?: number, opts?: { uncached?: boolean },
+  ): Promise<Record<string, unknown>[]> => {
+    seen.push({ path, uncached: opts?.uncached === true })
+    if (path.endsWith('=CTRL') && !opts?.uncached) return [{ symbol: 'CTRL' }]
+    throw new Error('provider 400: Forbidden')
+  }
+  const r = await fetchWithIsolation(cachedControl, build, ['A', 'B'], 5_000, far(), 'CTRL')
+  check(r.dead.length === 0,
+    'a provider that answers nobody is an outage, even when the cache still holds the control',
+    `dead=${JSON.stringify(r.dead)}`)
+  const control = seen.filter((c) => c.path.endsWith('=CTRL'))
+  check(control.length === 1 && control[0].uncached,
+    'and the control is asked uncached', JSON.stringify(control))
+}
+
 console.log(failures === 0 ? '\nALL ISOLATION CHECKS PASSED' : `\n${failures} ISOLATION CHECK(S) FAILED`)
 if (failures > 0) Deno.exit(1)

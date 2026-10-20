@@ -1206,6 +1206,13 @@ console.log('\nsecurity-statements — SEC only')
       /if \(controlAnswered\) secOk = true/.test(body),
     'a run where nothing answered asks a control filer before trusting its empty answers',
   )
+  // AND PAST THE CACHE (2026-10-20). http-cache serves an expired 200 while its background refresh
+  // fails, so a control answered by the cache would "prove" SEC healthy while it answers nobody —
+  // exactly what kept `security-price-targets` reporting ok through three weeks of finviz 403s.
+  check(
+    /symbol=\$\{SEC_CONTROL_FILER\}[^`]*`,\s*Math\.min\(20_000, deadline - Date\.now\(\)\), \{ uncached: true \},/.test(body),
+    'and the control filer is asked past the cache',
+  )
   check(
     /secOk = true/.test(body),
     'secOk is actually set when SEC returns rows — an success flag that is never raised marks nothing, and one that is never checked marks everything',

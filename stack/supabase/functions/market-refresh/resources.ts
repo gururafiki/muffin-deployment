@@ -232,7 +232,11 @@ async function isolate(
     if (rows.length === 0 && dead.length > 0) {
       if (control && deadline - Date.now() > 4_000) {
         try {
-          const probe = await fetcher(buildPath([control]), Math.min(timeoutMs, deadline - Date.now()))
+          // PAST THE CACHE, or a stale 200 for the control "proves" a provider healthy that has
+          // answered nobody for weeks (see `FetchOptions`).
+          const probe = await fetcher(
+            buildPath([control]), Math.min(timeoutMs, deadline - Date.now()), { uncached: true },
+          )
           if (probe.length > 0) {
             return { rows, dead, error: `${error} (control ${control} answered — the provider is up and these symbols are unanswerable)` }
           }
@@ -317,7 +321,27 @@ export function noDataForSymbol(message: string): boolean {
     (m.includes('contenttypeerror') && m.includes('404'))
 }
 
-export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<string, unknown>[]>
+/**
+ * `uncached` sends `X-Muffin-Cache-Bypass`, which http-cache maps to `proxy_cache_bypass`: the
+ * request goes to the provider, and a 200 is stored over whatever entry was there.
+ *
+ * A CONTROL REQUEST MUST USE IT. The cache serves an expired 200 while it refreshes in the
+ * background (`use_stale updating`), and a refresh that fails with a status it does not store
+ * leaves that 200 in place, so a URL asked regularly is answered from the last good response for
+ * ever. Measured 2026-10-20: finviz had refused openbb-api for three weeks, and every
+ * `security-price-targets` run still got AAPL's price targets as its control
+ * (`STALE … price_target?symbol=AAPL … -> 200`). A control answered by the cache proves nothing
+ * about the provider.
+ */
+export interface FetchOptions {
+  uncached?: boolean
+}
+
+export type Fetcher = (
+  path: string,
+  timeoutMs?: number,
+  opts?: FetchOptions,
+) => Promise<Record<string, unknown>[]>
 
 /** Builds a fetcher bound to an openbb-api base URL. */
 /**
@@ -331,9 +355,11 @@ export type Fetcher = (path: string, timeoutMs?: number) => Promise<Record<strin
  *   A timeout turns that into a skipped batch, which the caller already knows how to report.
  */
 export function openbbFetcher(baseUrl: string, timeoutMs = 20_000): Fetcher {
-  return async (path, overrideTimeoutMs) => {
+  return async (path, overrideTimeoutMs, opts) => {
     const res = await fetch(`${baseUrl}${path}`, {
-      headers: { accept: 'application/json' },
+      headers: opts?.uncached
+        ? { accept: 'application/json', 'x-muffin-cache-bypass': '1' }
+        : { accept: 'application/json' },
       signal: AbortSignal.timeout(overrideTimeoutMs ?? timeoutMs),
     })
     if (!res.ok) {
