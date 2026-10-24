@@ -9,7 +9,12 @@ begin
   -- The page, chosen by an INDEXED predicate. `derived_at is null` is served by
   -- `security_statement_underived_idx`; the NOT EXISTS this replaces had to be evaluated per row.
   create temporary table _src on commit drop as
-  select st.security_id, st.statement, st.period_ending, st.currency, st.source_code,
+  select st.security_id, st.statement, st.period_ending,
+         -- AN UNKNOWN CURRENCY IS WITHHELD, NOT A REASON TO STOP. `security_metric.currency_code`
+         -- references `market.currency`, so one statement labelled with a code that table lacks
+         -- failed the whole page, and every page after it, for every security.
+         (select c.code from market.currency c where c.code = st.currency) as currency,
+         st.source_code,
          coalesce(st.period_type, 'annual') as period_type,
          st.data
     from market.security_statement st
