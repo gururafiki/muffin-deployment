@@ -153,16 +153,17 @@ The nastiest failure this pipeline has had, because it reads as success.
 
 ```bash
 # Marked as unanswerable today, versus classified today
-curl -sS -o /dev/null -D - "$BASE/rest/v1/security?select=security_id&security_type_code=eq.equity&industry_missing_at=gte.$(date -u +%F)" \
+curl -sS -o /dev/null -D - "$BASE/rest/v1/security?select=security_id&security_type_code=eq.equity&statement_currency_missing_at=gte.$(date -u +%F)" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'
 ```
 
 **The decisive check is absurdity, not volume** — a legitimate drain does mark thousands:
 
 ```bash
-# US mega-caps carrying a negative cache. Should be ~0. It read 109 of 213 during the incident.
+# US mega-caps carrying a negative cache. Should be ~0. It read 109 of 213 during the incident,
+# on industry_missing_at (no writer since 2026-10-18). statement_currency_missing_at is SEC's mark.
 curl -sS -o /dev/null -D - \
-  "$BASE/rest/v1/security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&industry_missing_at=not.is.null" \
+  "$BASE/rest/v1/security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&statement_currency_missing_at=not.is.null" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'
 ```
 
@@ -177,15 +178,18 @@ The signature: a `where … is null` predicate on a **second** table reached thr
 first join. `pending_industry` had exactly this and re-fetched the same top-300 for weeks —
 `classified: 282` every run, 345 securities with an industry against 8,412 with a sector.
 
+Take the queue's head and check each subject against the state the handler writes when it is done.
+Anything already done must NOT still be queued:
+
 ```bash
-# Anything already classified must NOT still be queued
-curl -sS "$BASE/rest/v1/pending_industry?select=security_id&limit=5" \
+curl -sS "$BASE/rest/v1/pending_statements?select=security_id&limit=5" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
-# then check those ids for an existing level-2 taxonomy row
+# then check those ids for the rows or the stamp the handler writes
 ```
 
-`stack/supabase/tests/backlogs-are-satisfiable.sql` guards this offline; `market-verify` check 7b
-guards it in production.
+`pending_industry`, its offline test (`backlogs-are-satisfiable.sql`) and `market-verify` check 7b
+left together on 2026-10-24. The drain-simulating tests (`a-page-must-advance.sql`,
+`a-queue-must-reach-every-company.sql`) are the shape to copy for a new backlog.
 
 **Does the handler's done-stamp land?** An UPDATE that matches no row is not an error, so a handler
 that stamps its subject done reports success while the subject stays queued. `in-filings` stamped

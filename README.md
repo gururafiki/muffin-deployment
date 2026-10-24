@@ -349,15 +349,6 @@ force a reset, delete that scheme/lens's rows first.
 `market.countries.etf_symbol` is the single-country ETF used as each country's equity-market
 proxy; the refresh reads it from the table, so a corrected proxy takes effect with no redeploy.
 
-Verify the provider mapping without deploying anything (needs only `openbb-api`):
-
-```bash
-docker compose -f compose/docker-compose.yml up -d openbb-api
-docker run --rm --network host -v "$PWD:/w" -w /w -e OPENBB_API_URL=http://localhost:6900 \
-  denoland/deno:alpine run --allow-net --allow-env \
-  stack/supabase/functions/market-refresh/check.ts
-```
-
 ### RLS on the `market` schema (`09-market-rls.sql`)
 
 02–08 controlled access with **grants alone**. That is genuinely restrictive, but it leaves RLS
@@ -610,9 +601,9 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `security-dividends` | Dagster price lane (`yahoo_corporate_action`, from the chart's events) — read `market.security_corporate_action` |
 | `security-metrics` | Dagster `derived_security_metrics` — read `market.security_metric` |
 
-The Yahoo company family's handlers stay until three clean days have passed (Phase 4 step 10, on or
-after 2026-10-21), so until then a rollback is deleting the `RETIRED` entries, re-enabling the rows
-and rescheduling `muffin-metrics`.
+The Yahoo company family's handlers, their helper modules (`fundamentals.ts`, the live provider
+check `check.ts`) and their eight `pending_*` views were deleted on 2026-10-24 (Phase 4 step 10), so
+a rollback is now a revert of that change, not a re-enabled row.
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both

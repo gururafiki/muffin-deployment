@@ -25,14 +25,6 @@ on conflict (kind_code, value) do nothing;
 do $$
 declare n integer; v numeric; c text;
 begin
-  -- 1. THE BACKLOG HOLDS A SECURITY WITH NO STATISTICS. Paired with 2 below: a backlog that
-  --    returns nothing satisfies an exclusion test perfectly, so only both together mean anything.
-  select count(*) into n from market.pending_share_stats
-   where security_id = '00000000-0000-0000-0000-000000009701';
-  if n <> 1 then
-    raise exception 'a security with no share statistics is not queued (% rows)', n;
-  end if;
-
   -- The provider's OWN date, deliberately not today: this table tracks the short-interest
   -- reporting cycle, and keying on the fetch date would mint a row per run and call it history.
   insert into market.security_share_stats
@@ -41,14 +33,7 @@ begin
   values ('00000000-0000-0000-0000-000000009701', date '2026-07-31', 14569223952, 14594180000,
           0.0097, 0.01648, 0.66482, 'yfinance');
 
-  -- 2. AND DROPS IT ONCE FETCHED, or the resource re-reads the same securities for ever.
-  select count(*) into n from market.pending_share_stats
-   where security_id = '00000000-0000-0000-0000-000000009701';
-  if n <> 0 then
-    raise exception 'a security fetched moments ago is still queued (% rows) — the backlog cannot drain', n;
-  end if;
-
-  -- 3. THE FRACTIONS ARE STORED AS FRACTIONS. If a writer ever "helpfully" multiplies by 100 on
+  -- 1. THE FRACTIONS ARE STORED AS FRACTIONS. If a writer ever "helpfully" multiplies by 100 on
   --    the way in, a reader that also converts renders 66.482% as 6,648% — and one that does not
   --    renders 0.66% for a company two thirds owned by institutions. Both are plausible.
   select institution_ownership into v from market.security_share_stats
@@ -58,7 +43,7 @@ begin
       'institution_ownership is % — these columns hold the provider''s FRACTION (0.66482 = 66.482%%), and converting on write hides the convention from every reader', v;
   end if;
 
-  -- 4. A PRICE TARGET CARRIES ITS CURRENCY. A Korean target of 190,200 rendered as "$190,200" is
+  -- 2. A PRICE TARGET CARRIES ITS CURRENCY. A Korean target of 190,200 rendered as "$190,200" is
   --    the Alibaba bug in a new column.
   insert into market.security_estimate
     (security_id, as_of, target_consensus, recommendation, recommendation_mean,
@@ -71,7 +56,7 @@ begin
     raise exception 'the price target lost its currency (%) — money without a unit gets a dollar sign', coalesce(c,'<null>');
   end if;
 
-  -- 5. THE CURRENCY IS A FOREIGN KEY, so an unknown code fails the STATEMENT and takes the whole
+  -- 3. THE CURRENCY IS A FOREIGN KEY, so an unknown code fails the STATEMENT and takes the whole
   --    batch with it. The resource learns codes before writing; this asserts the constraint that
   --    makes that necessary, so nobody removes the learn step as redundant.
   begin
@@ -82,7 +67,7 @@ begin
   exception when foreign_key_violation then null;
   end;
 
-  -- 6. A RE-FETCH OF THE SAME PERIOD UPDATES IT rather than failing. Short interest is restated,
+  -- 4. A RE-FETCH OF THE SAME PERIOD UPDATES IT rather than failing. Short interest is restated,
   --    and a resource that errors on its own second run is a resource that runs once.
   insert into market.security_share_stats
     (security_id, as_of, short_percent_of_float, source_code)
@@ -95,7 +80,7 @@ begin
     raise exception 'a restated short interest did not land (%)', v;
   end if;
 
-  -- 7. BOTH NEW CACHES ARE CLASSIFIED. `negative-caches-are-classified.sql` fails CI on an
+  -- 5. BOTH NEW CACHES ARE CLASSIFIED. `negative-caches-are-classified.sql` fails CI on an
   --    unclassified `%_missing_at`; this asserts the DIRECTION, which that file cannot: both are
   --    fetched by the priced symbol, so a corrected symbol must clear them.
   select count(*) into n from market.symbol_cache_classification
