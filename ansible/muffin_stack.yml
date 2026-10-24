@@ -379,7 +379,7 @@
         mode: "0750"
 
     # SAME VOLUME, SAME OWNER, DIFFERENT LIFETIME. Compute logs are a step's raw stdout/stderr and
-    # are pruned by `maintenance.yml`; raw is the provider's answer and is kept. Without this
+    # are pruned at 30 days by the task below; raw is the provider's answer and is kept. Without this
     # directory Dagster falls back to `$DAGSTER_HOME/storage`, which is mounted read-only, and
     # every step logs `OSError: [Errno 30] Read-only file system` and captures nothing.
     - name: Ensure the Dagster compute-log store exists on the data volume
@@ -396,21 +396,24 @@
     # construction — unlike a data repair, which is why `market.one_shot` exists and this does not
     # need it — so the rule is re-asserted every deploy and cannot rot. Thirty days is far longer
     # than any diagnosis has ever needed and still bounds the directory.
+    #
+    # ONE COMMAND, NOT A LOOP. This was an `ansible.builtin.find` followed by one `file` task per
+    # path, and every iteration is its own SSH round trip, ~2.3 s each on this node. Steps write
+    # ~4,400 log files a day (145,717 on 2026-10-24), so the first deploy after the logs turned
+    # 30 days old (2026-10-21) met a day's worth or more. Two deploys on 2026-10-24 each spent
+    # their hour in this loop (~1,300 and ~1,500 files) and were killed there by the Ansible
+    # provider's 60-minute create timeout, and neither job then failed (deploy.yml,
+    # `timeout-minutes`). `find -delete` is one round trip whatever the count. `-mmin +43200` is
+    # 30 days in minutes; `find -mtime +30` would mean 31.
     - name: Prune Dagster compute logs older than 30 days
-      ansible.builtin.find:
-        paths: /mnt/data/ingest/compute-logs
-        age: 30d
-        recurse: true
-        file_type: file
-      register: _stale_compute_logs
+      ansible.builtin.command:
+        argv: [find, /mnt/data/ingest/compute-logs, -type, f, -mmin, "+43200", -printf, ".", -delete]
+      register: _pruned_compute_logs
+      changed_when: _pruned_compute_logs.stdout | length > 0
 
-    - name: Delete the stale compute logs
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ _stale_compute_logs.files | default([]) }}"
-      loop_control:
-        label: "{{ item.path | basename }}"
+    - name: Report how many compute logs were pruned
+      ansible.builtin.debug:
+        msg: "pruned {{ _pruned_compute_logs.stdout | length }} compute log(s) older than 30 days"
 
     - name: Stage Supabase edge-function sources (main/ is the upstream router)
       ansible.posix.synchronize:

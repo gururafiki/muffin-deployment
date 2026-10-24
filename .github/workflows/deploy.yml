@@ -53,6 +53,14 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # The Ansible provider kills `ansible-playbook` at 60 minutes (its create timeout,
+    # `exec.CommandContext`), and the job did not then fail. Twice on 2026-10-24 the node saw the
+    # playbook stop at the 60-minute mark, and the runs sat at "Still creating..." until cancelled
+    # 30 and 18 minutes later. The likeliest cause, unverified, is the playbook's forked workers
+    # holding the output pipe open, which the provider waits on. A deploy takes 9-11 minutes, so
+    # 75 makes such a run fail at the provider's ceiling plus Terraform's own time, instead of at
+    # GitHub's six-hour default.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v4

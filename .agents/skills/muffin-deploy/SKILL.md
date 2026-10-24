@@ -146,6 +146,22 @@ gh run watch -R gururafiki/muffin-deployment <run-id> --interval 30 --exit-statu
   `-c config_file=/etc/postgresql/postgresql.conf` (which preloads pg_cron), and the pinned
   Supabase CLI in `debian:12-slim` with `--network container:<db>`, against `127.0.0.1`. The CLI
   leaves a root-owned `.temp`, so clean up with `sudo`.
+- **A deploy sitting at "Still creating..." is diagnosed on the node, not the runner.** The
+  provider captures the playbook's output, and Ansible runs every task over one multiplexed SSH
+  connection, so the absence of new logins proves nothing. The node's journal lists every module
+  the play ran:
+
+  ```bash
+  ssh muffin 'sudo journalctl --since "<deploy start>" --no-pager -o short-iso _COMM=sudo \
+    | grep BECOME-SUCCESS \
+    | sed -E "s/.*T(..):(.).*AnsiballZ_([a-z_]+)\.py.*/\1:\20 \3/" | uniq -c'
+  ```
+
+  Hundreds of one module per ten minutes is a loop. The runner's connection then closes
+  "disconnected by user" in `journalctl -u ssh`, 60 s (ControlPersist) after its last module. **The
+  provider kills `ansible-playbook` 60 minutes after it starts, and the job does not then fail**: on
+  2026-10-24 two runs sat there until cancelled. The job's `timeout-minutes: 75` now ends such a
+  run. Nothing after the kill ran, so the migrations did not apply either.
 - Every deploy restarts Grafana; a dashboard left open across it shows "No Data" until refreshed.
 
 ## 3. Verify what is running
