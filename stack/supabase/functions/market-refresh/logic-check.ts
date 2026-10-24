@@ -234,15 +234,8 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
   const gates: [string, string][] = [
     // SEC only since 2026-10-18: the yfinance half and its `statements_missing_at` left the edge.
     ['security-statements',   'emptyAnswer.length > 0 && secOk'],
-    ['security-quarters',     'asked && anyAnswer'],
-    // Marks only what isolation proved dead ALONE — never absence from a batched 200.
-    // `iso.dead` IS the gate: fetchWithIsolation only populates it after asking each symbol alone
-    // AND proving the provider is up with a control symbol. A run-level tally on top can never fire
-    // once a backlog's answerable head has drained — measured, five identical stalled runs.
-    ['security-profile-detail', 'iso.dead.length > 0'],
-    ['security-industries',   'stillUnrecorded.length > 0 && classified > 0'],
-    ['security-profiles',     'if (classified > 0) {'],
-    ['security-fundamentals', 'if (written > 0) {'],
+    // The quarters, profile-detail, industries, profiles and fundamentals gates left with their
+    // handlers (2026-10-24, Phase 4 step 10); the Dagster company lane owns that family.
   ]
   for (const [resource, gate] of gates) {
     check(index.includes(gate), `${resource} still gates its empty-answer marking`, gate)
@@ -362,74 +355,6 @@ console.log('\nworker budget — a loop must leave room to finish')
   check(reserve >= 10_000,
     'the reserve is big enough for a batch tail to actually finish',
     `reserve ${reserve}ms`)
-}
-
-// ── THE VENUE OVERRULES THE PROVIDER ON CURRENCY ──────────────────────────────────────────────
-//
-// yfinance returns `currency: USD` for Jakarta-quoted securities. Found 2026-08-18 by building FX
-// and looking at the result: `security_market_cap_usd` ranked PT Barito the largest company on
-// earth at $442 TRILLION, ~4x world GDP. The response is internally inconsistent — `BREN.JK` comes
-// back with `currency: USD`, `market_cap: 442810222247936` and `price_to_book: 662000`.
-//
-// MAGNITUDE CANNOT BE THE TEST, which is the trap this nearly fell into: NVDA is a real $5,464bn
-// and sits BETWEEN two fakes (241560.KS $6,087bn, HCLT.NS $3,707bn). No threshold separates them.
-// The venue does.
-console.log('\ncurrency — the venue overrules a provider that contradicts it')
-{
-  const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  check(/from\('venue_currency'\)/.test(index),
-    'the fundamentals path reads the venue currency')
-
-  // ── EVERY PATH THAT FETCHES FUNDAMENTALS MUST WRITE THE CURRENCY ──────────────────────────
-  //
-  // There are TWO: `security-fundamentals` (the batch backlog) and `security-refresh` (the
-  // on-demand path a user's stock page triggers). Only the first ever wrote the currency.
-  // Proven in production 2026-08-18 by corrupting Toyota's listing to USD and running
-  // `security-refresh` — it reported `fundamentals: updated` and left the wrong value in place.
-  //
-  // "A rule written at one call site is not a rule." Counted rather than eyeballed, because this
-  // is the recurring failure in this file: six marking sites, four `remaining` units, four
-  // unbounded loops, three return sites.
-  const fundFetches = [...index.matchAll(/fetchFundamentals\(|loadFundamentals\(/g)].length
-  const currencyWrites = [...index.matchAll(/writeCurrencyFor\(/g)].length - 1 // minus the definition
-  // ZERO FETCH SITES IS RIGHT ONLY BECAUSE THE FAMILY RETIRED (2026-10-18, Phase 4 step 9): the
-  // Dagster company lane owns fundamentals, and `security-refresh` launches it instead of fetching.
-  // The `fundFetches > 0` clause stopped a RENAMED fetch passing silently, so zero is accepted only
-  // while `security-fundamentals` is refused as retired. Step 10 deletes the handler and this block.
-  const fundamentalsRetired = /^\s{2}'security-fundamentals':/m.test(
-    index.match(/const RETIRED: Record<string, string> = \{[\s\S]*?\n\}/)?.[0] ?? '')
-  check((fundFetches > 0 || fundamentalsRetired) && currencyWrites >= fundFetches,
-    'every path that fetches fundamentals also writes the currency',
-    `${fundFetches} fetch sites, ${currencyWrites} currency writes` +
-      (fundFetches === 0
-        ? `, and security-fundamentals is ${fundamentalsRetired ? '' : 'NOT '}retired`
-        : ''))
-  // ONE implementation, not two that drift. The helper exists precisely because the inline
-  // versions diverged.
-  check(/^async function writeCurrencyFor\(/m.test(index),
-    'the currency write is a single shared function, not copied per call site')
-
-  // ── THE OVERRULE MUST STAY NARROW ─────────────────────────────────────────────────────────
-  //
-  // These assert the SHARED helper, and they were briefly LOST when the logic moved into it —
-  // a regex edit removed them without adding the replacements, and everything still passed.
-  // Restored explicitly, because they are the assertions that stop the dangerous rule returning:
-  // overruling on ANY disagreement would relabel 233 securities of which ~20 are wrong.
-  check(/cur === 'USD' && Number\.isFinite\(cap\) && cap > IMPOSSIBLE_USD_CAP/.test(index),
-    'the venue overrules ONLY a USD claim with an impossible market cap, not any disagreement')
-  check(/const IMPOSSIBLE_USD_CAP = 2e12/.test(index),
-    'the impossibility threshold is a named constant, above every real company')
-  check(/venueCur && venueCur !== 'USD'/.test(index),
-    'and it only ever replaces USD with a non-USD venue currency')
-  // The normalized write: the claim lands on the listing the symbol names.
-  check(/\.from\('listing'\)[\s\S]{0,80}\.update\(\{ currency_code: cur \}\)/.test(index),
-    'the currency is written to the LISTING the fetched symbol names')
-  check(/\.eq\('provider_symbol', providerSymbol\)/.test(index),
-    'and it is matched on that exact provider symbol, not on the security alone')
-  check(/currencyOverruled,/.test(index),
-    'the override is reported — a climbing count is the provider degrading, and the corrected '
-    + 'value looks perfectly ordinary once stored')
-  // Read ONCE, not per batch: 59 rows that cannot change mid-run.
 }
 
 console.log('\nabsence classifier — a crash in the adapter is still an answer about the symbol')
@@ -701,15 +626,14 @@ console.log('\nresource registry — the cron and the function agree')
     'every declared resource constant has an explicit TTL',
     withoutTtl.length ? `no TTL declared for: ${withoutTtl.join(', ')}` : '')
 
-  check(!/:\s*PROFILE_TTL_MINUTES\s*$/m.test(index.replace(/\[PROFILE_RESOURCE\]:.*/g, '')),
+  // The fallback was `PROFILE_TTL_MINUTES`, which left with `instrument-profile` (Phase 4 step 10).
+  // What must stay true is that the lookup has no default at all.
+  check(/^\s*const ttlMinutes = EXTRA_TTL_MINUTES\[resource\]\s*$/m.test(index),
     'there is no fallback TTL for a resource that declares none')
 
   // The incremental backlogs specifically. A backlog resource drains a slice per run, so anything
   // longer than the cron interval stalls it for the length of the TTL rather than slowing it.
-  const mustBeBacklog = [
-    'ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE', 'FUNDAMENTALS_RESOURCE', 'INDUSTRY_RESOURCE',
-    'SEC_PROFILE_RESOURCE',
-  ]
+  const mustBeBacklog = ['ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE']
   const wrongTtl = mustBeBacklog.filter((c) =>
     !ttlKeys.some(([, key, ttl]) => key === c && ttl === 'BACKLOG_TTL_MINUTES'))
   check(wrongTtl.length === 0,
@@ -762,10 +686,6 @@ console.log('\nresource registry — the cron and the function agree')
     // arithmetic rules — there are no units to confuse in a `content-range` count. They are still
     // listed so the "has the list rotted" tally keeps meaning "every resource was looked at".
     STATEMENTS_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the two above.
-    QUARTERS_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
-    PROFILE_DETAIL_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     INSIDER_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
@@ -795,26 +715,17 @@ console.log('\nresource registry — the cron and the function agree')
     // Reports the backlog via `backlogSize`, like the others above.
     WIKIDATA_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
-    MANAGEMENT_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
     EPS_HISTORY_RESOURCE: [],
     // Analyst actions. Reports `pending_price_targets` via `backlogSize`; `actions` counts ROWS
     // (one per analyst action) and `advanced` counts SECURITIES whose cursor moved, which are
     // deliberately different units and named so.
     PRICE_TARGETS_RESOURCE: [],
-    METRICS_RESOURCE: [],
     // A SWEEP, NOT A BACKLOG: `remaining` is DAYS still to walk, computed from the cursor
     // against its floor. `walkedTo` and `stopAt` are the only identifiers involved, and
     // the units are days rather than securities — which is exactly why this list exists.
     EARNINGS_HISTORY_RESOURCE: ['walkedTo', 'stopAt', 'getTime'],
     XBRL_RESOURCE: [],
-    SHARE_STATS_RESOURCE: [],
     NEWS_RESOURCE: [],
-    // `written` is legitimate here and ONLY here: `security_fundamentals` is keyed on
-    // `security_id` alone, so one row is one security.
-    FUNDAMENTALS_RESOURCE: ['wanted', 'written', 'missing'],
-    INDUSTRY_RESOURCE: ['wanted', 'classifiedSecurities', 'noIndustry'],
-    SEC_PROFILE_RESOURCE: ['wanted', 'classifiedSecurities', 'unmapped', 'noProfile'],
   }
   const idxLines = index.split('\n')
   const resourceAt = (line: number): string | null => {
@@ -1053,66 +964,6 @@ console.log('\nextractMacroPoints — junk is dropped, not coerced')
 }
 
 
-// ── security-dividends — a non-payer is an HTTP 400, not an empty answer ─────
-//
-// Source checks, because the behaviour that matters is a CLASSIFICATION of an error string and the
-// cheap way to exercise it is to call a live provider. Measured: `equity/fundamental/dividends`
-// answers a company with no dividends with `400 ... No dividend data found for TSLA`. Treating
-// that as a failure would never mark, so every non-payer is re-asked forever and crowds out the
-// payers; treating every 400 as a non-payer would mark securities during an outage, which is the
-// mechanism that once negative-cached 1,369 answerable ones.
-console.log('\nsecurity-dividends — the 400 that means "this company pays none"')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const fn = idx.slice(idx.indexOf("resource === DIVIDENDS_RESOURCE"))
-  const withComments = fn.slice(0, fn.indexOf('if (resource === PROMOTE_WAVE_RESOURCE)'))
-  // STRIP THE COMMENTS FIRST. Every string these guards look for also appears in the prose above
-  // the code that explains it, so asserting against the raw text matches the COMMENT — two of
-  // these passed a mutation that had deleted the code entirely.
-  const body = withComments.replace(/\/\/[^\n]*/g, '')
-
-  // A non-payer is still recognised by the provider MESSAGE (it arrives as a 400, not as an empty
-  // array) — but the VOCABULARY now lives in `noDataForSymbol`, because the provider states that
-  // fact in two wordings and this handler only knew the tidy one. The guard follows the rule to
-  // where it moved rather than being relaxed: the classifier's own wordings are pinned in the
-  // "absence classifier" block above, and what must be true HERE is that the handler consults it.
-  check(
-    /noDataForSymbol\(msg\)/.test(body),
-    'a non-payer is recognised by the provider MESSAGE, via the shared absence classifier',
-  )
-  // Match the WRITE, not the name. `dividends_missing_at` also appears in the error-message string
-  // two lines below it, so `includes(name)` passed a mutation that had deleted the update entirely.
-  check(
-    /update\(\{\s*dividends_missing_at:/.test(body),
-    'the non-payer branch actually WRITES the negative cache, or every dividend-less security is re-asked forever',
-  )
-  check(
-    body.search(/update\(\{\s*dividends_missing_at:/) > body.indexOf('no dividend data found'),
-    'ONLY the recognised message marks — a generic 400 must not negative-cache a security',
-  )
-  check(
-    body.includes('!anyAnswer') && body.includes('p_ok: false'),
-    'a run where NOTHING answered reports ok:false — that is a provider event, not 60 dividend-less securities',
-  )
-  check(
-    body.includes('observed_symbol'),
-    'the listing the dividend was seen on is stored — an action that cannot be tied to a series cannot be checked against it',
-  )
-  check(
-    body.includes('fetch_symbol'),
-    'asked with the PRICED symbol, which is what removes Tiingo\'s US-ticker constraint and takes coverage past 4.5%',
-  )
-  check(
-    body.includes('dedupeBy('),
-    'the upsert is deduped — the same key twice fails the WHOLE statement with 21000',
-  )
-  check(
-    /throttled\(msg\)/.test(body),
-    'a throttle signature stops the run rather than burning the rest of the page against a refusing provider',
-  )
-}
-
-
 // ── security-statements — SEC only; Yahoo's statements are the company lane's ─
 //
 // 0 of 104,972 statement rows carried a reporting currency, while the `currency` column and the
@@ -1127,7 +978,9 @@ console.log('\nsecurity-statements — SEC only')
 {
   const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
   const seg = idx.slice(idx.indexOf('resource === STATEMENTS_RESOURCE'))
-  const withComments = seg.slice(0, seg.indexOf('if (resource === FUNDAMENTALS_RESOURCE)'))
+  const end = seg.indexOf('if (resource === ONE_SECURITY_RESOURCE)')
+  if (end < 0) throw new Error('the statements handler is no longer followed by security-refresh')
+  const withComments = seg.slice(0, end)
   // Comments stripped: every string below also appears in the prose explaining it, and matching
   // the prose is how three guards passed a mutation earlier in this session.
   const body = withComments.replace(/\/\/[^\n]*/g, '')
@@ -1265,50 +1118,6 @@ console.log('\nevery source_code written by a function is seeded by a migration'
   }
 }
 
-
-
-// ── security-share-stats ─────────────────────────────────────────────────────────────────────
-console.log('\nsecurity-share-stats')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const seg = idx.slice(idx.indexOf('resource === SHARE_STATS_RESOURCE'))
-  // Bounded by the NEXT handler, whichever it is, so deleting a neighbour cannot stretch the
-  // window over the rest of the file.
-  const body = seg.slice(0, seg.indexOf('\n    if (resource === ', 1)).replace(/\/\/[^\n]*/g, '')
-
-  check(
-    /share_statistics/.test(body) && /estimates\/consensus/.test(body),
-    'one batch of symbols answers BOTH endpoints — splitting them doubles the requests for two halves of one row',
-  )
-  check(
-    /as_of: String\(r\.date \?\? ''\)/.test(body),
-    "share statistics are keyed on the PROVIDER's date — keying on the fetch date mints a row per run and calls it history",
-  )
-  check(
-    /from\('currency'\)[\s\S]{0,200}upsert/.test(body),
-    'currency codes are LEARNED before the estimate write — currency_code is a foreign key, so an unseen code fails the STATEMENT and takes the batch with it',
-  )
-  check(
-    /const batchClean = !statIso\.error && statRows\.length > 0/.test(body),
-    "a security is marked missing only when THIS batch answered — a run-wide tally is the 'if any of the 40 answered, blame the rest' rule yfinance defeats by omitting symbols from a 200",
-  )
-  // ONE BAD SYMBOL KILLS A BATCHED CALL, and this backlog is ordered by fund weight — so an
-  // unisolated 400 brings the SAME poisoned head back every run and the resource stalls for ever.
-  // Observed live: `openbb 400 on /equity/estimates/consensus?symbol=HUMANSFT.KW,ROST,...` took
-  // all 40 symbols with it and `remaining` sat at 11,136 across eight consecutive runs.
-  check(
-    (body.match(/fetchWithIsolation/g) ?? []).length >= 2,
-    'BOTH batched calls are isolated — an unisolated 400 stalls a weight-ordered backlog on its own head',
-  )
-  check(
-    /dead\.has\(g\.fetchSymbol\.toUpperCase\(\)\)/.test(body),
-    'a symbol the provider rejects ALONE is marked, which is what lets the weight-ordered head advance past it rather than re-poisoning every future batch',
-  )
-  check(
-    !/\* 100/.test(body) && !/\/ 100/.test(body),
-    'no unit conversion on write — these fields are fractions and stay fractions, because converting here hides the convention from every reader',
-  )
-}
 
 
 // ── migration filenames must sort numerically under a STRING sort ────────────────────────────

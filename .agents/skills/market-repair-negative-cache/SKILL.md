@@ -19,6 +19,15 @@ count stays plausible.
 
 This has happened twice at scale: 1,369 securities, then ~8,300.
 
+**Most of these columns no longer have a writer.** The price family retired on 2026-09-12 and the
+Yahoo company family on 2026-10-18, so `industry_`, `profile_`, `fundamentals_`, `statements_`,
+`quarters_`, `dividends_`, `share_stats_`, `profile_detail_`, `prices_` and `performance_missing_at`
+only hold old marks until the contract step drops them. The Dagster lanes record absence in their
+own partitions and `identifier_probe`. The edge still sets `statement_currency_missing_at` and
+`xbrl_missing_at` (the SEC family, until Phase 5 retires it), `corporate_actions_missing_at` and
+`wikidata_missing_at`. The loops below still name the old columns, because a wrong old mark still
+hides a security from whatever reads it.
+
 ## First: is the mark WRONG, or earned?
 
 Do not skip this. Most marks are correct — yfinance genuinely carries nothing for many thin foreign
@@ -34,7 +43,7 @@ cnt() { curl -sS -o /dev/null -D - "$BASE/rest/v1/$1" \
   -H 'Accept-Profile: market' -H 'Prefer: count=exact' \
   | sed -n 's/.*content-range: [0-9*-]*\///Ip' | tr -d '\r'; }
 
-for col in industry_missing_at statements_missing_at performance_missing_at fundamentals_missing_at; do
+for col in statement_currency_missing_at xbrl_missing_at industry_missing_at fundamentals_missing_at; do
   printf '  %-26s %s of %s US mega-caps\n' "$col" \
     "$(cnt "security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&$col=not.is.null")" \
     "$(cnt 'security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000')"
@@ -63,8 +72,8 @@ throttle cannot mark anything — but confirm the deploy that carries that is li
 
 ```bash
 DAY=$(date -u +%F)
-for col in industry_missing_at statements_missing_at performance_missing_at \
-           fundamentals_missing_at prices_missing_at profile_missing_at; do
+for col in statement_currency_missing_at xbrl_missing_at industry_missing_at \
+           fundamentals_missing_at profile_missing_at; do
   before=$(cnt "security?select=security_id&security_type_code=eq.equity&$col=gte.$DAY")
   curl -sS -o /dev/null -X PATCH \
     "$BASE/rest/v1/security?security_type_code=eq.equity&$col=gte.$DAY" \
@@ -92,7 +101,7 @@ symbol-keyed and why.
 ```bash
 # the mega-cap check should now read 0
 # and the securities should re-enter their backlogs
-curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_industry?select=security_id&limit=1" \
+curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_statements?select=security_id&limit=1" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'
 ```
 

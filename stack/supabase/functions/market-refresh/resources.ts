@@ -2,32 +2,9 @@
 //
 // Split out from index.ts on purpose: this is the part that breaks silently when a
 // provider renames a field, changes a sector label, or switches fraction<->percent.
-// Keeping it free of supabase-js means `check.ts` can drive it against a real
-// openbb-api with nothing else running. index.ts owns HTTP, the refresh claim and
-// the upsert; this file owns "what the numbers are".
-
-/**
- * Provider sector label -> muffin sector id.
- *
- * Covers BOTH finviz (`equity/compare/groups`) and yfinance (`equity/profile`), because the two
- * vocabularies are the same except for one label: yfinance says "Financial Services" where finviz
- * says "Financial". Keeping one map means a security classified from a profile lands in the same
- * bucket as a sector read from the sector endpoint — the whole point of having sector ids at all.
- */
-export const FINVIZ_SECTOR_IDS: Record<string, string> = {
-  'Financial Services': 'financials',
-  'Energy': 'energy',
-  'Utilities': 'utilities',
-  'Real Estate': 'real-estate',
-  'Consumer Defensive': 'consumer-staples',
-  'Financial': 'financials',
-  'Communication Services': 'communication-services',
-  'Healthcare': 'health-care',
-  'Consumer Cyclical': 'consumer-discretionary',
-  'Industrials': 'industrials',
-  'Technology': 'information-technology',
-  'Basic Materials': 'materials',
-}
+// Keeping it free of supabase-js means the offline checks (`logic-check.ts`,
+// `isolation-check.ts`) can drive it with nothing else running. index.ts owns HTTP, the
+// refresh claim and the upsert; this file owns "what the numbers are".
 
 /**
  * Symbols for a batched `?symbol=` parameter — each ENCODED, joined by a literal comma.
@@ -393,14 +370,8 @@ export function openbbFetcher(baseUrl: string, timeoutMs = 20_000): Fetcher {
   }
 }
 
-/** One instrument to fetch: our key (`scopeId`) and the symbol the provider knows it by. */
-export interface UniverseEntry {
-  scopeId: string
-  symbol: string
-}
-
 /**
- * TTL for the BACKLOG resources (`security-profiles`, `security-performance`).
+ * TTL for the BACKLOG resources: the per-security queues the rotation drives.
  *
  * Short on purpose, and it costs nothing: an incremental resource with an empty backlog returns
  * without calling any provider, so the TTL only has to be long enough to avoid a pointless table
@@ -442,60 +413,6 @@ export const NEWS_RETENTION_DAYS = 90
  * data changes.
  */
 export const DAILY_TTL_MINUTES = 24 * 60
-
-/**
- * One instrument's profile, from `equity/profile`: `instrument-profile` writes it to
- * `market.instruments` (industry = the real sub-sector, country, market cap).
- */
-export interface ProfileUpdate {
-  symbol: string
-  name?: string
-  provider_sector?: string
-  industry?: string
-  country?: string
-  market_cap?: number
-  currency?: string
-  updated_at: string
-}
-
-export const PROFILE_TTL_MINUTES = 7 * 24 * 60
-
-export async function loadProfiles(
-  fetcher: Fetcher,
-  entries: UniverseEntry[],
-  now: Date,
-): Promise<ProfileUpdate[]> {
-  if (entries.length === 0) return []
-  // The provider answers under the PRICE symbol, which is not always our primary
-  // key (NESN vs NESN.SW), so map its reply back rather than writing a row under a
-  // key that does not exist.
-  const toScopeId = new Map(entries.map((e) => [e.symbol.toUpperCase(), e.scopeId]))
-  const results = await fetcher(
-    `/api/v1/equity/profile?symbol=${symbolList([...new Set(entries.map((e) => e.symbol))])}` +
-      `&provider=yfinance`,
-  )
-  const updatedAt = now.toISOString()
-  const out: ProfileUpdate[] = []
-  for (const r of results) {
-    const symbol = toScopeId.get(String(r.symbol ?? '').toUpperCase())
-    if (!symbol) continue
-    const cap = Number(r.market_cap)
-    out.push({
-      symbol,
-      name: r.name ? String(r.name) : undefined,
-      provider_sector: r.sector ? String(r.sector) : undefined,
-      // yfinance exposes the industry as `industry_category`, NOT `industry` —
-      // `industry` exists on the response and is always null, which silently
-      // produced empty sub-sectors until it was checked against real output.
-      industry: r.industry_category ? String(r.industry_category) : undefined,
-      country: r.hq_country ? String(r.hq_country) : undefined,
-      market_cap: Number.isFinite(cap) ? cap : undefined,
-      currency: r.currency ? String(r.currency) : undefined,
-      updated_at: updatedAt,
-    })
-  }
-  return out
-}
 
 // ── macro series: one shape per provider, and none of them agree ─────────────
 //

@@ -51,11 +51,10 @@ industry 61%, statements ~12.5%.
 **1. `security_statement_current` returns ROWS, not securities** — about twelve per security
 (3 statements x 4 periods). A row count reads as ~12x the real coverage; it once produced a "104%
 coverage" figure, which is the kind of impossible number that means the metric is wrong rather than
-the data. Get the honest number from backlog arithmetic instead:
-
-```
-equities − pending_statements − statements_missing_at = securities that actually have statements
-```
+the data. Count distinct securities instead, from `market.security_metric` (one probe per
+security) or `coverage_current.with_statements`. The old backlog arithmetic
+(`equities − pending_statements − statements_missing_at`) stopped meaning anything on 2026-10-18,
+when `pending_statements` became SEC-only and Yahoo's statements moved to the company lane.
 
 **2. The TOTAL security count is not the equity universe.** Bonds outnumber equities (15,159 vs
 12,348) since the fixed-income funds were added. Every serving view and backlog filters
@@ -65,20 +64,23 @@ the total untouched. `market-verify` has a separate equity floor for exactly thi
 ## Backlog depth
 
 ```bash
-for v in pending_profile pending_industry pending_fundamentals pending_statements; do
+for v in pending_statements pending_xbrl pending_filings pending_insider pending_metrics pending_ttm; do
   printf '%-24s %s\n' "$v" "$(cnt "$v?select=security_id&limit=1")"   # needs SERVICE_ROLE, not anon
 done
 ```
 
-Symbols, prices and returns have no `pending_*` view any more: the Dagster lanes own them, and their
-state is partitions and asset checks (`muffin-dagster-operations`).
+Symbols, prices, returns and the Yahoo company family have no `pending_*` view any more: the Dagster
+lanes own them, and their state is partitions and asset checks (`muffin-dagster-operations`). The
+company family's eight views left on 2026-10-24.
 
 **Zero is only good news if it got there by working.** A backlog empties either by fetching the data
 or by marking securities unanswerable, and the counts look identical. Cross-check:
 
 ```bash
-# should be ~0 of ~213 — it read 109 during the 2026-08-13 incident
-cnt 'security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&industry_missing_at=not.is.null'
+# should be ~0 of ~213. The 2026-08-13 incident read 109 on industry_missing_at, which has had no
+# writer since 2026-10-18. statement_currency_missing_at is SEC's "asked, got no statements", which
+# a US mega-cap cannot honestly earn.
+cnt 'security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&statement_currency_missing_at=not.is.null'
 ```
 
 ## Is every resource still running?
