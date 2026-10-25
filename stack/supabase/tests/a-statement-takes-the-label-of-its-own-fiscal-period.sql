@@ -78,8 +78,8 @@ insert into market.security_statement
   ('00000000-0000-0000-0000-000000009201', 'income',  date '2023-12-20', 'quarter', 'USD', '{"total_revenue": 100}'::jsonb, 'yfinance', now() - interval '2 hours', now(), null, null),
   -- (f) labelled once, and no period supports it now
   ('00000000-0000-0000-0000-000000009201', 'income',  date '2022-06-30', 'quarter', 'USD', '{"total_revenue": 1}'::jsonb,   'yfinance', now() - interval '1 hour',  now(), 2022, 'Q3'),
-  -- (g) the retired `FY` spelling of annual
-  ('00000000-0000-0000-0000-000000009201', 'balance', date '2024-09-30', 'FY',      'USD', '{}'::jsonb, 'yfinance', now() - interval '1 hour', now(), null, null),
+  -- (g) a balance sheet on the year end (the `FY` spelling it once had is refused since 20261025140000)
+  ('00000000-0000-0000-0000-000000009201', 'balance', date '2024-09-30', 'annual',  'USD', '{}'::jsonb, 'yfinance', now() - interval '1 hour', now(), null, null),
   -- out of scope
   ('00000000-0000-0000-0000-000000009202', 'income',  date '2024-12-31', 'annual',  'USD', '{"total_revenue": 9}'::jsonb, 'yfinance', now() - interval '1 hour', now(), null, null);
 
@@ -113,7 +113,7 @@ begin
       ('income',  date '2024-03-31', 'quarter', 2024::smallint, 'Q2', 'a quarter ending with Q2 must be Q2'),
       ('income',  date '2023-12-20', 'quarter', null::smallint, null, 'eleven days from the nearest period must be no label'),
       ('income',  date '2022-06-30', 'quarter', null::smallint, null, 'a label no period supports must be retracted'),
-      ('balance', date '2024-09-30', 'FY',      2024::smallint, 'FY', 'the retired FY spelling must be labelled as annual')
+      ('balance', date '2024-09-30', 'annual',  2024::smallint, 'FY', 'a year-end balance sheet must be FY2024')
     ) as t(statement, period_ending, period_type, fiscal_year, fiscal_period, why)
   loop
     select st.fiscal_year, st.fiscal_period into r

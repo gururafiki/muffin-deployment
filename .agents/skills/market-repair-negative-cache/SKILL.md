@@ -101,7 +101,7 @@ symbol-keyed and why.
 ```bash
 # the mega-cap check should now read 0
 # and the securities should re-enter their backlogs
-curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_statements?select=security_id&limit=1" \
+curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_xbrl?select=security_id&limit=1" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'
 ```
 

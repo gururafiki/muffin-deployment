@@ -27,11 +27,11 @@ on conflict (security_id) do nothing;
 
 -- ── the SEC period: SEC spellings, capex POSITIVE (a purchase), currency present ─────────────
 insert into market.security_statement (security_id, statement, period_ending, period_type, currency, data, source_code) values
-  ('00000000-0000-0000-0000-000000009001', 'income', date '2025-12-31', 'FY', 'USD',
+  ('00000000-0000-0000-0000-000000009001', 'income', date '2025-12-31', 'annual', 'USD',
    '{"total_revenue": 1000, "total_pretax_income": 300, "net_income": 200}'::jsonb, 'sec'),
-  ('00000000-0000-0000-0000-000000009001', 'cash',   date '2025-12-31', 'FY', 'USD',
+  ('00000000-0000-0000-0000-000000009001', 'cash',   date '2025-12-31', 'annual', 'USD',
    '{"net_cash_from_operating_activities": 500, "purchase_of_plant_property_and_equipment": 120}'::jsonb, 'sec'),
-  ('00000000-0000-0000-0000-000000009001', 'balance',date '2025-12-31', 'FY', 'USD',
+  ('00000000-0000-0000-0000-000000009001', 'balance',date '2025-12-31', 'annual', 'USD',
    '{"long_term_debt": 700, "short_term_debt": 50}'::jsonb, 'sec')
 on conflict do nothing;
 
@@ -75,7 +75,8 @@ begin
     raise exception 'the yfinance period did not map pretax_income (got %) — hardcoding either provider''s spelling makes exactly one of the two vanish, silently', coalesce(v::text,'<null>');
   end if;
 
-  -- 3. period_type IS NORMALISED. SEC says 'FY', yfinance says 'annual'; a chart that groups by
+  -- 3. period_type IS NORMALISED. SEC said 'FY' and yfinance 'annual' until migration
+  --    20261025140000 converted the stored `FY` rows and refused the spelling; a chart that groups by
   --    this would otherwise split one company's history into two series.
   select count(*) into n from market.security_metric
    where security_id='00000000-0000-0000-0000-000000009001' and period_type <> 'annual';

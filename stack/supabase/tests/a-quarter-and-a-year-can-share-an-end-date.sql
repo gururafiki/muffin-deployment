@@ -38,11 +38,12 @@ on conflict do nothing;
 do $$
 declare n integer; v numeric;
 begin
-  -- 1. THE TWO CAN COEXIST. Under the old key this insert REPLACED the annual row.
+  -- 1. THE TWO CAN COEXIST. Under the old key this insert REPLACED the annual row. (The conflict
+  --    target names the provider since migration 20261025140000, as the Yahoo writer's does.)
   insert into market.security_statement
     (security_id, statement, period_ending, period_type, data, source_code, as_of)
   values ('00000000-0000-0000-0000-000000010601','income',date '2025-12-31','quarter','{"total_revenue": 1000}','yfinance', now())
-  on conflict (security_id, statement, period_ending, period_type) do update
+  on conflict (security_id, source_code, statement, period_ending, period_type) do update
     set data = excluded.data;
 
   select count(*) into n from market.security_statement
