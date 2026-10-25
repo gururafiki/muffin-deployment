@@ -13,8 +13,10 @@
 --                     the absent one is retracted although it was derived before
 --   T1004 track       the Track RPC refuses the absent line, as an admin, and promotes its twin
 --   T1004 sighting    an older `last_seen_at` written over a newer one leaves the newer, and
---                     leaves a mark; only a newer sighting clears it — by plain update and by the
---                     upsert stage 2 actually sends
+--                     leaves a mark; only a newer sighting of the venue's own page clears it — by
+--                     plain update and by the upsert stage 2 actually sends. (Since 20261025130000
+--                     a venue page stamps `venue_seen_at` too, and only that clears a mark; the
+--                     alias case is tests/an-alias-cannot-vouch-for-a-line-its-venue-can-see.sql.)
 
 \set ON_ERROR_STOP on
 
@@ -30,15 +32,15 @@ on conflict (exch_code) do nothing;
 
 insert into market.venue_listing
        (figi, composite_figi, exch_code, ticker, name, provider_symbol, share_class_figi,
-        last_seen_at, absent_since) values
+        last_seen_at, absent_since, venue_seen_at) values
   ('BBGT1004U1', 'BBGT1004U1', 'T4A', 'TUA', 'T1004 untracked present', 'TUA.ZA', null,
-   now(), null),
+   now(), null, now()),
   ('BBGT1004U2', 'BBGT1004U2', 'T4A', 'TUB', 'T1004 untracked absent',  'TUB.ZA', null,
-   now() - interval '40 days', now()),
+   now() - interval '40 days', now(), now() - interval '40 days'),
   ('BBGT1004P1', 'BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked',           'TPA.ZA', 'T1004CLS',
-   now(), null),
+   now(), null, now()),
   ('BBGT1004P2', 'BBGT1004P2', 'T4A', 'TPB', 'T1004 tracked',           'TPB.ZA', 'T1004CLS',
-   now() - interval '40 days', now());
+   now() - interval '40 days', now(), now() - interval '40 days');
 
 insert into market.security (security_id, name, security_type_code, country_iso2) values
   ('00000000-0000-0000-0000-000000001004', 'T1004 tracked', 'equity', 'ZU');
@@ -99,7 +101,8 @@ begin
     raise exception 'the mark did not land: the fixture proves nothing';
   end if;
 
-  update market.venue_listing set last_seen_at = newest - interval '30 days' where figi = 'BBGT1004P1';
+  update market.venue_listing set last_seen_at = newest - interval '30 days',
+                                  venue_seen_at = newest - interval '30 days' where figi = 'BBGT1004P1';
   if (select last_seen_at from market.venue_listing where figi = 'BBGT1004P1') <> newest then
     raise exception 'an older sighting overwrote a newer one';
   end if;
@@ -108,12 +111,14 @@ begin
   end if;
 
   -- AN EQUAL SIGHTING IS A RE-FILING OF THE SAME PAGE, not new evidence.
-  update market.venue_listing set last_seen_at = newest, absent_since = null where figi = 'BBGT1004P1';
+  update market.venue_listing set last_seen_at = newest, venue_seen_at = newest, absent_since = null
+   where figi = 'BBGT1004P1';
   if (select absent_since from market.venue_listing where figi = 'BBGT1004P1') is distinct from marked then
     raise exception 'a re-filed sighting cleared a mark';
   end if;
 
-  update market.venue_listing set last_seen_at = newest + interval '1 day' where figi = 'BBGT1004P1';
+  update market.venue_listing set last_seen_at = newest + interval '1 day',
+                                  venue_seen_at = newest + interval '1 day' where figi = 'BBGT1004P1';
   if (select last_seen_at from market.venue_listing where figi = 'BBGT1004P1') <> newest + interval '1 day' then
     raise exception 'a newer sighting did not move last_seen_at forward';
   end if;
@@ -125,10 +130,12 @@ end $$;
 -- 5. The same through the statement stage 2 sends: an upsert whose SET lists every column the rows
 --    carry, and never `absent_since`.
 update market.venue_listing set absent_since = now() - interval '2 days' where figi = 'BBGT1004P1';
-insert into market.venue_listing (figi, exch_code, ticker, name, provider_symbol, last_seen_at)
-values ('BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked', 'TPA.ZA', now() - interval '90 days')
+insert into market.venue_listing (figi, exch_code, ticker, name, provider_symbol, last_seen_at,
+                                  venue_seen_at)
+values ('BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked', 'TPA.ZA', now() - interval '90 days', now() - interval '90 days')
 on conflict (figi) do update
    set exch_code = excluded.exch_code, last_seen_at = excluded.last_seen_at,
+       venue_seen_at = excluded.venue_seen_at,
        name = excluded.name, provider_symbol = excluded.provider_symbol, ticker = excluded.ticker;
 do $$
 begin
@@ -136,10 +143,12 @@ begin
     raise exception 're-filing an older page through the upsert cleared a mark';
   end if;
 end $$;
-insert into market.venue_listing (figi, exch_code, ticker, name, provider_symbol, last_seen_at)
-values ('BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked', 'TPA.ZA', now() + interval '3 days')
+insert into market.venue_listing (figi, exch_code, ticker, name, provider_symbol, last_seen_at,
+                                  venue_seen_at)
+values ('BBGT1004P1', 'T4A', 'TPA', 'T1004 tracked', 'TPA.ZA', now() + interval '3 days', now() + interval '3 days')
 on conflict (figi) do update
    set exch_code = excluded.exch_code, last_seen_at = excluded.last_seen_at,
+       venue_seen_at = excluded.venue_seen_at,
        name = excluded.name, provider_symbol = excluded.provider_symbol, ticker = excluded.ticker;
 do $$
 begin

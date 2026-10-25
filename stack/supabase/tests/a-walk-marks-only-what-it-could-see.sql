@@ -8,6 +8,10 @@
 --   in window, seen 1 day ago                        stays (W1, W8-W10)
 --   in window, seen 10 days ago                      marked by the venue's own walk (W2)
 --   in window, seen 3 days ago by the alias only     marked: the venue's own walk vouches here (W3)
+--
+-- Every venue page also stamps `venue_seen_at`; an alias page (W3-W6) stamps only `last_seen_at`
+-- (migration 20261025130000; the walk-order case is tests/an-alias-cannot-vouch-for-a-line-its-
+-- venue-can-see.sql).
 --   past the window, seen 3 days ago by the alias    STAYS: the capped walk could not see it (W4, W6)
 --   past the window, seen 6 days ago                 marked, but only once the alias has FINISHED (W5)
 --   in window, marked on 2026-01-01                  keeps its first mark (W7)
@@ -29,25 +33,26 @@ insert into market.directory_alias (query_key, exch_code_asked, files_under, sec
 values ('T5V.local', 'T5L', 'T5V', 'Common Stock', 'fixture: sees past the capped walk')
 on conflict (query_key) do nothing;
 
-insert into market.venue_listing (figi, exch_code, ticker, security_type, last_seen_at, absent_since) values
-  ('BBGT5V0100', 'T5V', 'W1', 'Common Stock', now() - interval '1 day',   null),
-  ('BBGT5V0110', 'T5V', 'W8', 'Common Stock', now() - interval '1 day',   null),
-  ('BBGT5V0120', 'T5V', 'W9', 'Common Stock', now() - interval '1 day',   null),
-  ('BBGT5V0130', 'T5V', 'WA', 'Common Stock', now() - interval '1 day',   null),
-  ('BBGT5V0200', 'T5V', 'W2', 'Common Stock', now() - interval '10 days', null),
-  ('BBGT5V0300', 'T5V', 'W3', 'Common Stock', now() - interval '3 days',  null),
-  ('BBGT5V0400', 'T5V', 'W7', 'Common Stock', now() - interval '90 days', '2026-01-01'),
-  ('BBGT5V0700', 'T5V', 'W4', 'Common Stock', now() - interval '3 days',  null),
-  ('BBGT5V0750', 'T5V', 'W6', 'Common Stock', now() - interval '3 days',  null),
-  ('BBGT5V0800', 'T5V', 'W5', 'Common Stock', now() - interval '6 days',  null),
-  ('BBGT5V0150', 'T5X', 'X1', 'Common Stock', now() - interval '30 days', null),
-  ('BBGT5VR001', 'T5V', 'R1', 'REIT',         now() - interval '30 days', null),
-  ('BBGT5VR002', 'T5V', 'R2', 'REIT',         now() - interval '30 days', null),
-  ('BBGT5VR003', 'T5V', 'R3', 'REIT',         now() - interval '30 days', null),
-  ('BBGT5VD001', 'T5V', 'D1', 'Depositary Receipt', now() - interval '30 days', null),
+insert into market.venue_listing (figi, exch_code, ticker, security_type, last_seen_at, absent_since,
+                                  venue_seen_at) values
+  ('BBGT5V0100', 'T5V', 'W1', 'Common Stock', now() - interval '1 day',   null, now() - interval '1 day'),
+  ('BBGT5V0110', 'T5V', 'W8', 'Common Stock', now() - interval '1 day',   null, now() - interval '1 day'),
+  ('BBGT5V0120', 'T5V', 'W9', 'Common Stock', now() - interval '1 day',   null, now() - interval '1 day'),
+  ('BBGT5V0130', 'T5V', 'WA', 'Common Stock', now() - interval '1 day',   null, now() - interval '1 day'),
+  ('BBGT5V0200', 'T5V', 'W2', 'Common Stock', now() - interval '10 days', null, now() - interval '10 days'),
+  ('BBGT5V0300', 'T5V', 'W3', 'Common Stock', now() - interval '3 days',  null, null),
+  ('BBGT5V0400', 'T5V', 'W7', 'Common Stock', now() - interval '90 days', '2026-01-01', now() - interval '90 days'),
+  ('BBGT5V0700', 'T5V', 'W4', 'Common Stock', now() - interval '3 days',  null, null),
+  ('BBGT5V0750', 'T5V', 'W6', 'Common Stock', now() - interval '3 days',  null, null),
+  ('BBGT5V0800', 'T5V', 'W5', 'Common Stock', now() - interval '6 days',  null, null),
+  ('BBGT5V0150', 'T5X', 'X1', 'Common Stock', now() - interval '30 days', null, now() - interval '30 days'),
+  ('BBGT5VR001', 'T5V', 'R1', 'REIT',         now() - interval '30 days', null, now() - interval '30 days'),
+  ('BBGT5VR002', 'T5V', 'R2', 'REIT',         now() - interval '30 days', null, now() - interval '30 days'),
+  ('BBGT5VR003', 'T5V', 'R3', 'REIT',         now() - interval '30 days', null, now() - interval '30 days'),
+  ('BBGT5VD001', 'T5V', 'D1', 'Depositary Receipt', now() - interval '30 days', null, now() - interval '30 days'),
   -- Seen recently, so the guard would let an unfinished walk mark D1: only the unfinished rule stops it.
-  ('BBGT5VD002', 'T5V', 'D2', 'Depositary Receipt', now() - interval '1 day',   null),
-  ('BBGT5VD003', 'T5V', 'D3', 'Depositary Receipt', now() - interval '1 day',   null);
+  ('BBGT5VD002', 'T5V', 'D2', 'Depositary Receipt', now() - interval '1 day',   null, now() - interval '1 day'),
+  ('BBGT5VD003', 'T5V', 'D3', 'Depositary Receipt', now() - interval '1 day',   null, now() - interval '1 day');
 
 create temp table absent_after (step text, ticker text);
 create temp table answer (step text, result jsonb);
