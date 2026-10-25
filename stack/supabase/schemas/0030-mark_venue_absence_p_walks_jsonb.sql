@@ -9,6 +9,7 @@ declare
   v_seen       integer;
   v_n          integer;
   v_marked     integer := 0;
+  v_cleared    integer := 0;
   v_judged     integer := 0;
   v_unfinished text[]  := '{}';
   v_refused    text[]  := '{}';
@@ -44,8 +45,9 @@ begin
       continue;
     end if;
 
-    -- 1. The venue's own query: its whole scope, or its window when capped.
-    select count(*) filter (where v.last_seen_at >= s.started_at), count(*)
+    -- 1. The venue's own query: its whole scope, or its window when capped. Judged on the venue's
+    --    OWN sighting, so an alias page filed after it cannot vouch for a line it no longer returns.
+    select count(*) filter (where v.venue_seen_at >= s.started_at), count(*)
       into v_seen, v_present
       from market.venue_listing v
      where v.exch_code = s.files_under and v.security_type = s.security_type2
@@ -58,7 +60,7 @@ begin
          set absent_since = now()
        where v.exch_code = s.files_under and v.security_type = s.security_type2
          and v.absent_since is null
-         and v.last_seen_at < s.started_at
+         and coalesce(v.venue_seen_at, '-infinity'::timestamptz) < s.started_at
          and (not s.capped or v.figi collate "C" <= s.window_end collate "C");
       get diagnostics v_n = row_count;
       v_marked := v_marked + v_n;
@@ -66,7 +68,9 @@ begin
       if v_n > 0 then v_by_scope := v_by_scope || jsonb_build_object(s.query_key, v_n); end if;
     end if;
 
-    -- 2. Past a capped window: the aliases, when every one has finished.
+    -- 2. Past a capped window: the aliases, when every one has finished. They mark what they
+    --    stopped returning, and un-mark what they return again, since the trigger never lets an
+    --    alias sighting clear a mark.
     if s.capped and s.aliases > 0 then
       if not coalesce(s.aliases_complete, false) then
         v_unfinished := v_unfinished || (s.query_key || ' past ' || s.window_end);
@@ -93,6 +97,15 @@ begin
         if v_n > 0 then
           v_by_scope := v_by_scope || jsonb_build_object(s.query_key || ' past ' || s.window_end, v_n);
         end if;
+        update market.venue_listing v
+           set absent_since = null
+         where v.exch_code = s.files_under and v.security_type = s.security_type2
+           and v.absent_since is not null
+           and v.last_seen_at >= s.aliases_started
+           and v.last_seen_at > v.absent_since
+           and v.figi collate "C" > s.window_end collate "C";
+        get diagnostics v_n = row_count;
+        v_cleared := v_cleared + v_n;
       end if;
     end if;
   end loop;
@@ -100,6 +113,7 @@ begin
   return jsonb_build_object(
     'windows_judged', v_judged,
     'marked', v_marked,
+    'cleared', v_cleared,
     'marked_by_window', v_by_scope,
     'unfinished', to_jsonb(v_unfinished),
     'refused', to_jsonb(v_refused),
