@@ -121,3 +121,4 @@ After the deploy:
 | A diff shows no `diff` header lines | busybox `diff` prints none; grep `+++` |
 | `unterminated quoted string` in psql | an apostrophe in an `\echo` |
 | `MUTATION DID NOT APPLY`, and its fingerprint equals the restored one | the mutated view selects a column its `GROUP BY` lacks, so `create or replace` fails; add the column to the `GROUP BY` too (met 2026-10-18, #446) |
+| A test reading a view your migration drops passes on the first pass and fails on the second | the bundle step re-applies the stale `schemas/` file, which recreates the view; grep `tests/` for any object you drop, and always run the second pass (met 2026-10-25, #466) |
