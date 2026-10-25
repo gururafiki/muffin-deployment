@@ -25,13 +25,14 @@ on:
           - reclaim-old-docker-root
           - roll-ingest
           - prune-images
+          - drop-retired-raw
         default: checkpoint-report
       thread_id:
         description: Thread UUID (prune-thread only)
         type: string
         default: ""
       confirm:
-        description: prune-thread needs delete; migrate-docker-root needs migrate; reclaim-old-docker-root needs reclaim
+        description: prune-thread needs delete; migrate-docker-root needs migrate; reclaim-old-docker-root needs reclaim; drop-retired-raw needs drop
         type: string
         default: "dry-run"
 concurrency:
@@ -165,6 +166,69 @@ jobs:
                 exit 1
               fi
             '
+
+      # A RETIRED LANE'S RAW FILES ARE ITS ROLLBACK, SO THEY GO ONLY AFTER THE LANE HAS GONE FROM THE
+      # CODE. Each name below is a stage-1 asset whose replacement has run clean and whose deferred
+      # note sets a drop date (umbrella docs/deferred/), and adding one is a line here. The step
+      # refuses any name the RUNNING code location still defines: deleting the files of a lane that
+      # is still deployed would turn its next run into a full re-fetch, and an operator re-launching
+      # it would find nothing to extend from. Without confirm=drop it only reports what it would
+      # remove.
+      #
+      # raw_price_history: the openbb price lane, replaced by raw_price_chart on 2026-10-10
+      #   (docs/deferred/2026-10-10-the-openbb-price-raw-is-the-rollback.md). 1.6 GB, 12,328 files.
+      - name: Drop the raw files of a retired lane
+        if: inputs.action == 'drop-retired-raw'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          # The value reaches the remote command line, so only two literals may pass.
+          case "$CONFIRM" in drop|dry-run) ;; *) echo "::error::confirm must be drop or dry-run"; exit 2;; esac
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 ubuntu@"$NODE_IP" "CONFIRM=$CONFIRM bash -s" <<'REMOTE'
+          set -euo pipefail
+          RETIRED_RAW="raw_price_history"
+          ROOT=/mnt/data/ingest/raw
+          # THE IMAGE THE CODE LOCATION RUNS, asked in a throwaway container. Loading the definitions
+          # inside the live container would share its memory limit with every run in flight.
+          img="$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' muffin_muffin-ingest)"
+          [ -n "$img" ] || { echo "::error::cannot read the code location's image"; exit 1; }
+          echo "asking $img"
+          for asset in $RETIRED_RAW; do
+            # Asked of the deployed code, not of the repo: what matters is whether the running
+            # location could still materialise this asset. Exit 3 means it is still defined.
+            set +e
+            docker run --rm --entrypoint python "$img" -c '
+          import sys
+          from muffin_ingest_dagster.definitions import defs
+          keys = {k.to_user_string() for k in defs().resolve_all_asset_keys()}
+          sys.exit(3 if sys.argv[1] in keys else 0)
+          ' "$asset" < /dev/null > /tmp/drop-retired-raw.log 2>&1
+            defined=$?
+            set -e
+            if [ "$defined" -eq 3 ]; then
+              echo "::error::$asset is still defined in the running code location — roll the image that deletes it first"
+              exit 1
+            elif [ "$defined" -ne 0 ]; then
+              echo "::error::could not load the deployed definitions to check $asset (exit $defined)"
+              tail -5 /tmp/drop-retired-raw.log
+              exit 1
+            fi
+            dir="$ROOT/$asset"
+            if ! sudo test -d "$dir"; then
+              echo "$asset: already gone"
+              continue
+            fi
+            echo "$asset: $(sudo du -sh "$dir" | cut -f1) in $(sudo find "$dir" -type f | wc -l) files, no longer defined"
+            if [ "$CONFIRM" = "drop" ]; then
+              sudo rm -rf "$dir"
+              echo "$asset: removed"
+            else
+              echo "$asset: DRY RUN (set confirm=drop to remove it)"
+            fi
+          done
+          df -h /mnt/data | tail -1
+          REMOTE
 
       - name: Checkpoint storage report (read-only)
         if: inputs.action == 'checkpoint-report'
