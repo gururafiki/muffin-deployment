@@ -8,16 +8,17 @@ begin
   end if;
 end $$;
 create view market.security_recent_filings as
-SELECT security_id,
-    accession_number,
-    filing_date,
-    report_date,
-    report_type,
-    report_url,
-    filing_detail_url,
+SELECT f.security_id,
+    f.accession_number,
+    f.filing_date,
+    f.report_date,
+    f.report_type,
+    f.report_url,
+    f.filing_detail_url,
         CASE
-            WHEN report_type = ANY (ARRAY['10-K'::text, '10-K/A'::text, '20-F'::text, '20-F/A'::text]) THEN 'annual'::text
-            WHEN report_type = ANY (ARRAY['10-Q'::text, '10-Q/A'::text, '6-K'::text, '6-K/A'::text]) THEN 'interim'::text
+            WHEN ff.kind = 'accounts'::text AND ff.is_annual THEN 'annual'::text
+            WHEN ff.kind = 'accounts'::text THEN 'interim'::text
             ELSE 'event'::text
         END AS kind
-   FROM market.security_filing f;
+   FROM market.security_filing f
+     LEFT JOIN market.filing_form ff ON ff.source_code = 'sec'::text AND ff.form_code = f.report_type;

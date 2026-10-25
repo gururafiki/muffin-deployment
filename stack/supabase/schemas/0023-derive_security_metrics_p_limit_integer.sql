@@ -16,8 +16,12 @@ begin
          (select c.code from market.currency c where c.code = st.currency) as currency,
          st.source_code,
          coalesce(st.period_type, 'annual') as period_type,
+         case when lower(coalesce(st.period_type, 'annual')) in ('fy', 'annual') then 'annual'
+              when lower(st.period_type) like 'q%' then 'quarter'
+              else lower(st.period_type) end as metric_period_type,
          st.fiscal_year,
          st.fiscal_period,
+         st.as_of,
          st.data
     from market.security_statement st
    where st.derived_at is null
@@ -29,12 +33,11 @@ begin
     insert into market.security_metric
       (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at,
        fiscal_year, fiscal_period)
-    select
+    -- ONE STATEMENT PER METRIC KEY (5 in the header): the best source, then the newest.
+    select distinct on (src.security_id, f.metric_code, src.metric_period_type, src.period_ending)
       src.security_id,
       f.metric_code,
-      case when lower(src.period_type) in ('fy', 'annual') then 'annual'
-           when lower(src.period_type) like 'q%'           then 'quarter'
-           else lower(src.period_type) end,
+      src.metric_period_type,
       src.period_ending,
       (src.data ->> f.field)::numeric,
       src.currency,
@@ -47,6 +50,8 @@ begin
       on f.source_code = src.source_code
      and f.statement   = src.statement
     where jsonb_typeof(src.data -> f.field) = 'number'
+    order by src.security_id, f.metric_code, src.metric_period_type, src.period_ending,
+             market.source_priority(src.source_code) desc, src.as_of desc, src.source_code
     on conflict (security_id, metric_code, period_type, as_of) do update
       set value = excluded.value,
           currency_code = excluded.currency_code,
