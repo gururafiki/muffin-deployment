@@ -105,14 +105,21 @@ def main() -> int:
         # right throughout; this check predates migration 106, which added quarterly statements and
         # put `period_type` into the primary key and into both writers' conflict and dedupe keys.
         # It was the one place the column never reached.
-        index = {(s["statement"], s["period_ending"], s["period_type"]): s for s in stmts}
+        #
+        # AND THE PROVIDER IS PART OF IT SINCE THE STATEMENT KEY CARRIES IT (migration
+        # 20261025140000): `sec` and yfinance can each hold a row for one period, in their own
+        # vocabularies, and a metric must be compared with the statement of its own source.
+        index = {
+            (s["statement"], s["period_ending"], s["period_type"], s["source_code"]): s
+            for s in stmts
+        }
 
         for m in metrics:
             for stmt_kind in ("income", "balance", "cash"):
                 field = mapping.get((m["metric_code"], m["source_code"], stmt_kind))
                 if field is None:
                     continue
-                src = index.get((stmt_kind, m["as_of"], m["period_type"]))
+                src = index.get((stmt_kind, m["as_of"], m["period_type"], m["source_code"]))
                 if src is None:
                     continue
                 raw = (src.get("data") or {}).get(field)

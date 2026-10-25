@@ -54,7 +54,8 @@ coverage" figure, which is the kind of impossible number that means the metric i
 the data. Count distinct securities instead, from `market.security_metric` (one probe per
 security) or `coverage_current.with_statements`. The old backlog arithmetic
 (`equities − pending_statements − statements_missing_at`) stopped meaning anything on 2026-10-18,
-when `pending_statements` became SEC-only and Yahoo's statements moved to the company lane.
+when `pending_statements` became SEC-only and Yahoo's statements moved to the company lane, and the
+view itself was dropped on 2026-10-25 when `security-statements` retired (Phase 5 step 2b).
 
 **2. The TOTAL security count is not the equity universe.** Bonds outnumber equities (15,159 vs
 12,348) since the fixed-income funds were added. Every serving view and backlog filters
@@ -64,7 +65,7 @@ the total untouched. `market-verify` has a separate equity floor for exactly thi
 ## Backlog depth
 
 ```bash
-for v in pending_statements pending_xbrl pending_filings pending_insider pending_metrics pending_ttm; do
+for v in pending_xbrl pending_filings pending_insider pending_metrics pending_ttm; do
   printf '%-24s %s\n' "$v" "$(cnt "$v?select=security_id&limit=1")"   # needs SERVICE_ROLE, not anon
 done
 ```

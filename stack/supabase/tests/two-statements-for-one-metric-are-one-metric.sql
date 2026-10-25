@@ -9,7 +9,9 @@
 -- together, and the label pass re-queues a security's statements all at once.
 --
 -- The fixture puts both twins in one page, with different values, plus a pair of EQUAL priority
--- where the newer statement must win. It fails on the old function with the error above.
+-- where the newer statement must win. It fails on the old function with the error above. Since
+-- migration 20261025140000 the twins share a period type: the key carries the provider, so `sec`
+-- and yfinance can both hold `annual` for one date, and `FY` is refused.
 
 \set ON_ERROR_STOP on
 
@@ -44,14 +46,14 @@ end $$;
 insert into market.security_statement (security_id, statement, period_ending, period_type, currency, data, source_code, as_of)
 select '00000000-0000-0000-0000-000000009501', 'balance', date '2023-09-30', p.period_type, 'USD',
        jsonb_build_object(f.field, p.value), p.source_code, now() - p.age
-  from (values ('FY', 'sec', 5985000000::numeric, interval '2 hours'),
+  from (values ('annual', 'sec', 5985000000::numeric, interval '2 hours'),
                ('annual', 'yfinance', 15807000000::numeric, interval '1 hour'),
                ('quarter', 'fmp', 1::numeric, interval '2 hours')) p (period_type, source_code, value, age)
   join market.metric_source_field f
     on f.metric_code = 'short_term_debt' and f.source_code = p.source_code and f.statement = 'balance';
 -- The equal-priority pair: same metric key (quarter, 2023-09-30), finviz newer than fmp.
 insert into market.security_statement (security_id, statement, period_ending, period_type, currency, data, source_code, as_of)
-select '00000000-0000-0000-0000-000000009501', 'balance', date '2023-09-30', 'Q4', 'USD',
+select '00000000-0000-0000-0000-000000009501', 'balance', date '2023-09-30', 'quarter', 'USD',
        jsonb_build_object(f.field, 2), 'finviz', now() - interval '1 hour'
   from market.metric_source_field f
  where f.metric_code = 'short_term_debt' and f.source_code = 'finviz' and f.statement = 'balance';

@@ -1,8 +1,8 @@
 ---
 name: market-refresh-routine
 description:
-  Drain the edge function's remaining market-data backlogs (SEC's statements, XBRL,
-  filing history and segments) by hand, PACED so it does not trip a provider's rate
+  Drain the edge function's remaining market-data backlogs (SEC's XBRL, filing
+  history and segments) by hand, PACED so it does not trip a provider's rate
   limit. Use when someone asks to "refresh the market data", "catch the backlogs up"
   or "ingest what is missing". Yahoo company data, prices and the universe are Dagster
   lanes since 2026-10-18 (muffin-dagster-operations). Do NOT use for a single security
@@ -19,7 +19,8 @@ metadata:
 data (profiles, industries, fundamentals, share stats and estimates, officers, statements,
 dividends) is the Dagster company lane's, a seventh of the universe a day from 03:30 UTC, and the
 metric derivation runs at :17 and :47. Prices, returns and FX moved on 2026-09-12, the universe on
-2026-09-26. Their old resource names answer **410** with the lane that replaced them. To get one
+2026-09-26, and Tiingo's corporate actions and SEC's openbb statements (`security-statements`)
+retired on 2026-10-25. Their old resource names answer **410** with the lane that replaced them. To get one
 company sooner, press Refresh on its stock page, or launch `yahoo_companies` for chosen partitions
 with `--op-config raw_yahoo_company.force=true` (`muffin-dagster-operations`).
 
@@ -54,8 +55,6 @@ only — the anon key is public and a public cache-buster is a free way to hamme
 ## What is left to drain
 
 ```
-security-statements       SEC's annual statements, three calls per security (since 2026-10-18 SEC
-                          only: a CIK, a US listing and no `sec` row; 5 securities that day).
 security-xbrl             SEC company facts, the quarterly depth; bounded by MEMORY, so pace it.
 security-filing-history   SEC submissions: a filer's whole filing index, and its SIC code.
 security-segments         one filing's XBRL instance per row, breadth-first across companies.
@@ -66,7 +65,7 @@ security-segments         one filing's XBRL instance per row, breadth-first acro
 ```bash
 for cycle in 1 2 3 4 5 6; do
   throttled=0
-  for r in security-statements security-xbrl security-filing-history security-segments; do
+  for r in security-xbrl security-filing-history security-segments; do
     out=$(call "$r")
     echo "$r: $out"
     case "$out" in *RateLimit*|*"Too Many Requests"*|*RATE-LIMITING*) throttled=1;; esac
@@ -105,7 +104,7 @@ replaced the body, so the reason never arrived. A bare 502 now means a genuinely
 ## Checking progress
 
 ```bash
-for v in pending_statements pending_xbrl pending_filing_history pending_segments; do
+for v in pending_xbrl pending_filing_history pending_segments; do
   printf '%-24s %s\n' "$v" "$(curl -sS -o /dev/null -D - \
     "$BASE/rest/v1/$v?select=security_id&limit=1" \
     -H "apikey: $SRV" -H "Authorization: Bearer $SRV" \

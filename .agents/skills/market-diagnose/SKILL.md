@@ -39,7 +39,7 @@ A failed resource answers **HTTP 200 with `"ok": false`** and the reason.
 ```bash
 curl -sS -X POST "$BASE/functions/v1/market-refresh" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"security-statements","force":true}'
+  -d '{"resource":"security-xbrl","force":true}'
 ```
 
 **A 410 names the lane that replaced the resource.** The Yahoo company family (profiles,
@@ -182,7 +182,7 @@ Take the queue's head and check each subject against the state the handler write
 Anything already done must NOT still be queued:
 
 ```bash
-curl -sS "$BASE/rest/v1/pending_statements?select=security_id&limit=5" \
+curl -sS "$BASE/rest/v1/pending_xbrl?select=security_id&limit=5" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
 # then check those ids for the rows or the stamp the handler writes
 ```

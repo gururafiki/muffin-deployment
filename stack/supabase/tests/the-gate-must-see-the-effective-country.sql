@@ -41,7 +41,7 @@ insert into market.security_statement (security_id, statement, period_ending, da
   ('00000000-0000-0000-0000-0000000066a1', 'income', '2026-06-30', '{"total_revenue": 1}', 'yfinance', now()),
   ('00000000-0000-0000-0000-0000000066a2', 'income', '2026-06-30', '{"total_revenue": 1}', 'yfinance', now()),
   ('00000000-0000-0000-0000-0000000066a3', 'income', '2026-06-30', '{"total_revenue": 1}', 'yfinance', now())
-on conflict (security_id, statement, period_ending, period_type) do nothing;
+on conflict (security_id, source_code, statement, period_ending, period_type) do nothing;
 
 -- The view resolves symbols through `market.symbol_security`, a materialised view, so rows inserted
 -- in this transaction are invisible to it until it is rebuilt (migration 20261018210000).
