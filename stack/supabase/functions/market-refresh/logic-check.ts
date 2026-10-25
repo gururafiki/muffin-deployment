@@ -533,10 +533,13 @@ console.log('\nresource registry — the cron and the function agree')
   {
     const disabled = new Set<string>()
     for await (const sql of migrationSql()) {
+      // BOUNDED BY THE STATEMENT'S `;`. Unbounded, a disabling update written `resource = '<x>'`
+      // matched the next `in (` in the FILE, and a `period_type in ('annual', …)` CHECK read as
+      // three disabled resources (2026-10-25, Phase 5 step 2b).
       for (const m of sql.matchAll(
-        /update market\.cron_resource set enabled = false[\s\S]*?in \(([^)]*)\)/g,
+        /update market\.cron_resource set enabled = false[^;]*?(?:in \(([^)]*)\)|resource = ('[a-z][a-z0-9-]*'))/g,
       )) {
-        for (const q of m[1].matchAll(/'([a-z][a-z-]+)'/g)) disabled.add(q[1])
+        for (const q of (m[1] ?? m[2]).matchAll(/'([a-z][a-z-]+)'/g)) disabled.add(q[1])
       }
     }
     const orphaned: string[] = []
