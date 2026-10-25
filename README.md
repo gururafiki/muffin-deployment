@@ -103,6 +103,10 @@ them. So `/` grows with every image pull, and the boot volume is sized in Terraf
 replacement — `deploy.yml`'s plan mode refuses one anyway), and the first pre_task in
 `ansible/muffin_stack.yml` rescans the disk and grows the root partition and filesystem online.
 `maintenance.yml` `prune-images` reclaims dangling images and fails below 5 GB free.
+`maintenance.yml` `drop-retired-raw` removes a retired lane's raw Parquet from
+`/mnt/data/ingest/raw`, for the names listed in the step. It reports what it would remove unless
+`confirm=drop`, and refuses while the code location's running image still defines the asset, so a
+lane's rollback cannot be deleted before the roll that retires it.
 
 Three things here are load-bearing and easy to undo by accident:
 
