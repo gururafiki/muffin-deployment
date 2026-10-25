@@ -46,8 +46,9 @@ insert into market.security_filing
   ('9600003-0001','00000000-0000-0000-0000-000000009603', date '2026-03-01','10-K','sec-submissions',true),
   ('9600003-0002','00000000-0000-0000-0000-000000009603', date '2025-03-01','10-K','sec-submissions',true),
   ('9600003-0003','00000000-0000-0000-0000-000000009603', date '2024-03-01','10-K','sec-submissions',true),
-  -- AN EVENT, NOT ACCOUNTS. An 8-K has no row in `market.filing_form`, so it must never be queued
-  -- — a company files dozens a year and they carry no audited segment note.
+  -- AN EVENT, NOT ACCOUNTS. An 8-K's `market.filing_form` row (seeded 2026-10-25) carries
+  -- `carries_segments = false`, so it must never be queued — a company files dozens a year and
+  -- they carry no audited segment note.
   ('9600003-0004','00000000-0000-0000-0000-000000009603', date '2026-06-01','8-K', 'sec-submissions',true)
 on conflict do nothing;
 
@@ -128,7 +129,7 @@ begin
   -- place, so the table was read by NOTHING for a release — an unread table cannot be wrong, the
   -- same blind spot that left `exchange-listings` deployed and never scheduled.
   if exists (select 1 from market.pending_segments where accession_number = '9600003-0004') then
-    raise exception 'an 8-K is queued for segment parsing — it has no row in market.filing_form, so the view is still carrying its own copy of the form list';
+    raise exception 'an 8-K is queued for segment parsing — its market.filing_form row says carries_segments = false, so the view is not reading that column, or is still carrying its own copy of the form list';
   end if;
 
   -- And turning a form OFF must remove its filings, or the table is decoration.

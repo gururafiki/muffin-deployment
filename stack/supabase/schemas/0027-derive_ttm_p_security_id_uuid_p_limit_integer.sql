@@ -19,8 +19,11 @@ begin
   --    currency, consecutive (Q1 to Q3 165-200 days, Q3 to the year end 80-120). The bounds
   --    admit 13-week quarters (182/91, a 53-week year 182/98 or 189/91) and the 12/12/12/16-week
   --    calendar (168/112, a 53-week year 168/119) that Costco and PepsiCo file.
+  --    It is the year's fourth quarter, so it takes the year's fiscal label.
   create temporary table _q4 on commit drop as
-  select a.security_id, a.metric_code, a.as_of, a.value - q.s3 as value, a.currency_code
+  select a.security_id, a.metric_code, a.as_of, a.value - q.s3 as value, a.currency_code,
+         case when a.fiscal_period = 'FY' then a.fiscal_year end as fiscal_year,
+         case when a.fiscal_period = 'FY' then 'Q4' end as fiscal_period
     from market.security_metric a
     join market.metric mt on mt.code = a.metric_code and mt.is_flow
     join _ttm_page pg on pg.security_id = a.security_id
@@ -49,16 +52,22 @@ begin
           and x.as_of between a.as_of - 10 and a.as_of + 10);
 
   insert into market.security_metric
-    (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at)
-  select security_id, metric_code, 'quarter', as_of, value, currency_code, 'derived-q4', now()
+    (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at,
+     fiscal_year, fiscal_period)
+  select security_id, metric_code, 'quarter', as_of, value, currency_code, 'derived-q4', now(),
+         fiscal_year, fiscal_period
     from _q4
   on conflict (security_id, metric_code, period_type, as_of) do update
     set value = excluded.value,
         currency_code = excluded.currency_code,
-        fetched_at = excluded.fetched_at
+        fetched_at = excluded.fetched_at,
+        fiscal_year = excluded.fiscal_year,
+        fiscal_period = excluded.fiscal_period
     where market.security_metric.source_code = 'derived-q4'
-      and (market.security_metric.value, market.security_metric.currency_code)
-          is distinct from (excluded.value, excluded.currency_code);
+      and (market.security_metric.value, market.security_metric.currency_code,
+           market.security_metric.fiscal_year, market.security_metric.fiscal_period)
+          is distinct from
+          (excluded.value, excluded.currency_code, excluded.fiscal_year, excluded.fiscal_period);
 
   delete from market.security_metric m
    using _ttm_page pg
@@ -79,10 +88,12 @@ begin
   --    quarter under two dates, or two overlapping quarters after a fiscal-year change. With a
   --    quarter missing elsewhere the span still reads as a year, so the span alone cannot see it.
   --    A 12-week quarter dated by the month end reads as short as ~54 days, and is kept.
+  --    A TTM TAKES THE LABEL OF ITS LAST QUARTER, the period it ends with.
   create temporary table _ttm on commit drop as
-  select q.security_id, q.metric_code, q.as_of, q.ttm_value, q.currency_code
+  select q.security_id, q.metric_code, q.as_of, q.ttm_value, q.currency_code,
+         q.fiscal_year, q.fiscal_period
     from (
-      select m.security_id, m.metric_code, m.as_of, m.currency_code,
+      select m.security_id, m.metric_code, m.as_of, m.currency_code, m.fiscal_year, m.fiscal_period,
              sum(m.value)         over w as ttm_value,
              count(*)             over w as quarters,
              min(m.as_of)         over w as window_start,
@@ -91,6 +102,7 @@ begin
              min(m.gap)           over g as min_gap
         from (
           select m.security_id, m.metric_code, m.as_of, m.value, m.currency_code,
+                 m.fiscal_year, m.fiscal_period,
                  m.as_of - lag(m.as_of) over (partition by m.security_id, m.metric_code
                                               order by m.as_of) as gap
             from market.security_metric m
@@ -117,17 +129,23 @@ begin
      and q.min_ccy is not distinct from q.max_ccy;
 
   insert into market.security_metric
-    (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at)
-  select security_id, metric_code, 'ttm', as_of, ttm_value, currency_code, 'derived', now()
+    (security_id, metric_code, period_type, as_of, value, currency_code, source_code, fetched_at,
+     fiscal_year, fiscal_period)
+  select security_id, metric_code, 'ttm', as_of, ttm_value, currency_code, 'derived', now(),
+         fiscal_year, fiscal_period
     from _ttm
   on conflict (security_id, metric_code, period_type, as_of) do update
     set value = excluded.value,
         currency_code = excluded.currency_code,
-        fetched_at = excluded.fetched_at
+        fetched_at = excluded.fetched_at,
+        fiscal_year = excluded.fiscal_year,
+        fiscal_period = excluded.fiscal_period
     where market.source_priority(excluded.source_code)
        >= market.source_priority(market.security_metric.source_code)
-      and (market.security_metric.value, market.security_metric.currency_code)
-          is distinct from (excluded.value, excluded.currency_code);
+      and (market.security_metric.value, market.security_metric.currency_code,
+           market.security_metric.fiscal_year, market.security_metric.fiscal_period)
+          is distinct from
+          (excluded.value, excluded.currency_code, excluded.fiscal_year, excluded.fiscal_period);
 
   get diagnostics v_written = row_count;
 

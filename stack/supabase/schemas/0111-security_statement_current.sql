@@ -8,7 +8,7 @@ begin
   end if;
 end $$;
 create view market.security_statement_current as
-SELECT sym.symbol,
+SELECT DISTINCT ON (sym.symbol, st.security_id, st.statement, st.period_type, (COALESCE(st.fiscal_year::text || st.fiscal_period, st.period_ending::text))) sym.symbol,
     st.security_id,
     st.statement,
     st.period_ending,
@@ -26,7 +26,11 @@ SELECT sym.symbol,
             WHEN s.currency_code <> 'USD'::text THEN s.currency_code
             WHEN COALESCE(s.provider_country_iso2, s.country_iso2) = 'US'::text THEN s.currency_code
             ELSE NULL::text
-        END AS reporting_currency
+        END AS reporting_currency,
+    st.fiscal_year,
+    st.fiscal_period
    FROM market.security_statement st
      JOIN market.symbol_security sym ON sym.security_id = st.security_id
-     JOIN market.security s ON s.security_id = st.security_id;
+     JOIN market.security s ON s.security_id = st.security_id
+     JOIN market.data_source ds ON ds.code = st.source_code
+  ORDER BY sym.symbol, st.security_id, st.statement, st.period_type, (COALESCE(st.fiscal_year::text || st.fiscal_period, st.period_ending::text)), ds.priority DESC, st.as_of DESC;

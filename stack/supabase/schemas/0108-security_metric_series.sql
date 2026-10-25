@@ -18,13 +18,17 @@ WITH gapped AS (
             sm.currency_code,
             sm.source_code,
             ds.priority,
+            sm.fiscal_year,
+            sm.fiscal_period,
                 CASE
-                    WHEN (sm.as_of - lag(sm.as_of) OVER (PARTITION BY sym.symbol, sm.security_id, sm.period_type ORDER BY sm.as_of)) <= 7 THEN 0
+                    WHEN (sm.as_of - lag(sm.as_of) OVER p) <= 7 THEN 0
+                    WHEN sm.fiscal_period IS NOT NULL AND sm.fiscal_year = lag(sm.fiscal_year) OVER p AND sm.fiscal_period = lag(sm.fiscal_period) OVER p THEN 0
                     ELSE 1
                 END AS starts_cluster
            FROM market.security_metric sm
              JOIN market.data_source ds ON ds.code = sm.source_code
              JOIN market.symbol_security sym ON sym.security_id = sm.security_id
+          WINDOW p AS (PARTITION BY sym.symbol, sm.security_id, sm.period_type ORDER BY sm.as_of)
         ), clustered AS (
          SELECT g.security_id,
             g.symbol,
@@ -35,6 +39,8 @@ WITH gapped AS (
             g.currency_code,
             g.source_code,
             g.priority,
+            g.fiscal_year,
+            g.fiscal_period,
             sum(g.starts_cluster) OVER (PARTITION BY g.symbol, g.security_id, g.period_type ORDER BY g.as_of) AS period_group,
             count(*) OVER (PARTITION BY g.symbol, g.security_id, g.period_type, g.priority, g.as_of) AS rows_on_date
            FROM gapped g
@@ -48,6 +54,8 @@ WITH gapped AS (
             c.currency_code,
             c.source_code,
             c.priority,
+            c.fiscal_year,
+            c.fiscal_period,
             c.period_group,
             first_value(c.as_of) OVER (PARTITION BY c.symbol, c.security_id, c.period_type, c.period_group ORDER BY c.priority DESC, c.rows_on_date DESC, c.as_of DESC) AS period_as_of
            FROM clustered c
@@ -63,7 +71,9 @@ WITH gapped AS (
     a.period_as_of AS as_of,
     a.value,
     COALESCE(a.currency_code, s.reporting_currency) AS currency_code,
-    a.source_code
+    a.source_code,
+    a.fiscal_year,
+    a.fiscal_period
    FROM anchored a
      JOIN market.metric m ON m.code = a.metric_code
      JOIN market.security s ON s.security_id = a.security_id
