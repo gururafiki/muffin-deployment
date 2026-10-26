@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION market.promote_share_classes(p_figis text[], p_limit integer)
+CREATE OR REPLACE FUNCTION market.promote_share_classes(p_figis text[], p_symbols text[], p_limit integer)
  RETURNS jsonb
  LANGUAGE plpgsql
  SET search_path TO 'market', 'pg_catalog'
@@ -7,6 +7,7 @@ declare
   v_policy  market.promotion_policy;
   v_limit   integer;
   v_done    integer;
+  v_held    integer;
   v_venues  jsonb;
 begin
   select * into v_policy from market.promotion_policy where id;
@@ -16,15 +17,26 @@ begin
   if v_policy.paused then
     return jsonb_build_object('promoted', 0, 'reason', 'paused');
   end if;
+  if coalesce(cardinality(p_figis), 0) <> coalesce(cardinality(p_symbols), 0) then
+    raise exception 'promote_share_classes: % lines and % symbols; each line needs the spelling Yahoo priced',
+      coalesce(cardinality(p_figis), 0), coalesce(cardinality(p_symbols), 0);
+  end if;
   v_limit := greatest(0, least(coalesce(p_limit, 0), v_policy.wave_size));
   if v_limit = 0 then
     return jsonb_build_object('promoted', 0, 'reason', 'no capacity', 'asked', p_limit);
   end if;
 
+  -- A SPELLING ANOTHER SECURITY ALREADY HOLDS is skipped and counted: the directory can offer a
+  -- class whose tracked twin predates its share-class identifier, and its verified spelling is the
+  -- twin's symbol. Minting it would fail the whole wave on the unique key.
+  select count(*) into v_held
+    from unnest(p_figis, p_symbols) as h (figi, symbol)
+   where exists (select 1 from market.security_provider_symbol ps where upper(ps.symbol) = upper(h.symbol));
+
   -- THE LINES HANDED IN ARE STILL CHECKED AGAINST THE CANDIDATES, so a class promoted since the
   -- caller chose them, or a line the directory has stopped returning, is skipped rather than
   -- minted twice. THEIR ORDER IS THE WAVE'S: the caller asked the provider in candidate order, and
-  -- a line it could not verify is simply absent from the array.
+  -- a line it could not verify is simply absent from the arrays.
   --
   -- ONE STATEMENT, NO TEMP TABLE. A temp table belongs to whichever role created it, so a second
   -- wave in one session, as another role, cannot drop it (measured in the guard: "must be owner of
@@ -33,14 +45,19 @@ begin
   --
   -- ONE CANDIDATE PER PRICE SYMBOL: `security_provider_symbol` is unique on (provider, symbol), and
   -- two rows of one statement claiming one symbol would fail the whole wave.
-  with wave as materialized (
+  with handed as (
+    select h.figi, h.symbol, h.position
+      from unnest(p_figis, p_symbols) with ordinality as h (figi, symbol, position)
+     where h.symbol is not null
+       and not exists (select 1 from market.security_provider_symbol ps
+                        where upper(ps.symbol) = upper(h.symbol))
+  ),
+  wave as materialized (
     select gen_random_uuid() as security_id, c.*
-      from (select distinct on (upper(coalesce(pc.provider_symbol, pc.figi)))
-                   pc.*, array_position(p_figis, pc.figi) as position
+      from (select distinct on (upper(h.symbol)) pc.*, h.symbol as yahoo_symbol, h.position
               from market.promotion_candidate pc
-             where pc.figi = any (p_figis)
-             order by upper(coalesce(pc.provider_symbol, pc.figi)),
-                      array_position(p_figis, pc.figi)) c
+              join handed h on h.figi = pc.figi
+             order by upper(h.symbol), h.position) c
      order by c.position
      limit v_limit
   ),
@@ -61,7 +78,7 @@ begin
   ),
   symbols as (
     insert into market.security_provider_symbol (security_id, provider_code, symbol)
-    select w.security_id, 'yfinance', w.provider_symbol from wave w where w.provider_symbol is not null
+    select w.security_id, 'yfinance', w.yahoo_symbol from wave w
     on conflict (security_id, provider_code) do nothing
     returning 1
   )
@@ -73,6 +90,7 @@ begin
   return jsonb_build_object(
     'promoted', v_done,
     'handed', coalesce(cardinality(p_figis), 0),
+    'symbol_held', v_held,
     'asked', p_limit,
     'wave_size', v_policy.wave_size,
     'by_venue', v_venues,
