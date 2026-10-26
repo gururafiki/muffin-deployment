@@ -21,9 +21,11 @@
 --   SK  Yahoo found nothing for its line 100 days ago               a candidate again
 --   SL  Yahoo priced its line 10 days ago                           a candidate
 --
--- THE WAVE PROMOTES ONLY WHAT IT IS HANDED, in the order handed: the Dagster lane hands it the
--- lines Yahoo priced, in the order it asked. A fixture where the view's order and the array's
--- agree could not tell the two rules apart, so section 2 hands them reversed.
+-- THE WAVE PROMOTES ONLY WHAT IT IS HANDED, in the order handed, WITH THE SPELLING HANDED: the
+-- Dagster lane hands it the lines Yahoo priced and the spelling that priced (migration
+-- 20261026130000; KOSDAQ lines are `.KQ` under a `.KS` directory). A fixture where the view's order
+-- and the array's agree, or the handed spelling and the directory's, could not tell the rules
+-- apart, so section 2 hands them reversed and re-spelt.
 
 \set ON_ERROR_STOP on
 
@@ -96,7 +98,8 @@ end $$;
 do $$
 declare r jsonb; sid uuid;
 begin
-  r := market.promote_share_classes(array['BBGT8S2A', 'BBGT8S8B', 'BBGT8S1A'], 1);
+  r := market.promote_share_classes(array['BBGT8S2A', 'BBGT8S8B', 'BBGT8S1A'],
+                                    array['TWO.ZA', 'EIG.ZQ', 'ONE.ZA'], 1);
   if (r ->> 'promoted')::int <> 1 then
     raise exception 'a wave of one promoted %', r;
   end if;
@@ -112,13 +115,14 @@ begin
     raise exception 'the promoted class is not filed under its home country';
   end if;
   if (select symbol from market.security_provider_symbol where security_id = sid and provider_code = 'yfinance')
-     is distinct from 'EIG.ZB' then
-    raise exception 'the promoted class is not priced from its own line';
+     is distinct from 'EIG.ZQ' then
+    raise exception 'the promoted class is not priced with the spelling Yahoo priced (EIG.ZQ), but with %',
+      (select symbol from market.security_provider_symbol where security_id = sid and provider_code = 'yfinance');
   end if;
   if (select count(*) from market.security_identifier where security_id = sid) <> 3 then
     raise exception 'the promoted class lacks its share-class, composite or ticker identifier';
   end if;
-  raise notice 'ok  a wave promotes what it is handed, in the order handed, from the home venue';
+  raise notice 'ok  a wave promotes what it is handed, in the order handed, with the spelling handed';
 end $$;
 
 -- 3. The next wave takes the rest, and never the same class twice; a line it is not handed is not
@@ -126,13 +130,13 @@ end $$;
 do $$
 declare r jsonb;
 begin
-  if (market.promote_share_classes(array['BBGT8S8B'], 10) ->> 'promoted')::int <> 0 then
+  if (market.promote_share_classes(array['BBGT8S8B'], array['EIG.ZB'], 10) ->> 'promoted')::int <> 0 then
     raise exception 'a class already promoted was promoted again';
   end if;
-  if (market.promote_share_classes(array[]::text[], 10) ->> 'promoted')::int <> 0 then
+  if (market.promote_share_classes(array[]::text[], array[]::text[], 10) ->> 'promoted')::int <> 0 then
     raise exception 'a wave handed nothing promoted something';
   end if;
-  r := market.promote_share_classes(array['BBGT8S1A'], 10);
+  r := market.promote_share_classes(array['BBGT8S1A'], array['ONE.ZA'], 10);
   if (r ->> 'promoted')::int <> 1
      or not exists (select 1 from market.security_identifier where kind_code = 'share_class_figi' and value = 'T8CLS1') then
     raise exception 'the second wave should promote exactly T8CLS1: %', r;
@@ -151,15 +155,15 @@ insert into market.venue_listing (figi, composite_figi, share_class_figi, exch_c
 do $$
 begin
   update market.promotion_policy set paused = true;
-  if (market.promote_share_classes(array['BBGT8SAA', 'BBGT8SBA'], 10) ->> 'promoted')::int <> 0 then
+  if (market.promote_share_classes(array['BBGT8SAA', 'BBGT8SBA'], array['TEN.ZA', 'ELE.ZA'], 10) ->> 'promoted')::int <> 0 then
     raise exception 'a paused policy promoted';
   end if;
   update market.promotion_policy set paused = false, wave_size = 1;
-  if (market.promote_share_classes(array['BBGT8SAA', 'BBGT8SBA'], 10) ->> 'promoted')::int <> 1 then
+  if (market.promote_share_classes(array['BBGT8SAA', 'BBGT8SBA'], array['TEN.ZA', 'ELE.ZA'], 10) ->> 'promoted')::int <> 1 then
     raise exception 'the wave size did not cap the wave';
   end if;
   update market.promotion_policy set wave_size = 500;
-  if (market.promote_share_classes(array['BBGT8SBA'], 0) ->> 'promoted')::int <> 0 then
+  if (market.promote_share_classes(array['BBGT8SBA'], array['ELE.ZA'], 0) ->> 'promoted')::int <> 0 then
     raise exception 'a wave with no capacity promoted';
   end if;
   raise notice 'ok  the policy pauses and caps a wave, and so does the capacity asked';
@@ -175,7 +179,7 @@ insert into market.venue_listing (figi, composite_figi, share_class_figi, exch_c
 do $$
 declare r jsonb;
 begin
-  r := market.promote_share_classes(array['BBGT8SCA', 'BBGT8SDA'], 10);
+  r := market.promote_share_classes(array['BBGT8SCA', 'BBGT8SDA'], array['DUP.ZA', 'DUP.ZA'], 10);
   if (r ->> 'promoted')::int <> 1 then
     raise exception 'two classes sharing a symbol should promote exactly one: %', r;
   end if;
@@ -192,7 +196,7 @@ insert into market.venue_listing (figi, composite_figi, share_class_figi, exch_c
 set local role ingest_rw;
 do $$
 begin
-  if (market.promote_share_classes(array['BBGT8SEA'], 10) ->> 'promoted')::int <> 1 then
+  if (market.promote_share_classes(array['BBGT8SEA'], array['FOT.ZA'], 10) ->> 'promoted')::int <> 1 then
     raise exception 'as ingest_rw, a wave promoted nothing';
   end if;
   raise notice 'ok  the worker can run a wave';
@@ -200,13 +204,52 @@ end $$;
 reset role;
 do $$
 begin
-  if has_function_privilege('anon', 'market.promote_share_classes(text[], integer)', 'EXECUTE') then
+  if has_function_privilege('anon', 'market.promote_share_classes(text[], text[], integer)', 'EXECUTE') then
     raise exception 'anon can run a wave';
   end if;
   if has_table_privilege('ingest_rw', 'market.promotion_policy', 'UPDATE') then
     raise exception 'the worker can rewrite its own policy';
   end if;
   raise notice 'ok  only the worker and the service role run a wave';
+end $$;
+
+-- 6b. A spelling another security already holds is skipped and counted, never minted twice; and a
+--     line with no spelling handed for it is refused outright.
+insert into market.venue_listing (figi, composite_figi, share_class_figi, exch_code, ticker, name,
+                                  security_type, country_iso2, provider_symbol, last_seen_at) values
+  ('BBGT8SFA', 'BBGT8SFC', 'T8CLSF', 'T8A', 'EFF', 'T8 Fifteen', 'Common Stock', 'ZE', 'EFF.ZA', now());
+do $$
+declare r jsonb;
+begin
+  -- NIN.ZA is held by "T8 Nine, held by its symbol".
+  r := market.promote_share_classes(array['BBGT8SFA'], array['nin.za'], 10);
+  if (r ->> 'promoted')::int <> 0 or (r ->> 'symbol_held')::int <> 1 then
+    raise exception 'a spelling another security holds was not skipped and counted: %', r;
+  end if;
+  begin
+    perform market.promote_share_classes(array['BBGT8SFA'], array[]::text[], 10);
+  exception when raise_exception then
+    raise notice 'ok  a held spelling is skipped, and a line with no spelling is refused';
+    return;
+  end;
+  raise exception 'a line handed with no spelling was accepted';
+end $$;
+
+-- 6c. The spellings a probe asks, per country: Korea's KOSDAQ after KOSPI, where the countries are
+--     seeded (the migration seeds only countries that exist).
+do $$
+declare got text;
+begin
+  if exists (select 1 from market.countries where iso2 = 'KR') then
+    select string_agg(suffix, ',' order by preference) into got from market.yahoo_spelling where country_iso2 = 'KR';
+    if got is distinct from '.KS,.KQ' then
+      raise exception 'Korea is spelt %, expected .KS,.KQ', got;
+    end if;
+  end if;
+  if has_table_privilege('ingest_rw', 'market.yahoo_spelling', 'INSERT') then
+    raise exception 'the worker can rewrite the spellings it asks';
+  end if;
+  raise notice 'ok  the spellings are data the worker reads and cannot write';
 end $$;
 
 -- 7. A line Yahoo could not price waits 90 days; one it priced, or refused long ago, does not.
