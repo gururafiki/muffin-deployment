@@ -958,6 +958,15 @@ services:
 
   firecrawl-rabbitmq:
     image: rabbitmq:3
+    # SIZED FOR ITS CONTAINER, because RabbitMQ sizes itself for the host. Without these it was
+    # OOM-killed every 2-3 days (exit 137 on 10-19, 10-22, 10-24 and 10-27): its quorum queues hold
+    # WAL entries in memory until the WAL rolls over at a default 512 MiB, inside a 512 MiB limit,
+    # and its memory watermark was computed from the host's 24 GB (10.06 GB), so it never throttled.
+    # RabbitMQ's docs want 3x the WAL limit in memory; 32 MB is their example. Checked in a
+    # throwaway container on the node: watermark computed to 0.21 GB, wal_max_size_bytes 32000000.
+    # docs/deferred/2026-10-27-firecrawl-rabbitmq-is-oom-killed-every-few-days.md
+    environment:
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit total_memory_available_override_value 536870912 -ra wal_max_size_bytes 32000000"
     networks:
       - muffin-net
     healthcheck:
