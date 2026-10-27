@@ -38,7 +38,9 @@ All reads go through the node (`muffin-reach-deployed-services`): the `dagster` 
    `start_time`/`end_time` are epoch floats. `create_timestamp` is UTC without a zone.
 2. **What each run wrote:** `scripts/run_events.py` (its docstring has the query). **Sum the outcome
    counters against `subjects`.** A gap is a branch that failed to count: on 2026-09-17 the 09-16
-   price partition read `answered=5974 empty=586 unasked=0` of 12,017.
+   price partition read `answered=5974 empty=586 unasked=0` of 12,017. **Sum once per run:** a
+   run's metadata is copied onto every partition's materialization, so summing over all events
+   multiplies each run's counters by its width. Take `distinct on (run_id, asset_key)`.
 3. **Count the tables per date.** In a `single_run` range, every partition carries the RUN's
    metadata, so a day with no rows reads the same as its neighbours.
    ```sql
