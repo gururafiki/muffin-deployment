@@ -121,4 +121,5 @@ After the deploy:
 | A diff shows no `diff` header lines | busybox `diff` prints none; grep `+++` |
 | `unterminated quoted string` in psql | an apostrophe in an `\echo` |
 | `MUTATION DID NOT APPLY`, and its fingerprint equals the restored one | the mutated view selects a column its `GROUP BY` lacks, so `create or replace` fails; add the column to the `GROUP BY` too (met 2026-10-18, #446) |
+| A data or grant mutation is "caught" for the wrong reason, or the final restore fails | re-applying a migration does not undo a mutation: `on conflict do nothing` keeps an added or rewritten row, and `add column if not exists` keeps a dropped constraint dropped. Write a restore that deletes first, then `\i`s the migrations, and put it outside the mutation glob: `NEW=/mut/restore/restore.sql` (met 2026-10-28) |
 | A test reading a view your migration drops passes on the first pass and fails on the second | the bundle step re-applies the stale `schemas/` file, which recreates the view; grep `tests/` for any object you drop, and always run the second pass (met 2026-10-25, #466) |
