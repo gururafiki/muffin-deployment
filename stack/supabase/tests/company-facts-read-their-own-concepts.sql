@@ -1,5 +1,5 @@
 -- COMPANY FACTS READ THEIR OWN CONCEPTS, AND A FILING NAMES ITS REGULATOR.
--- Migrations 20261028100000 and 20261028100100 (Phase 5 step 4).
+-- Migrations 20261028100000, 20261028100100 and 20261028100200 (Phase 5 step 4).
 --
 -- Four ways to get this wrong, each asserted:
 --   1. an addition that repeats an `xbrl_concept` row, so a concept is ranked twice;
@@ -75,6 +75,20 @@ begin
   end if;
   if not has_table_privilege('ingest_rw', 'market.xbrl_fact_concept', 'SELECT') then
     raise exception 'ingest_rw cannot read xbrl_fact_concept';
+  end if;
+
+  -- The calendar's roles: the six forms that report a period, and no amendment among them.
+  select string_agg(form_code || '=' || coalesce(fiscal_role, 'none'), ', ' order by form_code)
+    into missing
+    from market.filing_form
+   where source_code = 'sec'
+     and fiscal_role is distinct from case form_code
+                                        when '10-K' then 'annual' when '20-F' then 'annual'
+                                        when '40-F' then 'annual' when '10-KT' then 'transition'
+                                        when '10-Q' then 'interim' when '10-QT' then 'interim'
+                                      end;
+  if missing is not null then
+    raise exception 'filing_form gives the calendar the wrong role: %', missing;
   end if;
 
   -- The regulator column, and that it refuses a regulator that does not exist.
