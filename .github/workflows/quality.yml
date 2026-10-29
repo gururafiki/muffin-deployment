@@ -1202,6 +1202,12 @@ jobs:
       - name: Offline check — the quarter-shape threshold separates the two cases
         run: python3 .github/scripts/check_quarter_is_a_quarter.py --self-test
 
+      # AN OFFSET PAGE RE-READS EVERY ROW BEFORE IT: the one-period check paged `security_metric` by
+      # offset and was cancelled at the 8-second ceiling on every run from 2026-10-23. Its keyset
+      # must read each row once across pages that end part-way through a security.
+      - name: Offline check — the one-period guard pages by key
+        run: python3 .github/scripts/check_one_period_one_point.py --self-test
+
       # A GATE THAT IS RED FOR A DAY AFTER EVERY DEPLOY IS ONE NOBODY READS, and this repo has
       # already paid for that: market-verify sat red for six days on a check CLAUDE.md had
       # reclassified as a gauge, and a four-day `derive-classifications` outage went unseen behind

@@ -24,8 +24,13 @@ Two guards, because migration 126 can be right and still not be enough.
    gate went red or green with the day's digit — red on 2026-10-06, 10-08, 10-09 and 10-10, green in
    between, on unchanged data — which is exactly the gate nobody reads (CLAUDE.md, 2026-09-06), and
    it covered ~1,000 of 75,018 rows a day. The raw table answers this cheaply where the serving view
-   did not: the primary key serves `metric_code, period_type` ordered by `security_id, as_of`, so all
-   76 pages cost a few seconds. A regression is now a count that GROWS past the known one.
+   did not: the primary key serves `metric_code, period_type` ordered by `security_id, as_of`. A
+   regression is now a count that GROWS past the known one.
+
+   PAGED BY KEY, NOT BY OFFSET. An offset page re-reads every row before it, so the cost grew with
+   the table until a page passed the 8-second ceiling: measured 2026-10-29, the page at offset
+   70,000 took 12.3 s and the same page from `security_id > x` took 6 ms. This check was cancelled
+   at 57014 on every run from at least 2026-10-23 to 10-29, which kept market-verify red for a week.
 
 Why this is not covered by the behaviour test: that test proves the RULE against a fixture. This
 proves the rule is applied to the DATA, which is a different claim — the same distinction that let
@@ -39,8 +44,8 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE = os.environ["BASE"].rstrip("/")
-SRV = os.environ["SRV"]
+BASE = os.environ.get("BASE", "").rstrip("/")
+SRV = os.environ.get("SRV", "")
 UA = "muffin-market-verify/1.0"
 
 # A flow metric with wide coverage. Revenue is reported by every filer and by both sources, which
@@ -86,19 +91,50 @@ def get(path: str):
 
 
 def get_all(path: str):
-    """Every row, a page at a time, until a short page.
+    """Every row, a page at a time from the last whole security, until a short page.
 
     `PGRST_DB_MAX_ROWS` is 1,000, and a limit above it is silently a shorter answer (CLAUDE.md), so
-    the page is that size and the loop, not the limit, decides when the table has ended. The order
-    is total — (security_id, as_of) is unique for one metric and period type, because both are in
-    the primary key — so an offset cannot skip or repeat a row between pages.
+    the page is that size and the loop, not the limit, decides when the table has ended. A full
+    page usually ends part-way through a security, so its last security is dropped and the next
+    page starts at it: no row is skipped or read twice, and every security's rows arrive together.
+    `path` must be ordered by `security_id` first.
     """
     rows = []
+    after = None
     while True:
-        page = get(f"{path}&limit={PAGE}&offset={len(rows)}")
-        rows.extend(page)
+        page = get(f"{path}&limit={PAGE}" + (f"&security_id=gt.{after}" if after else ""))
         if len(page) < PAGE:
+            rows.extend(page)
             return rows
+        last = page[-1]["security_id"]
+        whole = [r for r in page if r["security_id"] != last]
+        if not whole:
+            print(f"::error::one security fills a page of {PAGE}; the keyset cannot advance")
+            sys.exit(1)
+        rows.extend(whole)
+        after = whole[-1]["security_id"]
+
+
+def _self_test() -> int:
+    """The keyset against an in-memory table whose pages end mid-security: every row exactly once."""
+    global get, PAGE
+    table = [{"security_id": f"{i // 3:04d}", "as_of": f"2020-01-0{i % 3 + 1}"} for i in range(20)]
+
+    def fake(path: str):
+        after = path.split("security_id=gt.")[1] if "security_id=gt." in path else ""
+        return [r for r in table if r["security_id"] > after][:PAGE]
+
+    real_get, real_page = get, PAGE
+    get, PAGE = fake, 4
+    try:
+        got = get_all("security_metric?select=x&order=security_id,as_of")
+    finally:
+        get, PAGE = real_get, real_page
+    if got != table:
+        print(f"::error::self-test: the keyset read {len(got)} rows of {len(table)}, or reordered")
+        return 1
+    print(f"  ok   self-test: {len(table)} rows read once each across pages of 4")
+    return 0
 
 
 def pairs_by_gap(rows, key_fields):
@@ -167,4 +203,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_self_test() if "--self-test" in sys.argv else main())
