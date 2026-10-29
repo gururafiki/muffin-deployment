@@ -60,7 +60,8 @@ COLLAPSE_WINDOW = 7
 # Raise it only with a note naming the new pairs; lower it as Phase 5 fixes them.
 #
 # 113 -> 120 on 2026-10-29, the first run that reached this count since 2026-10-23 (the offset
-# paging timed out before it). Read row by row, the pairs written since are the same kinds:
+# paging timed out before it). Which seven are new cannot be told (the edge rewrites `fetched_at`),
+# but the 25 most recently written pairs, read row by row, are the same kinds as the 113:
 # six-month fiscal years Yahoo reports as annual for two Korean REITs (348950.KS, 330590.KS) and
 # RPL.AX, Sigma Healthcare's move from a January to a June year end (SIG.AX), two dates for one
 # ABF.L year, and SEC comparatives off the filer's calendar that the edge's sec-xbrl handler writes
