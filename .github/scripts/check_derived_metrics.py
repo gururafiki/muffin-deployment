@@ -29,6 +29,9 @@ KEY = os.environ["SRV"]
 # urllib's default User-Agent gets a 403 from Cloudflare on supabase.<domain>, which reads exactly
 # like an auth failure and is not.
 UA = "muffin-market-verify/1.0"
+#: How many of each source's newest securities are compared: 14 a source keeps the 40 statement
+#: requests the single sample made.
+SECURITIES_PER_SOURCE = 14
 
 
 def get(path: str):
@@ -54,38 +57,45 @@ def main() -> int:
         print("::error::metric_source_field is EMPTY — every metric would silently produce nothing")
         return 1
 
-    # STATEMENT-DERIVED ROWS ONLY, and that exclusion is the point of this comment.
+    # STATEMENT-DERIVED ROWS ONLY: the sources `metric_source_field` names, because those are the
+    # rows derived FROM A STATEMENT DOCUMENT. Sampling every source by recency once made this check
+    # report "compared 0 values" the day `security-xbrl` started: the newest 300 rows were all
+    # written straight from company facts, none had a statement to compare with, and the guard
+    # fired on its own blind spot rather than on drift. Failing loudly there was correct; a check
+    # that verified nothing must never read as one that passed.
     #
-    # `security-xbrl` writes `security_metric` straight from SEC company facts — it never touches
-    # `security_statement`, so there is no jsonb to compare against and no `metric_source_field`
-    # entry for `sec-xbrl`. Sampling by recency alone, this check began reporting
-    # "compared 0 values" the day the XBRL resource started running: the newest 300 rows were all
-    # XBRL, none resolved a field, and the guard fired on its own blind spot rather than on drift.
-    #
-    # Failing loudly there was correct — a check that verified nothing must never read as one that
-    # passed — but the fix is to compare what this check is actually about. XBRL rows have their
-    # own provenance and their own offline checks (`xbrl-check.ts`); these are the rows derived
-    # FROM A STATEMENT DOCUMENT, which is what `metric_source_field` describes.
-    sources = ",".join(sorted({s for _, s, _ in mapping}))
-    rows = get(
-        "security_metric?select=security_id,metric_code,period_type,as_of,value,source_code"
-        f"&source_code=in.({sources})&order=fetched_at.desc&limit=300"
-    )
-    if not rows:
+    # SAMPLED PER SOURCE, NEWEST FIRST. One sample across every source is filled by whichever
+    # source wrote last: measured 2026-10-28, the newest 300 were all yfinance. And `sec-xbrl` has
+    # a mapping since Phase 5 step 4 (migration 20261028100000) while the edge's `security-xbrl`
+    # still writes `sec-xbrl` metrics straight from company facts, with no statement behind them,
+    # until it retires at step 9: a combined sample taken after one of its runs compares nothing.
+    # Each source gets its own newest rows (~0.4 s each, measured), and its own count.
+    by_sec: dict[str, list[dict]] = {}
+    sources = sorted({s for _, s, _ in mapping})
+    for source in sources:
+        rows = get(
+            "security_metric?select=security_id,metric_code,period_type,as_of,value,source_code"
+            f"&source_code=eq.{urllib.parse.quote(source)}&order=fetched_at.desc&limit=100"
+        )
+        # Group by security so the statement fetch is one request per security, not per metric,
+        # and take a share of the securities from each source.
+        taken: dict[str, list[dict]] = {}
+        for r in rows:
+            if r["security_id"] in taken or len(taken) < SECURITIES_PER_SOURCE:
+                taken.setdefault(r["security_id"], []).append(r)
+        for sec_id, metrics in taken.items():
+            by_sec.setdefault(sec_id, []).extend(metrics)
+    if not by_sec:
         print(
             "::error::security_metric holds no rows derived from a statement document "
-            f"(sources: {sources}) — the derivation has produced nothing"
+            f"(sources: {', '.join(sources)}) — the derivation has produced nothing"
         )
         return 1
 
     checked = 0
+    per_source: dict[str, int] = {s: 0 for s in sources}
     bad: list[str] = []
-    # Group by security so the statement fetch is one request per security, not per metric.
-    by_sec: dict[str, list[dict]] = {}
-    for r in rows:
-        by_sec.setdefault(r["security_id"], []).append(r)
-
-    for sec_id, metrics in list(by_sec.items())[:40]:
+    for sec_id, metrics in by_sec.items():
         periods = {m["as_of"] for m in metrics}
         # `in.()` is a URL, so its chunk size is a LENGTH budget — these are tiny, but keep the
         # habit: a 500-value `in.()` is a ~6.5 KB URL and the proxy answers a bare 502.
@@ -126,6 +136,7 @@ def main() -> int:
                 if not isinstance(raw, (int, float)):
                     continue
                 checked += 1
+                per_source[m["source_code"]] += 1
                 # Exact, not approximate. The derivation copies the number; it does not compute it.
                 if float(raw) != float(m["value"]):
                     bad.append(
@@ -150,6 +161,8 @@ def main() -> int:
         return 1
 
     print(f"  ok   derived metrics match their filing = {checked} values compared")
+    for source, n in per_source.items():
+        print(f"  ok   derived metrics compared, {source} = {n}")
     return 0
 
 
