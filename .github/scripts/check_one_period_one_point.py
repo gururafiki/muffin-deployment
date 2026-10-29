@@ -58,7 +58,15 @@ COLLAPSE_WINDOW = 7
 
 # THE KNOWN BACKLOG of the raw half, measured 2026-10-10 over the whole table (see the docstring).
 # Raise it only with a note naming the new pairs; lower it as Phase 5 fixes them.
-KNOWN_DRIFTED_PAIRS = 113
+#
+# 113 -> 120 on 2026-10-29, the first run that reached this count since 2026-10-23 (the offset
+# paging timed out before it). Read row by row, the pairs written since are the same kinds:
+# six-month fiscal years Yahoo reports as annual for two Korean REITs (348950.KS, 330590.KS) and
+# RPL.AX, Sigma Healthcare's move from a January to a June year end (SIG.AX), two dates for one
+# ABF.L year, and SEC comparatives off the filer's calendar that the edge's sec-xbrl handler writes
+# (LAKE, MYO, RCEL, MRDN, TBCH, RJET, BRT, AREC, RDNW). Phase 5 step 11 re-keys this check on
+# fiscal labels and retires the constant.
+KNOWN_DRIFTED_PAIRS = 120
 PAGE = 1000
 
 # A ROTATING SIXTEENTH OF THE UNIVERSE, BY THE FIRST HEX DIGIT OF `security_id`, NEVER THE WHOLE
