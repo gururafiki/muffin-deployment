@@ -74,6 +74,10 @@ QUERIES = [
     # of them. Measured — the two forms return different rows — so that probe was timing a query the
     # app never sends, which is precisely what this guard exists to prevent.
     ("stock leadership", "security_leadership?select=name,title,pay,pay_currency,is_ceo&security_id=eq.09a147af-5ec6-45f3-8db7-fe0f2403e6ed&order=is_ceo.desc,pay.desc.nullslast&limit=12"),
+    # ── The insider card (`use-insider-activity.ts`). The summary reads `insider_trade`, which the
+    # SEC lanes take from ~70,000 rows to ~8 million when every insider quarter since 2006 lands,
+    # and since 2026-10-30 it also asks which days the lane has collected. Apple, ~1 ms in 2026-10.
+    ("stock insider card", "security_insider_summary?select=buys,sells,buyers,sellers,net_shares,trades,latest&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834"),
     # ── The business-lines section (Sankey + donuts), added when the stock page first read the
     # segment views. Apple, because it is the deepest filer here: three axes, a nested split, and
     # eighteen years of filings behind the one period the view must choose.
