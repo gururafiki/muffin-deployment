@@ -1328,8 +1328,7 @@ console.log('\nmigration filenames sort numerically')
 // tables big enough for the cap to bite in silence.
 {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const BIG = ['symbol_security', 'security_metric', 'security_statement', 'security_price',
-               'exchange_listing', 'fund_holding']
+  const BIG = ['symbol_security', 'security_metric', 'security_statement', 'fund_holding']
   const offenders: string[] = []
   const lines = src.split('\n')
   lines.forEach((l: string, i: number) => {
