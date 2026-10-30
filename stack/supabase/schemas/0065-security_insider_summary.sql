@@ -8,7 +8,12 @@ begin
   end if;
 end $$;
 create view market.security_insider_summary as
-SELECT security_id,
+WITH lane_days AS MATERIALIZED (
+         SELECT DISTINCT insider_trade.filing_date
+           FROM market.insider_trade
+          WHERE insider_trade.accession_number IS NOT NULL AND insider_trade.filing_date >= (CURRENT_DATE - 90)
+        )
+ SELECT security_id,
     count(*) FILTER (WHERE direction = 'Acquisition'::text) AS buys,
     count(*) FILTER (WHERE direction = 'Disposition'::text) AS sells,
     count(DISTINCT owner_name) FILTER (WHERE direction = 'Acquisition'::text) AS buyers,
@@ -17,5 +22,7 @@ SELECT security_id,
     max(transaction_date) AS latest,
     count(*) AS trades
    FROM market.insider_trade t
-  WHERE transaction_date >= (CURRENT_DATE - 90)
+  WHERE transaction_date >= (CURRENT_DATE - 90) AND (accession_number IS NOT NULL OR NOT (EXISTS ( SELECT 1
+           FROM lane_days d
+          WHERE d.filing_date = t.filing_date)))
   GROUP BY security_id;
