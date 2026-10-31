@@ -17,7 +17,14 @@ begin;
 --   DRAINER  falls 1000 -> 300           and its negative cache is FLAT  -> draining
 --   STUCK    sits at 5000 throughout                                     -> FLAT
 --   MARKER   falls 1000 -> 300 and its negative cache RISES to match     -> draining_by_marking
---   NEWBIE   has three samples only                                      -> insufficient_history
+--   NEWBIE   has three samples only, all recent                          -> insufficient_history
+--   RETIRED  sat at 1035 and stopped being sampled three days ago      -> absent
+--
+-- RETIRED is the 2026-10-31 case: a `pending_*` view dropped with its resource leaves its last
+-- samples in the seven-day window, and their zero slope read as FLAT for a week. It has 27
+-- samples, as flat as STUCK's, so only its age can tell it apart: a rule that drops it for having
+-- few samples, or for any other reason than not being sampled any more, fails STUCK or NEWBIE.
+-- Its last sample is three days old, so a staleness bound of a week keeps it and fails here.
 insert into market.backlog_negative_cache (backlog, missing_column) values
   ('pending_zz_drainer', 'zz_drainer_missing_at'),
   ('pending_zz_marker',  'zz_marker_missing_at')
@@ -40,6 +47,13 @@ begin
       (ts, 'pending_zz_grower',  300 + (i * 700 / 47))
     on conflict do nothing;
 
+    -- Sampled like STUCK until its view was dropped, three days ago.
+    if ts < now() - interval '3 days' then
+      insert into market.backlog_sample (sampled_at, backlog, depth)
+        values (ts, 'pending_zz_retired', 1035)
+      on conflict do nothing;
+    end if;
+
     -- The drainer's cache does not move; the marker's rises in step with its fall, which is what
     -- makes the two indistinguishable by depth alone.
     insert into market.universe_sample (sampled_at, metric, value) values
@@ -48,10 +62,10 @@ begin
     on conflict do nothing;
   end loop;
 
-  -- Three samples is not a trend.
+  -- Three samples is not a trend. A backlog this new was first sampled hours ago.
   for i in 0..2 loop
     insert into market.backlog_sample (sampled_at, backlog, depth)
-      values (now() - interval '7 days' + (i * interval '3.5 hours'), 'pending_zz_newbie', 900)
+      values (now() - interval '10 hours' + (i * interval '3.5 hours'), 'pending_zz_newbie', 900)
     on conflict do nothing;
   end loop;
 end $$;
@@ -108,7 +122,18 @@ begin
                     'confident nonsense for its first days', st;
   end if;
 
-  raise notice '  ok  draining, FLAT, draining_by_marking and insufficient_history are distinguished';
+  -- A backlog nothing samples any more is not a stalled one.
+  select state into st from market.backlog_drain where backlog = 'pending_zz_retired';
+  if found then
+    raise exception 'a backlog last sampled three days ago was called % — its view was dropped with its '
+                    'resource, and its old samples kept "A non-empty backlog has been FLAT for a week" '
+                    'firing on a queue nothing is meant to drain', st;
+  end if;
+  if (select count(*) from market.backlog_sample where backlog = 'pending_zz_retired') < 6 then
+    raise exception 'the RETIRED fixture has too few samples to be FLAT; it would be absent for the wrong reason';
+  end if;
+
+  raise notice '  ok  draining, FLAT, draining_by_marking and insufficient_history are distinguished, and a retired backlog is absent';
 end $$;
 
 rollback;
