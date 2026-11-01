@@ -215,6 +215,29 @@ It prints the request count, the run-key range, and every tag with its distinct 
   `dg.build_schedule_context(instance=dg.DagsterInstance.get(), scheduled_execution_time=…)`. That
   is how muffin-ingest#78 was evaluated against production's run storage before its PR.
 
+## Before a sensor is started
+
+**Count a stopped sensor's first tick before starting it.** Its first tick has no cursor, and a
+sensor that treats "never collected" as due can request a whole grid on it, at whatever time the
+start or the roll happens. Read-only, and it stores no cursor:
+
+```bash
+ssh muffin "$G sensor-dry-run --sensor sec_filers_due" < scripts/dagster_gql.py                # first tick
+ssh muffin "$G sensor-dry-run --sensor sec_filers_due --cursor 2026-10-31" < scripts/dagster_gql.py
+```
+
+It prints the run count, the next cursor, any partitions added or removed, every tag with its
+distinct values, and the leaf entries of each mapping the run configs name.
+
+- **A run count is not a work count when runs cover chunks.** `sec_filers_due` requests one run per
+  50-filer chunk holding a due filer, and its 30-day floor is hash-spread, so ~120 filers a day land
+  in ~60 chunks whether or not anything else is due. On 2026-11-01, mid-grid, the first tick was 74
+  runs for 2,475 never-collected filers plus 129 on the floor; after the grid it is the floor alone,
+  in about as many runs. Count the due filers with the module's own rule in the
+  `muffin_muffin-ingest` container (`partitions.on_floor`, and the grid less
+  `get_materialized_partitions(raw_sec_companyfacts)`).
+- The sensor's own log line (`N filers due in M runs`) is not returned by a dry run.
+
 ## Replay stage 2 on the stored files
 
 No provider call. It reproduces exactly what a partition's rule saw:

@@ -16,6 +16,9 @@ Commands (arguments are plain tokens, so they survive the ssh single quotes):
                     `run_tags` (only scheduler-created runs do), so pass --max-runtime.
     backfill-status --id <backfillId>
     schedule-dry-run --schedule <name> --at 2026-09-26T00:00:00      read-only: what a tick would ask
+    sensor-dry-run   --sensor <name> [--cursor <value>]               read-only: what a tick would ask
+                    with no --cursor it evaluates a FIRST tick, which is what starting a
+                    stopped sensor does; pass the stored cursor to see its next tick
 """
 
 from __future__ import annotations
@@ -85,10 +88,17 @@ def main() -> None:
     dry = sub.add_parser("schedule-dry-run")
     dry.add_argument("--schedule", required=True)
     dry.add_argument("--at", required=True, help="the tick time, ISO, read as UTC")
+    sensor = sub.add_parser("sensor-dry-run")
+    sensor.add_argument("--sensor", required=True)
+    sensor.add_argument("--cursor", help="omit to evaluate a first tick (no stored cursor)")
     args = parser.parse_args()
 
     if args.command == "schedule-dry-run":
         schedule_dry_run(args.schedule, args.at)
+        return
+
+    if args.command == "sensor-dry-run":
+        sensor_dry_run(args.sensor, args.cursor)
         return
 
     if args.command == "repos":
@@ -226,6 +236,77 @@ def schedule_dry_run(schedule: str, at: str) -> None:
         shown = ", ".join(f"{v} x{n}" for v, n in counter.most_common(3))
         more = f" (+{len(counter) - 3} more)" if len(counter) > 3 else ""
         print(f"  {key}: {len(counter)} distinct — {shown}{more}")
+
+
+
+def sensor_dry_run(sensor: str, cursor: str | None) -> None:
+    """Evaluate one tick of a sensor with the DEPLOYED code, against production's instance.
+
+    Launches nothing and stores no cursor. With no cursor it is the tick a sensor takes when it is
+    started for the first time, which is the one to count before starting a stopped sensor: a
+    sensor that treats "never collected" as due can request a whole grid on that tick, at whatever
+    time the start happens (measured 2026-10-30 for `sec_filers_due`: 3,722 keys). Like the
+    schedule dry run it shows the RunRequests' own tags, not the job's `run_tags`.
+    """
+    query = """mutation($s: SensorSelector!, $c: String) { sensorDryRun(selectorData: $s, cursor: $c) {
+        __typename
+        ... on DryRunInstigationTick { evaluationResult { skipReason cursor error { message }
+              dynamicPartitionsRequests { partitionsDefName partitionKeys type }
+              runRequests { runKey jobName runConfigYaml tags { key value } } } }
+        ... on PythonError { message } ... on SensorNotFoundError { message }
+        ... on UnauthorizedError { message } } }"""
+    selector = {
+        "repositoryLocationName": LOCATION,
+        "repositoryName": REPOSITORY,
+        "sensorName": sensor,
+    }
+    result = gql(query, {"s": selector, "c": cursor})
+    tick = (result.get("data") or {}).get("sensorDryRun") or {}
+    if tick.get("__typename") != "DryRunInstigationTick":
+        print(json.dumps(result, indent=1)[:3000])
+        return
+    evaluation = tick["evaluationResult"]
+    if evaluation.get("error"):
+        print(json.dumps(evaluation["error"], indent=1)[:3000])
+        return
+    requests = evaluation.get("runRequests") or []
+    print(f"{sensor} from cursor {cursor!r}: {len(requests)} run request(s); "
+          f"next cursor {evaluation.get('cursor')!r}")
+    if evaluation.get("skipReason"):
+        print(f"  skip: {evaluation['skipReason']}")
+    for change in evaluation.get("dynamicPartitionsRequests") or []:
+        keys = change.get("partitionKeys") or []
+        print(f"  {change['type']} {len(keys)} key(s) in {change['partitionsDefName']}")
+    if not requests:
+        return
+    print(f"  run keys: {requests[0]['runKey']} .. {requests[-1]['runKey']}")
+    values: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    for request in requests:
+        for tag in request["tags"]:
+            values[tag["key"]][tag["value"]] += 1
+    for key, counter in sorted(values.items()):
+        shown = ", ".join(f"{v} x{n}" for v, n in counter.most_common(3))
+        more = f" (+{len(counter) - 3} more)" if len(counter) > 3 else ""
+        print(f"  {key}: {len(counter)} distinct — {shown}{more}")
+    # A run's config is YAML. Count its leaf entries per mapping path across the runs (for
+    # `sec_filers_due`, the filers each run names as filed), without a YAML parser: the script runs
+    # on whatever interpreter the container has.
+    leaves: collections.Counter[str] = collections.Counter()
+    for request in requests:
+        stack: list[tuple[int, str]] = []
+        for line in request["runConfigYaml"].splitlines():
+            text = line.strip()
+            if not text or text.startswith("-"):
+                continue
+            indent = len(line) - len(line.lstrip())
+            key, _, value = text.partition(":")
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            if value.strip() and value.strip() != "{}":
+                leaves[".".join(k for _, k in stack)] += 1
+            stack.append((indent, key.strip("'\"")))
+    for path, n in sorted(leaves.items()):
+        print(f"  config {path}: {n} entr{'y' if n == 1 else 'ies'}")
 
 
 if __name__ == "__main__":
