@@ -25,6 +25,7 @@ on:
           - reclaim-old-docker-root
           - roll-ingest
           - prune-images
+          - prune-volumes
           - drop-retired-raw
         default: checkpoint-report
       thread_id:
@@ -32,7 +33,7 @@ on:
         type: string
         default: ""
       confirm:
-        description: prune-thread needs delete; migrate-docker-root needs migrate; reclaim-old-docker-root needs reclaim; drop-retired-raw needs drop
+        description: prune-thread needs delete; migrate-docker-root needs migrate; reclaim-old-docker-root needs reclaim; drop-retired-raw needs drop; prune-volumes needs prune
         type: string
         default: "dry-run"
 concurrency:
@@ -166,6 +167,50 @@ jobs:
                 exit 1
               fi
             '
+
+      # AN ANONYMOUS VOLUME NOTHING USES IS LEFT BEHIND BY A CONTAINER THAT IS GONE, AND THEY PILE UP
+      # ON /mnt/data. An image that declares `VOLUME` gets a fresh anonymous volume per container
+      # unless something is mounted there, and `docker rm -f` without `-v` keeps it. Measured
+      # 2026-11-01: 152 of them, 11.1 GB, when the disk was at 76% -- 84 throwaway Postgres
+      # databases from schema replays on the node, 30 RabbitMQ data directories (one per
+      # restart), 4 Redis dumps, 34 empty. Both sources are fixed at the source; this reclaims
+      # what they left and anything like them.
+      #
+      # ONLY ANONYMOUS, ONLY UNUSED. The list is `dangling=true` (no container references it, running
+      # or stopped) AND the `com.docker.volume.anonymous` label Docker puts on volumes it named
+      # itself, so a named volume such as the kept langgraph-data rollback can never be selected.
+      # The step removes exactly the volumes it printed, by name, and `docker volume rm` refuses one
+      # a container has started using since. Without confirm=prune it only reports.
+      - name: Remove anonymous volumes no container uses
+        if: inputs.action == 'prune-volumes'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          # The value reaches the remote command line, so only two literals may pass.
+          case "$CONFIRM" in prune|dry-run) ;; *) echo "::error::confirm must be prune or dry-run"; exit 2;; esac
+          ssh -i ~/.ssh/oci_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 ubuntu@"$NODE_IP" "CONFIRM=$CONFIRM bash -s" <<'REMOTE'
+          set -euo pipefail
+          echo "== before =="; df -h /mnt/data | tail -1
+          root="$(docker info --format '{{.DockerRootDir}}')/volumes"
+          mapfile -t vols < <(docker volume ls -q -f dangling=true -f label=com.docker.volume.anonymous)
+          echo "${#vols[@]} anonymous volume(s) no container uses"
+          [ "${#vols[@]}" -gt 0 ] || exit 0
+          # What each one holds, by its first entry, so the report says what is being removed:
+          # PG_VERSION is a Postgres data directory, .erlang.cookie RabbitMQ, dump.rdb Redis.
+          for v in "${vols[@]}"; do
+            kind="$(sudo ls -A "$root/$v/_data" 2>/dev/null | head -1 || true)"
+            mb="$(sudo du -sm "$root/$v/_data" 2>/dev/null | cut -f1 || true)"
+            echo "${kind:-<empty>} ${mb:-0}"
+          done | awk '{n[$1]++; s[$1]+=$2; t+=$2} END {for (k in n) printf "  %-16s %4d volume(s) %7d MB\n", k, n[k], s[k]; printf "  total %d MB\n", t}'
+          if [ "$CONFIRM" = "prune" ]; then
+            docker volume rm "${vols[@]}" > /dev/null
+            echo "removed ${#vols[@]}"
+            echo "== after =="; df -h /mnt/data | tail -1
+          else
+            echo "DRY RUN (set confirm=prune to remove them)"
+          fi
+          REMOTE
 
       # A RETIRED LANE'S RAW FILES ARE ITS ROLLBACK, SO THEY GO ONLY AFTER THE LANE HAS GONE FROM THE
       # CODE. Each name below is a stage-1 asset whose replacement has run clean and whose deferred

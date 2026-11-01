@@ -48,6 +48,9 @@ volumes:
   # from files and would survive without this; anything anyone edits in the browser would not.
   grafana-data:
   portainer-data:
+  # RabbitMQ's data directory. Without a mount of our own, the image's VOLUME made every restart
+  # create a new anonymous volume and abandon the last one (see the service).
+  firecrawl-rabbitmq-data:
 
 networks:
   muffin-net:
@@ -967,6 +970,16 @@ services:
     # docs/deferred/2026-10-27-firecrawl-rabbitmq-is-oom-killed-every-few-days.md
     environment:
       RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit total_memory_available_override_value 536870912 -ra wal_max_size_bytes 32000000"
+    # ONE NAMED VOLUME AND A FIXED HOSTNAME. The image declares `VOLUME /var/lib/rabbitmq`, so with
+    # no mount of ours every restart created a fresh anonymous volume and left the previous one
+    # behind: 30 of them, ~5 GB, by 2026-11-01. A named volume is reused across restarts. RabbitMQ
+    # names its data directory after the node (rabbit@<hostname>), and a Swarm task's hostname is
+    # its container id, so without the fixed hostname each restart would start a new directory
+    # inside the named volume instead. `rabbitmq:3` is the final 3.13 line (3.13.7 running), so a
+    # pull moves only between patch releases, which need no feature-flag step over kept data.
+    hostname: firecrawl-rabbitmq
+    volumes:
+      - firecrawl-rabbitmq-data:/var/lib/rabbitmq
     networks:
       - muffin-net
     healthcheck:

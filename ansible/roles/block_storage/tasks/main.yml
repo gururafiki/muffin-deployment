@@ -23,6 +23,24 @@
       on it — refusing to continue rather than silently running on the boot volume.
   when: not data_device.stat.exists
 
+# A VOLUME GROWN UNDER A RUNNING NODE IS INVISIBLE UNTIL THE KERNEL RESCANS IT.
+#
+# Terraform resizes the block volume online, but the kernel keeps the old device size until a
+# rescan, and `resizefs: true` below compares the filesystem with the size the kernel reports. So
+# without this the filesystem stays at its old size and the task reports nothing to do. This is the
+# rescan OCI documents for a paravirtualized volume, the same one the boot volume's pre_task does in
+# muffin_stack.yml; on an unchanged volume it changes nothing.
+- name: Rescan the data volume so a grown size is visible
+  ansible.builtin.shell: |
+    set -euo pipefail
+    dev=$(readlink -f "{{ data_volume_device_hint }}")
+    dd iflag=direct if="$dev" of=/dev/null count=1 status=none
+    echo 1 > "/sys/class/block/$(basename "$dev")/device/rescan"
+    blockdev --getsize64 "$dev"
+  args:
+    executable: /bin/bash
+  changed_when: false
+
 # The module's NON-force default IS the mkfs guard: it refuses to reformat a device that already
 # carries a filesystem. That is what makes this safe to re-run on every single deploy.
 #

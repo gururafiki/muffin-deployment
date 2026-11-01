@@ -5,7 +5,7 @@
 # Usage: see ../SKILL.md. Read-only on production: it touches only its own container and directory.
 set -uo pipefail
 C=claude-replay-pg
-docker rm -f $C >/dev/null 2>&1 || true
+docker rm -fv $C >/dev/null 2>&1 || true
 docker run -d --name $C -e POSTGRES_PASSWORD=postgres -v /tmp/claude-replay/repo:/repo:ro -v /tmp/claude-replay/mut:/mut:ro postgres:17-alpine >/dev/null
 for i in $(seq 1 60); do
   docker exec -e PGPASSWORD=postgres $C psql -h localhost -U postgres -q -c "create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;" >/dev/null 2>&1 && break
@@ -29,4 +29,4 @@ for f in $(ls /tmp/claude-replay/mut/*.sql 2>/dev/null); do
 done
 sig=$(X "psql -h localhost -U postgres -tAc \"$SIG\"")
 X "psql -h localhost -U postgres -q -v ON_ERROR_STOP=1 -f $TEST > /tmp/t 2>&1 && echo \"ok the guard passes again after restoring ($sig)\" || echo 'RESTORE FAILED'"
-docker rm -f $C >/dev/null
+docker rm -fv $C >/dev/null
