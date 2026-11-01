@@ -66,11 +66,11 @@ under the agent. Before rebuilding a wrapper to change one package:
 | 03:30–~06:00 | the company lane (`yahoo_companies`, since 2026-10-18) holds the `yfinance` and `sql` pools; the derived runs created meanwhile wait until it ends (05:51 on its first day) |
 | while `muffin-db-backup.sh` runs | every deploy ends with a full `pg_dump`, and anon reads time out while it runs: measure latency only after `pgrep -fc '[m]uffin-db-backup.sh'` reads 0 |
 
-A deploy no longer restarts the Dagster services (the roll pins the digest, #431 and #436), so
-only a roll kills runs. Nine deploys from 2026-10-18 to 10-20 left all three on the 10-18 roll.
-Every one of them came straight after a roll, though, so none has yet shown the pin holding against
-a newer `:latest`. Until one does, merge an ingest PR only when you are about to roll it. A deploy
-inside a window still competes with the runs for the database.
+A deploy does not restart the Dagster services (the roll pins the digest, #431 and #436), so
+only a roll kills runs. Seen both ways: nine deploys straight after a roll (2026-10-18 to 10-20),
+and on 2026-11-01 a deploy that ran after muffin-ingest#157's image became `:latest` left all three
+on the pinned digest. So an ingest PR can merge whenever it is ready; it goes live at the next
+roll. A deploy inside a window still competes with the runs for the database.
 
 ### Roll the ingest image
 
