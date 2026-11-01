@@ -220,8 +220,8 @@ groups:
       description: 'Per-service, because the HOST looks fine when this happens. openbb-api was OOM-killed at its 1 GB limit by one exploratory request and every market tool went with it. Measured 2026-08-27:
         supabase-kong at 83.2% of its 512 MB and firecrawl-api at 70.2% of 4 GB, so this is not hypothetical. Sourced from `docker stats` via node-exporter, not cAdvisor, which cannot identify a container
         under Docker''s containerd image store.'
-  - uid: muffin-cache-hit-ratio-collapsed
-    title: The provider cache has stopped serving hits
+  - uid: muffin-cache-canary-missed
+    title: The provider cache did not store its canary
     condition: C
     data:
     - refId: A
@@ -231,7 +231,9 @@ groups:
       datasourceUid: muffin-prometheus
       model:
         refId: A
-        expr: sum(rate(muffin_provider_requests_total{cache_status="HIT"}[1h])) / clamp_min(sum(rate(muffin_provider_requests_total{cache_status=~"HIT|MISS|EXPIRED|STALE"}[1h])), 0.0001) * 100
+        # 1 when the newest canary run's SECOND request was a HIT and that run is under two hours
+        # old; 0 when it missed or the canary stopped running.
+        expr: min(muffin_cache_canary_hit) * (time() - max(muffin_cache_canary_timestamp_seconds) < bool 7200)
         instant: true
     - refId: B
       datasourceUid: __expr__
@@ -250,17 +252,20 @@ groups:
         - evaluator:
             type: lt
             params:
-            - 5
-    noDataState: NoData
+            - 1
+    # A canary that has vanished is a blind guard, which is worth hearing about.
+    noDataState: Alerting
     execErrState: Alerting
-    for: 6h
+    # Two hourly runs in a row, so one request caught by an http-cache restart does not page.
+    for: 2h
     labels:
       muffin: infra
     annotations:
-      summary: Cache hit ratio has been under 5% for 6 hours
-      description: Both ways this breaks are SILENT BY DESIGN. `inactive=` evicts by last access and defaults to 10 minutes, so a `proxy_cache_valid 30d` caches nothing while looking correct; and a cache
-        key larger than proxy_buffer_size makes nginx log one line and stop caching while still answering. The only symptom of either is a provider rate limit nobody connects to it. `clamp_min` keeps a
-        quiet period from dividing by zero.
+      summary: http-cache did not store its canary on two hourly runs in a row
+      description: '`muffin-cache-canary.sh` asks http-cache''s `/canary` twice every hour, and the second answer must be a HIT. Its origin is http-cache itself, so no provider can fail it; a MISS means the cache
+        stopped storing (a full or unwritable cache directory, a lost `proxy_cache`, a key that no longer repeats). Replaces the hit-ratio rule, which measured how much repeat traffic there was and
+        fired on quiet days with the cache working (umbrella docs/deferred/2026-10-31-the-cache-hit-ratio-alert-measures-the-traffic-mix.md). Read `docker service logs muffin_http-cache` for the
+        two `/canary` lines, and `/var/lib/node-exporter/muffin_cache_canary.prom` on the node for what the last run saw.'
   - uid: muffin-disk-filling
     title: A filesystem is over 80% full
     condition: C
@@ -722,3 +727,11 @@ groups:
     annotations:
       summary: "{{ $values.B }} Dagster asset check(s) at ERROR severity failed after passing within 14 days"
       description: "A check that passed recently and fails now has regressed: read its metadata in the Dagster UI (Asset checks), and the Pipeline dashboard's 'Asset checks: the latest evaluation of each'. A check that has never passed is a known state and does not fire this: `no_company_is_far_behind_the_rotation` reads ERROR until the company lane's first rotation completes (2026-10-24). WARN checks never fire it."
+
+# A RULE REMOVED FROM THIS FILE STAYS IN GRAFANA until it is deleted here: provisioning creates and
+# updates by uid and never removes. Deleting a uid Grafana does not have is harmless, so a fresh
+# Grafana starts cleanly (checked on 12.3.1, 2026-11-01).
+deleteRules:
+  # The hit ratio, replaced by muffin-cache-canary-missed on 2026-11-01.
+  - orgId: 1
+    uid: muffin-cache-hit-ratio-collapsed

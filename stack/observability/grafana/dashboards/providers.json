@@ -460,6 +460,114 @@
    ]
   },
   {
+   "type": "stat",
+   "title": "Cache canary \u2014 did the second request HIT?",
+   "description": "Every hour `muffin-cache-canary.sh` asks http-cache's `/canary` twice; the second answer must be a HIT. Its origin is http-cache itself, so no provider can fail it, and a MISS means the cache stopped storing. Replaces the hit ratio as the alert (muffin-cache-canary-missed): the ratio measures how much repeat traffic there is, and fell under 5% on quiet days while the cache worked. Age is how long ago the canary last ran; over two hours means it has stopped.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 53
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "MISS",
+         "color": "red"
+        },
+        "1": {
+         "text": "HIT",
+         "color": "green"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byFrameRefID",
+       "options": "B"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "mappings",
+        "value": []
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "red",
+           "value": 7200
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "colorMode": "background",
+    "graphMode": "none",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "expr": "min(muffin_cache_canary_hit)",
+     "legendFormat": "second request"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "expr": "time() - max(muffin_cache_canary_timestamp_seconds)",
+     "legendFormat": "age"
+    }
+   ]
+  },
+  {
    "type": "timeseries",
    "title": "Ingest worker requests, by provider and outcome \u2014 counted in process",
    "description": "Every provider request the Dagster worker makes, counted where it is made (`muffin_ingest_provider_requests_total`, served by the code location's exporter on :9102). This sees what http-cache cannot: openbb's in-process calls and, since 2026-10-18, the company lane's Yahoo endpoints, each its own `provider` label: `yahoo` is the chart (prices, dividends and splits), `yahoo-summary` the quoteSummary, `yahoo-timeseries` the statements (two a company, annual and quarterly), `yahoo-session` the cookie and crumb. On the company lane's first day: 1,731 summaries and 3,457 statement requests. Any outcome other than `answered` is worth reading: `refused` is the provider saying no, `transport` a call that never answered. Counters reset when the code location restarts; `increase` absorbs that.",

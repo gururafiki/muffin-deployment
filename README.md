@@ -827,7 +827,7 @@ therefore comes from `refresh_run.error` and `report`, not from the cache counte
 | Dashboard | Answers |
 |---|---|
 | **Pipeline** | Is ingestion working? Backlog depth, run outcomes, rows written, recent failures |
-| **Providers & cache** | Hit ratio, requests/s and p95 per provider, non-2xx by class |
+| **Providers & cache** | Hit ratio, requests/s and p95 per provider, non-2xx by class, and the hourly cache canary |
 | **Universe** | Securities/holdings/coverage over time, negative-cache populations, table sizes |
 | **Node & services** | Per-container memory **as a share of its own limit**, CPU, disk, Traefik |
 
@@ -848,7 +848,7 @@ shows firing alerts — it just cannot mail them.
 | **Backlog flat ≥24h while runs report ok** | **The stall signature — five occurrences.** `written: 7386` twice, byte-identical |
 | Negative cache +20% in one interval | ~8,300 securities marked unanswerable in one afternoon (2026-08-13) |
 | Container >85% of its own limit | openbb-api OOM-killed at 1 GB by one probe; supabase-kong measured 81% |
-| Cache hit ratio collapsed | `inactive=` and an oversized key both break it SILENTLY |
+| **The cache did not store its canary**, twice in a row | `inactive=` and an oversized key both stop caching SILENTLY. Asked of http-cache's own `/canary` every hour, since 2026-11-01: the hit ratio it replaced measured how much repeat traffic there was, and fired on quiet days with the cache working |
 | Filesystem >80% | `/` was at 70% on 2026-08-27 and grows with every image pull |
 | **A correctness invariant is broken** | Any `market.data_defect` row > 0. An all-zero CUSIP once merged Accenture, Seagate, TE Connectivity and NXP into ONE security, with no error anywhere |
 | **A metric's median moved >3x** | The fraction/percent confusion, which has bitten three times — invisible per row, obvious in aggregate |
