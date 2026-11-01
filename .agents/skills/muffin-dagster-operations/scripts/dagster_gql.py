@@ -5,7 +5,11 @@
 
 Commands (arguments are plain tokens, so they survive the ssh single quotes):
     repos
-    backfill        --assets a,b --partitions 2026-09-11,2026-09-12 --reason <tag> [--dry-run]
+    backfill        --assets a,b --partitions 2026-09-11,2026-09-12 --reason <tag>
+                    [--op-config op.key=value,…] [--dry-run]
+                    every run of the backfill gets the op config: a stage-2 replay over files on disk
+                    is `--op-config sec_filer_facts.reparse=true`, without which a filer whose raw
+                    was fetched by another run is skipped as unchanged
     materialize     --assets a --reason <tag> [--checks a:check,…] [--dry-run]
                     unpartitioned assets, one run. An asset's checks run ONLY when named in
                     --checks: the launch sends an explicit check selection, and an empty one means
@@ -58,6 +62,20 @@ def tags(reason: str, max_runtime: int | None = None) -> list[dict[str, str]]:
     return out
 
 
+def op_config(text: str) -> dict:
+    """`op.key=value`, comma-separated, as run config. Plain tokens, so they survive ssh quoting."""
+    run_config: dict = {}
+    for item in [i for i in text.split(",") if i]:
+        path, value = item.split("=", 1)
+        op, field = path.split(".", 1)
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value
+        run_config.setdefault("ops", {}).setdefault(op, {}).setdefault("config", {})[field] = parsed
+    return run_config
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -70,6 +88,7 @@ def main() -> None:
         p.add_argument("--max-runtime", type=int, help="seconds; the run monitor ends the run past it")
         if name == "backfill":
             p.add_argument("--partitions", required=True)
+            p.add_argument("--op-config", default="", help="op.key=value,…, given to every run")
         else:
             p.add_argument("--checks", default="", help="asset:check,… to run in the same run")
     job = sub.add_parser("job")
@@ -115,16 +134,7 @@ def main() -> None:
         mutation = """mutation($p: ExecutionParams!) { launchRun(executionParams: $p) {
             __typename ... on LaunchRunSuccess { run { runId status } }
             ... on RunConfigValidationInvalid { errors { message } } ... on Error { message } } }"""
-        # Plain tokens, so they survive the ssh quoting: `op.key=value`, comma-separated.
-        run_config: dict = {}
-        for item in [i for i in args.op_config.split(",") if i]:
-            path, value = item.split("=", 1)
-            op, field = path.split(".", 1)
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                parsed = value
-            run_config.setdefault("ops", {}).setdefault(op, {}).setdefault("config", {})[field] = parsed
+        run_config = op_config(args.op_config)
         for key in [k for k in args.partitions.split(",") if k]:
             params = {
                 "selector": {
@@ -163,6 +173,7 @@ def main() -> None:
                 "fromFailure": False,
                 "title": args.reason,
                 "tags": tags(args.reason, args.max_runtime),
+                "runConfigData": op_config(args.op_config),
             }
         }
         mutation = """mutation($params: LaunchBackfillParams!) { launchPartitionBackfill(backfillParams: $params) {
