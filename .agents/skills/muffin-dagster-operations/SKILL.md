@@ -170,6 +170,13 @@ ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
   hand launch for a company visited this week asks nothing; `raw_yahoo_company.force=true` refetches
   its summary and statements. For one stock, the Refresh button (`security-refresh`) does the same. `backfill` runs no checks, and `materialize` takes no
   partition. Nothing launched by hand moves the price rotation, which reads only its schedule's runs.
+- **A stage-2 replay over files on disk needs its lane's re-parse switch, or it does nothing.**
+  `backfill` takes `--op-config` too, and gives it to every run the backfill creates. The SEC filer
+  lane's stage 2 parses only filers whose raw was fetched by the same run, so on 2026-11-01 a
+  replay of `sec_filing,filer_profile,security_former_name,sec_fiscal_calendar,sec_statement`
+  succeeded and reported `filers_unchanged=1`, writing nothing. With
+  `--op-config sec_filer_facts.reparse=true` it re-read Equinor's files and replaced its calendar,
+  with no SEC request. Read the run's counters before believing a replay.
 - **`--max-runtime SECONDS` gives a hand-launched run its own limit.** Without it the monitor
   allows six hours. The monitor checks at its next poll, so a run can overshoot by about two
   minutes: on 2026-10-04 a run with a 30 s limit was cancelled after 104 s.
