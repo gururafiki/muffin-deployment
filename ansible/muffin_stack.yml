@@ -549,6 +549,22 @@
         minute: "*/15"
         job: "/usr/local/bin/muffin-disk-usage.sh slow"
 
+    # THE CACHE CANARY: http-cache's `/canary` asked twice in a row, and the second answer must be a
+    # HIT. It replaced the hit-ratio alert on 2026-11-01 (rules.yml `muffin-cache-canary-missed`),
+    # because the ratio measured how much repeat traffic there was rather than whether the cache
+    # stores. Hourly, off the hour, since the alert waits for two runs in a row.
+    - name: Install the http-cache canary
+      copy:
+        src: "{{ muffin_template_dir }}/observability/collectors/muffin-cache-canary.sh"
+        dest: /usr/local/bin/muffin-cache-canary.sh
+        mode: "0755"
+
+    - name: Ask the http-cache canary every hour
+      cron:
+        name: muffin-cache-canary
+        minute: "17"
+        job: "/usr/local/bin/muffin-cache-canary.sh"
+
     # The superseded collector, its cron and the file it wrote. Left in place it would keep
     # overwriting muffin_http_cache_bytes from the stale path every minute, and the new value would
     # flap between the two depending on which ran last.
