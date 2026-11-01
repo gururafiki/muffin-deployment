@@ -109,7 +109,8 @@ gh workflow run -R gururafiki/muffin-deployment maintenance.yml --ref main -f ac
   `pull … failed`, `cannot read the digest`, `never reported SERVING`, `did not load`,
   `cannot say what is running` and `a deploy would replace the services left unpinned`.
 - It logs free disk before pulling. If `/` is low, run `-f action=prune-images` first; that job fails
-  below 5 GB free.
+  below 5 GB free. If `/mnt/data` is low, `-f action=prune-volumes` reports the anonymous volumes no
+  container uses, and removes them with `-f confirm=prune`.
 - Dagster upgrade: compare `dagster/_core/storage/alembic/versions` between the two versions. New
   revisions need `dagster instance migrate` before the roll.
 

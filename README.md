@@ -103,6 +103,17 @@ them. So `/` grows with every image pull, and the boot volume is sized in Terraf
 replacement — `deploy.yml`'s plan mode refuses one anyway), and the first pre_task in
 `ansible/muffin_stack.yml` rescans the disk and grows the root partition and filesystem online.
 `maintenance.yml` `prune-images` reclaims dangling images and fails below 5 GB free.
+`maintenance.yml` `prune-volumes` removes anonymous volumes no container uses, which a container
+leaves behind when its image declares `VOLUME` and it is removed without `-v`. It reports each kind
+(Postgres, RabbitMQ, Redis, empty) and its size, and removes them only with `confirm=prune`. Named
+volumes are never selected. 152 had piled up on `/mnt/data` by 2026-11-01, 11.1 GB.
+
+The data volume (`/mnt/data`, `data_volume_size_in_gbs`) is 105 GB since 2026-11-01. With the 95 GB
+boot volume that is the whole Always Free block allowance: 200 GB per region, boot and block
+together (OCI's `total-free-storage-gb-regional`). Growing past it is billed, at about $0.0425 per
+GB-month for Balanced, and a volume can never shrink. Terraform grows the volume in place, and the
+`block_storage` role rescans the device before resizing the filesystem, since the kernel keeps the
+old size until a rescan.
 `maintenance.yml` `drop-retired-raw` removes a retired lane's raw Parquet from
 `/mnt/data/ingest/raw`, for the names listed in the step. It reports what it would remove unless
 `confirm=drop`, and refuses while the code location's running image still defines the asset, so a
