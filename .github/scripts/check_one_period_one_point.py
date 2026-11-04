@@ -67,7 +67,14 @@ COLLAPSE_WINDOW = 7
 # ABF.L year, and SEC comparatives off the filer's calendar that the edge's sec-xbrl handler writes
 # (LAKE, MYO, RCEL, MRDN, TBCH, RJET, BRT, AREC, RDNW). Phase 5 step 11 re-keys this check on
 # fiscal labels and retires the constant.
-KNOWN_DRIFTED_PAIRS = 120
+#
+# 120 -> 122 on 2026-11-04 (121 on 11-03). One is 355690.KQ, a KOSDAQ REIT the 11-02 promotion
+# wave added, whose statements arrived 11-04: Yahoo serves its six-month years as annual, the
+# 348950.KS kind. The other cannot be told apart, for the same reason as on 10-29. Read the same
+# evening, the pairs are all known kinds, and in 120 of the 122 at least one row carries no fiscal
+# label, i.e. the calendar has already judged it off the year. Every weekly wave can promote more
+# such REITs, so this constant will keep creeping until the re-key on labels lands.
+KNOWN_DRIFTED_PAIRS = 122
 PAGE = 1000
 
 # A ROTATING SIXTEENTH OF THE UNIVERSE, BY THE FIRST HEX DIGIT OF `security_id`, NEVER THE WHOLE

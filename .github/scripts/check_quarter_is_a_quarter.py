@@ -54,6 +54,9 @@ KEY = os.environ.get("SRV", "")
 UA = "muffin-market-verify/1.0"
 
 FLOW = ["revenue", "net_income", "gross_profit", "operating_income", "operating_cash_flow"]
+#: Securities compared a run, each found by its own lower bound on `security_id`. 60 UUIDs keep
+#: the metric fetch's `in.()` near 2.4 KB.
+SECURITIES = 60
 
 # Discrete quarters median ~1.0; year-to-date stacking gives last/first ~3.0 (a+b+c over a). The
 # threshold sits in the gap, far enough above 1 that seasonality — which moves individual companies
@@ -149,19 +152,25 @@ def main() -> int:
     # SAMPLED BY SECURITY, NOT BY RECENCY. The newest N metric rows are scattered across thousands
     # of securities, so a complete fiscal year almost never lands inside the page — tried, and it
     # compared zero years.
-    recent = get(
-        "security_metric?select=security_id&period_type=eq.quarter"
-        f"&metric_code=in.({metrics})&order=fetched_at.desc&limit=1000"
-    )
+    #
+    # AND THE SECURITIES ARE FOUND BY KEY, NOT BY `order=fetched_at.desc`, which has no index: it
+    # was a sequential scan of `security_metric`, 6.8 M rows after Phase 5's CIK grid, and answered
+    # HTTP 500 at the 8-second ceiling on 2026-11-02 while the SEC lanes were writing. Each lower
+    # bound on `security_id` reads the first security with a quarterly flow through the primary
+    # key, 3 ms measured, and the day rotates the bounds.
     ids: list[str] = []
     seen: set[str] = set()
-    for r in recent:
-        sid = r["security_id"]
-        if sid not in seen:
-            seen.add(sid)
-            ids.append(sid)
-        if len(ids) >= 60:
-            break
+    phase = (datetime.date.today().toordinal() % 97) / 97
+    for i in range(SECURITIES):
+        start = f"{int((i + phase) / SECURITIES * 0xFFFFFFFF):08x}-0000-0000-0000-000000000000"
+        first = get(
+            "security_metric?select=security_id&period_type=eq.quarter"
+            f"&metric_code=in.({metrics})&security_id=gte.{start}"
+            "&order=security_id,metric_code,period_type,as_of&limit=1"
+        )
+        if first and first[0]["security_id"] not in seen:
+            seen.add(first[0]["security_id"])
+            ids.append(first[0]["security_id"])
     if not ids:
         print("::error::no quarterly flow metrics found at all — the derivation has produced nothing")
         return 1
