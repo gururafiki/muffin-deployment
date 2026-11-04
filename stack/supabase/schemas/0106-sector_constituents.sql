@@ -19,6 +19,13 @@ WITH sector_weight AS MATERIALIZED (
              JOIN market.security_identifier fi ON fi.security_id = h_1.fund_id AND fi.kind_code = 'ticker'::text
              JOIN market.tracked_fund tf ON tf.symbol = fi.value
           ORDER BY tf.represents_code, h_1.security_id, h_1.weight DESC NULLS LAST
+        ), industry AS MATERIALIZED (
+         SELECT DISTINCT ON (st2.security_id, n.parent_id) st2.security_id,
+            n.parent_id,
+            n.name
+           FROM market.security_taxonomy st2
+             JOIN market.taxonomy_node n ON n.node_id = st2.node_id AND n.taxonomy_id = 'muffin'::text AND n.level = 2
+          ORDER BY st2.security_id, n.parent_id, n.name
         )
  SELECT DISTINCT ON (tn.code, s.security_id) tn.code AS sector_id,
     s.security_id,
@@ -36,11 +43,7 @@ WITH sector_weight AS MATERIALIZED (
      JOIN market.taxonomy_node tn ON tn.node_id = st.node_id AND tn.taxonomy_id = 'muffin'::text AND tn.level = 1
      JOIN market.data_source ds ON ds.code = st.source_code
      JOIN market.security s ON s.security_id = st.security_id
-     LEFT JOIN market.security_symbol sym ON sym.security_id = s.security_id
-     LEFT JOIN LATERAL ( SELECT n.name
-           FROM market.security_taxonomy st2
-             JOIN market.taxonomy_node n ON n.node_id = st2.node_id AND n.taxonomy_id = 'muffin'::text AND n.level = 2 AND n.parent_id = tn.node_id
-          WHERE st2.security_id = s.security_id
-         LIMIT 1) ind ON true
+     LEFT JOIN market.symbol_security sym ON sym.security_id = s.security_id
+     LEFT JOIN industry ind ON ind.security_id = s.security_id AND ind.parent_id = tn.node_id
      LEFT JOIN sector_weight h ON h.security_id = s.security_id AND h.represents_code = tn.code
   ORDER BY tn.code, s.security_id, ds.priority DESC, st.as_of DESC;
