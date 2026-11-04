@@ -883,7 +883,11 @@ services:
         condition: any
       resources:
         limits:
-          memory: 1G
+          # 1.5G since 2026-11-04 (decided by the user). At 1G it sat at 870-884 MiB (86%) from
+          # 11-01, a plateau rather than a leak, and kept `muffin-container-near-oom` firing; one
+          # exploratory catalogue request once OOM-killed it at the old limit. The node had 13 GiB
+          # available. Its callers shrink as Phases 6-8 move the edge resources off it.
+          memory: 1536M
 
   # --- Self-hosted meta-search (internal) ---------------------------------
   searxng:
