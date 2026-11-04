@@ -307,6 +307,45 @@ groups:
       description: '`/` was already at 70% on 2026-08-27 and grows with every image pull: Docker uses the containerd image store, so images live in /var/lib/containerd (20 G) rather than the migrated data-root
         on /mnt/data (9% of 98 G), and daemon.json''s `data-root` does not control it. Cheap relief: `docker image prune -a` and reclaim the stale /var/lib/docker. The real fix is containerd''s own `root`
         — see todos.md.'
+  - uid: muffin-dagster-storage-large
+    title: Dagster's run storage passed 20 GB
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-prometheus
+      model:
+        refId: A
+        expr: max(pg_database_size_bytes{datname="dagster"}) / 1e9
+        instant: true
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 20
+    noDataState: NoData
+    execErrState: Alerting
+    for: 1h
+    labels:
+      muffin: infra
+    annotations:
+      summary: 'Dagster''s database is {{ $values.B }} GB'
+      description: 'The SEC filer lane writes a materialization and a planned event for every filer it visits, ~26,000 of each a weekday (4.46 GB on 2026-11-04, ~55 MB a day). Skippable outputs cannot help: Dagster records an output for every partition of a run''s range. The user''s decision (2026-11-04): accept it until this fires, then build the prune, keeping the newest materialization per (asset, partition) so partition status survives. Never prune by age: that deletes the grid the sensors read. Note: umbrella docs/deferred/2026-11-02-the-sec-lane-materialises-every-visited-filer.md.'
   - uid: muffin-tls-cert-not-renewing
     title: An origin certificate is not being renewed
     condition: C

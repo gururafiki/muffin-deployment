@@ -386,6 +386,60 @@
      }
     }
    ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Postgres databases by size",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "description": "Each database on supabase-db, from postgres-exporter. `postgres` holds the market schema and the app; `dagster` is Dagster's run storage, and grows with every materialization and planned event: since 2026-11-03 the SEC filer lane visits all 3,726 filers each weekday, ~26,000 materializations plus as many planned events a day, ~55 MB a day before indexes (umbrella docs/deferred/2026-11-02-the-sec-lane-materialises-every-visited-filer.md). The user's decision (2026-11-04): accept it, chart it here, and alert at 20 GB (`muffin-dagster-storage-large`), which is when the prune (keep the newest materialization per asset and partition) gets built. Measured 2026-11-04: dagster 4.46 GB, postgres 21.2 GB.",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 43
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ],
+     "sortBy": "Last *",
+     "sortDesc": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "pg_database_size_bytes{datname!~\"template.*\"}",
+     "legendFormat": "{{datname}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     }
+    }
+   ]
   }
  ]
 }
