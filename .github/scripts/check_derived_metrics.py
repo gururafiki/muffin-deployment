@@ -18,6 +18,7 @@ Three ways this goes wrong, all silent:
 So: sample real securities, and for each reported (non-derived) metric assert the served value is
 exactly the number in `security_statement.data` under that provider's own field name.
 """
+import datetime
 import json
 import os
 import sys
@@ -29,9 +30,24 @@ KEY = os.environ["SRV"]
 # urllib's default User-Agent gets a 403 from Cloudflare on supabase.<domain>, which reads exactly
 # like an auth failure and is not.
 UA = "muffin-market-verify/1.0"
-#: How many of each source's newest securities are compared: 14 a source keeps the 40 statement
-#: requests the single sample made.
+#: How many securities of each source are compared: 14 a source keeps the 40 statement requests
+#: the single sample made.
 SECURITIES_PER_SOURCE = 14
+#: Metric rows read for each sampled security, the first in key order. Enough to span the three
+#: statements of a few periods; the statement fetch takes their periods in one `in.()`.
+ROWS_PER_SECURITY = 40
+
+
+def key_starts(n: int) -> list[str]:
+    """`n` lower bounds for `security_id`, spread evenly over the uuid space and shifted by the day.
+
+    Each bound reads the first security at or after it through the primary key, so a sample costs
+    `n` index probes whatever the table's size, and the day moves which securities are read.
+    """
+    phase = (datetime.date.today().toordinal() % 97) / 97
+    return [
+        f"{int((i + phase) / n * 0xFFFFFFFF):08x}-0000-0000-0000-000000000000" for i in range(n)
+    ]
 
 
 def get(path: str):
@@ -64,27 +80,35 @@ def main() -> int:
     # fired on its own blind spot rather than on drift. Failing loudly there was correct; a check
     # that verified nothing must never read as one that passed.
     #
-    # SAMPLED PER SOURCE, NEWEST FIRST. One sample across every source is filled by whichever
-    # source wrote last: measured 2026-10-28, the newest 300 were all yfinance. And `sec-xbrl` has
-    # a mapping since Phase 5 step 4 (migration 20261028100000) while the edge's `security-xbrl`
-    # still writes `sec-xbrl` metrics straight from company facts, with no statement behind them,
-    # until it retires at step 9: a combined sample taken after one of its runs compares nothing.
-    # Each source gets its own newest rows (~0.4 s each, measured), and its own count.
+    # SAMPLED PER SOURCE, BY KEY. One sample across every source is filled by whichever source
+    # wrote last (measured 2026-10-28: the newest 300 were all yfinance), so each source gets its
+    # own securities and its own count.
+    #
+    # NOT BY RECENCY ANY MORE. `order=fetched_at.desc` has no index, so each read was a parallel
+    # sequential scan of the whole table, and Phase 5's CIK grid took it to 6.8 M rows: 0.77 s warm
+    # on 2026-11-04, and past the 8-second ceiling of `service_role` while the SEC lanes write. This
+    # check answered HTTP 500 on 11-02, 11-03 and 11-04, each run inside the filer sensor's weekday
+    # tick. A lower bound on `security_id` reads through the primary key instead: 3-52 ms a probe,
+    # measured as `service_role` the same evening, and the day still rotates the sample.
     by_sec: dict[str, list[dict]] = {}
     sources = sorted({s for _, s, _ in mapping})
     for source in sources:
-        rows = get(
-            "security_metric?select=security_id,metric_code,period_type,as_of,value,source_code"
-            f"&source_code=eq.{urllib.parse.quote(source)}&order=fetched_at.desc&limit=100"
-        )
-        # Group by security so the statement fetch is one request per security, not per metric,
-        # and take a share of the securities from each source.
-        taken: dict[str, list[dict]] = {}
-        for r in rows:
-            if r["security_id"] in taken or len(taken) < SECURITIES_PER_SOURCE:
-                taken.setdefault(r["security_id"], []).append(r)
-        for sec_id, metrics in taken.items():
-            by_sec.setdefault(sec_id, []).extend(metrics)
+        taken: set[str] = set()
+        for start in key_starts(SECURITIES_PER_SOURCE):
+            rows = get(
+                "security_metric?select=security_id,metric_code,period_type,as_of,value,source_code"
+                f"&source_code=eq.{urllib.parse.quote(source)}&security_id=gte.{start}"
+                f"&order=security_id,metric_code,period_type,as_of&limit={ROWS_PER_SECURITY}"
+            )
+            if not rows:
+                continue
+            # The first security at or after the bound; two bounds can reach the same one where a
+            # source is sparse, and it is compared once.
+            sec_id = rows[0]["security_id"]
+            if sec_id in taken:
+                continue
+            taken.add(sec_id)
+            by_sec.setdefault(sec_id, []).extend(r for r in rows if r["security_id"] == sec_id)
     if not by_sec:
         print(
             "::error::security_metric holds no rows derived from a statement document "
