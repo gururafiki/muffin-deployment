@@ -25,9 +25,9 @@ adding one.**
 | `dashboards/universe.json` (`muffin-universe`) | securities, identifiers, negative caches, rows and storage by table | `universe_sample`, `ticker_disagreement` |
 | `dashboards/providers.json` (`muffin-providers`) | http-cache hits, latency, bytes; egress by host and container; the ingest worker's own requests by provider and outcome, and their p95 | Prometheus (`muffin_ingest_provider_*` from the code location's exporter, job `muffin-ingest`) |
 | `dashboards/segments.json` (`muffin-segments`) | business-line parsing, curation queue, reconciliation | `security_segment_spine`, `security_filing`, `pending_*_segments` (live), `refresh_run` |
-| `dashboards/node.json` (`muffin-node`) | memory, CPU and disk per service; Traefik requests | Prometheus |
+| `dashboards/node.json` (`muffin-node`) | memory, CPU and disk per service; size of each Postgres database; Traefik requests | Prometheus |
 | `provisioning/datasources/muffin.yml` | `muffin-prometheus`; `muffin-postgres` (db `postgres`) and `muffin-dagster` (db `dagster`), both as `metrics_ro` | |
-| `provisioning/alerting/rules.yml` | 16 alert rules, two on `muffin-dagster`: a failed run in the last 6 hours, and an ERROR check that failed after passing within 14 days. The certificate rule reads each name's NEWEST certificate (`max by (cn)`): Traefik keeps a gauge for a replaced one | |
+| `provisioning/alerting/rules.yml` | 17 alert rules, two on `muffin-dagster`: a failed run in the last 6 hours, and an ERROR check that failed after passing within 14 days. `muffin-dagster-storage-large` fires when Dagster's database passes 20 GB; then build the prune (newest materialization per asset and partition, never an age cut). The certificate rule reads each name's NEWEST certificate (`max by (cn)`): Traefik keeps a gauge for a replaced one | |
 
 **The Dagster row reads Dagster's own run storage** (since 2026-10-18), so a new job or a new asset
 check appears on it by itself. The check alert fires on a REGRESSION only: a check red since it was
