@@ -62,8 +62,8 @@ under the agent. Before rebuilding a wrapper to change one package:
 | Window | What runs |
 |---|---|
 | 00:00–02:15 | the price night: `nightly_prices`, `daily_fx`, `daily_indices`. A roll kills their runs. |
-| 03:00 | the symbology lane's daily stale-miss tick (`new_symbols_needed`), which launches runs |
-| 03:30–~06:00 | the company lane (`yahoo_companies`, since 2026-10-18) holds the `yfinance` and `sql` pools; the derived runs created meanwhile wait until it ends (05:51 on its first day) |
+| 03:00–~06:20 | the symbology lane's daily stale-miss tick (`new_symbols_needed`): ~170–205 one-subject runs of ~30 s on the `sql` pool. A killed one is not re-requested |
+| 03:30–~05:05 | the company lane (`yahoo_companies`): 19 runs holding the `yfinance` and `sql` pools. Since 2026-11-04 its `dagster/priority` 1 puts it ahead of the stale-miss runs (muffin-ingest#162): on 11-05 it started at 03:30:45 and ended at 05:05, and those runs finished at 06:18 |
 | while `muffin-db-backup.sh` runs | every deploy ends with a full `pg_dump`, and anon reads time out while it runs: measure latency only after `pgrep -fc '[m]uffin-db-backup.sh'` reads 0 |
 
 A deploy does not restart the Dagster services (the roll pins the digest, #431 and #436), so
