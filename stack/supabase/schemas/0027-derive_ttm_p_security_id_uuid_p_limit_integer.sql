@@ -36,7 +36,11 @@ begin
       where m.security_id = a.security_id
         and m.metric_code = a.metric_code
         and m.period_type = 'quarter'
-        and m.source_code = a.source_code
+        -- THE YEAR'S OWN SOURCE, OR A SOURCE COMPUTED FROM IT (`data_source.computed_from`): a SEC
+        -- filer's Q2 and Q3 cash flow are `sec-xbrl-ytd`, computed from `sec-xbrl`'s own facts.
+        and (m.source_code = a.source_code
+             or exists (select 1 from market.data_source d
+                         where d.code = m.source_code and d.computed_from = a.source_code))
         and m.as_of > a.as_of - 300
         and m.as_of < a.as_of) q
    where a.period_type = 'annual'
