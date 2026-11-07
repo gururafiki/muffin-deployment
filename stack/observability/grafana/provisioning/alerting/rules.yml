@@ -103,7 +103,7 @@ groups:
         format: table
         rawQuery: true
         rawSql: "select count(*)::float8 as value\n  from (\n    select backlog, max(depth) - min(depth) as spread, count(*) as samples\n      from market.backlog_sample\n     where sampled_at > now() -\
-          \ interval '24 hours'\n       and error is null\n     group by backlog\n    -- An empty or nearly-empty backlog is legitimately flat. 500 is well above the noise and\n    -- well below the populations\
+          \ interval '24 hours'\n       and error is null\n       -- The sampler reads every market.pending_% view, so a dropped view is not sampled any\n       -- more. Its last day of samples is a retirement, not a stall.\n       and to_regclass(format('market.%I', backlog)) is not null\n     group by backlog\n    -- An empty or nearly-empty backlog is legitimately flat. 500 is well above the noise and\n    -- well below the populations\
           \ that have actually stalled here (7,175 / 9,698 / 10,074).\n    having max(depth) > 500\n  ) t\n -- EXACTLY zero movement across a full day of samples. A backlog that is merely slow moves.\n\
           \ where spread = 0 and samples >= 8"
     - refId: B
@@ -550,7 +550,7 @@ groups:
         refId: A
         format: table
         rawQuery: true
-        rawSql: "-- A retired resource's backlog view is dropped with it (pending_eps_history went\n-- 2026-11-07), so no backlog is excluded by name here any more.\nselect count(*) as value\n  from market.backlog_drain\n where state = 'FLAT' and depth > 100"
+        rawSql: "-- A retired resource's backlog view is dropped with it, and backlog_drain reports only\n-- backlogs whose view exists, so none is excluded by name here.\nselect count(*) as value\n  from market.backlog_drain\n where state = 'FLAT' and depth > 100"
     - refId: B
       datasourceUid: __expr__
       model:
