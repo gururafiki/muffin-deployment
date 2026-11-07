@@ -138,8 +138,8 @@ type MarketClient = ReturnType<SupabaseClient['schema']>
  * RESOURCES A FAMILY CUTOVER RETIRED, refused before anything else is decided: the price and
  * performance family on 2026-09-12 (D2), the universe family on 2026-09-26 (Phase 3), the Yahoo
  * company family on 2026-10-18 (Phase 4), Tiingo's corporate actions and SEC's openbb statements
- * on 2026-10-25, the Korean and Indian segment parsers on 2026-11-04 (until Phase 6), and finviz's
- * price targets on 2026-11-06.
+ * on 2026-10-25, the Korean and Indian segment parsers on 2026-11-04 (until Phase 6), finviz's
+ * price targets on 2026-11-06, and the rest of the SEC family on 2026-11-07 (Phase 5 step 9).
  *
  * Their handlers are still in this file and their `cron_resource` rows are disabled, which stops
  * the SCHEDULE and nothing else. A direct call still reached them: an admin pressing Refresh in the
@@ -190,6 +190,11 @@ const RETIRED: Record<string, string> = {
   'security-kr-segments': 'retired until Phase 6 moves segments to Dagster — read market.security_segment_current',
   'security-in-segments': 'retired until Phase 6 moves segments to Dagster — read market.security_segment_current',
   'security-price-targets': 'finviz moved its quote page; analyst actions move to the Dagster company lane (Yahoo) — read market.security_price_target',
+  'security-xbrl': 'Dagster SEC filer lane (sec_statement → derived_security_metrics) — read market.security_metric',
+  'security-filings': 'Dagster SEC filer lane (sec_filing) — read market.security_recent_filings',
+  'security-filing-history': 'Dagster SEC filer lane (sec_filing) — read market.security_filing',
+  'security-insider': 'Dagster SEC Form 4 lane (sec_form4_trade) — read market.security_insider_summary',
+  'security-eps-history': 'unscheduled since 2026-08-28; earnings-history (the nasdaq calendar) writes the same table — read market.security_eps_history',
 }
 
 /**

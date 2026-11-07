@@ -39,12 +39,13 @@ A failed resource answers **HTTP 200 with `"ok": false`** and the reason.
 ```bash
 curl -sS -X POST "$BASE/functions/v1/market-refresh" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"security-xbrl","force":true}'
+  -d '{"resource":"security-segments","force":true}'
 ```
 
 **A 410 names the lane that replaced the resource.** The Yahoo company family (profiles,
 industries, fundamentals, share stats, officers, quarters, dividends, metrics) left the edge on
-2026-10-18, after prices (2026-09-12) and the universe (2026-09-26). Diagnose those in Dagster
+2026-10-18, after prices (2026-09-12) and the universe (2026-09-26); SEC's facts, filings and
+insider trades left on 2026-11-07. Diagnose those in Dagster
 (`muffin-dagster-operations`), not here.
 
 **A bare `error code: 502` with no body means the WORKER DIED** — look at memory or a runaway loop,
@@ -182,7 +183,7 @@ Take the queue's head and check each subject against the state the handler write
 Anything already done must NOT still be queued:
 
 ```bash
-curl -sS "$BASE/rest/v1/pending_xbrl?select=security_id&limit=5" \
+curl -sS "$BASE/rest/v1/pending_segments?select=security_id,accession_number&limit=5" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
 # then check those ids for the rows or the stamp the handler writes
 ```

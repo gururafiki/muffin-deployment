@@ -1,11 +1,11 @@
 ---
 name: market-refresh-routine
 description:
-  Drain the edge function's remaining market-data backlogs (SEC's XBRL, filing
-  history and segments) by hand, PACED so it does not trip a provider's rate
-  limit. Use when someone asks to "refresh the market data", "catch the backlogs up"
+  Drain the edge function's remaining market-data backlog (SEC segments) by hand,
+  PACED so it does not trip a provider's rate limit. Use when someone asks to "refresh the market data", "catch the backlogs up"
   or "ingest what is missing". Yahoo company data, prices and the universe are Dagster
-  lanes since 2026-10-18 (muffin-dagster-operations). Do NOT use for a single security
+  lanes since 2026-10-18, and SEC's facts, filings and insider trades since 2026-11-07
+  (muffin-dagster-operations). Do NOT use for a single security
   (market-refresh-security) or a new ETF (market-add-fund).
 license: GPL-3.0
 metadata:
@@ -55,8 +55,6 @@ only — the anon key is public and a public cache-buster is a free way to hamme
 ## What is left to drain
 
 ```
-security-xbrl             SEC company facts, the quarterly depth; bounded by MEMORY, so pace it.
-security-filing-history   SEC submissions: a filer's whole filing index, and its SIC code.
 security-segments         one filing's XBRL instance per row, breadth-first across companies.
 ```
 
@@ -65,7 +63,7 @@ security-segments         one filing's XBRL instance per row, breadth-first acro
 ```bash
 for cycle in 1 2 3 4 5 6; do
   throttled=0
-  for r in security-xbrl security-filing-history security-segments; do
+  for r in security-segments; do
     out=$(call "$r")
     echo "$r: $out"
     case "$out" in *RateLimit*|*"Too Many Requests"*|*RATE-LIMITING*) throttled=1;; esac
@@ -104,7 +102,7 @@ replaced the body, so the reason never arrived. A bare 502 now means a genuinely
 ## Checking progress
 
 ```bash
-for v in pending_xbrl pending_filing_history pending_segments; do
+for v in pending_segments; do
   printf '%-24s %s\n' "$v" "$(curl -sS -o /dev/null -D - \
     "$BASE/rest/v1/$v?select=security_id&limit=1" \
     -H "apikey: $SRV" -H "Authorization: Bearer $SRV" \

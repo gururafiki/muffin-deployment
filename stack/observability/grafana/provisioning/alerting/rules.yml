@@ -550,7 +550,7 @@ groups:
         refId: A
         format: table
         rawQuery: true
-        rawSql: "-- `pending_eps_history` is the backlog of a resource migration 138 RETIRED, when\n-- `equity/calendar/earnings` replaced it: 643 companies in one call against alpha_vantage's 25\n-- a DAY. It is flat because nothing is meant to drain it, not because something stopped, and\n-- this rule has been firing about it since. `backlog_drain` carries no owning resource, so the\n-- one retired backlog is named here WITH ITS REASON rather than a mapping being invented to\n-- hide it. `ingest.facet` makes this a column; this exclusion goes when that lands.\nselect count(*) as value\n  from market.backlog_drain\n where state = 'FLAT' and depth > 100 and backlog <> 'pending_eps_history'"
+        rawSql: "-- A retired resource's backlog view is dropped with it (pending_eps_history went\n-- 2026-11-07), so no backlog is excluded by name here any more.\nselect count(*) as value\n  from market.backlog_drain\n where state = 'FLAT' and depth > 100"
     - refId: B
       datasourceUid: __expr__
       model:
