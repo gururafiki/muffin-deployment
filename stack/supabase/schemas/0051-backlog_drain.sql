@@ -55,7 +55,7 @@ WITH obs AS (
    FROM latest l
      JOIN fit f USING (backlog)
      LEFT JOIN cache c USING (backlog)
-  WHERE l.sampled_at > (now() - '1 day'::interval)
+  WHERE l.sampled_at > (now() - '1 day'::interval) AND to_regclass(format('market.%I'::text, l.backlog)) IS NOT NULL
   ORDER BY (
         CASE
             WHEN f.samples < 6 THEN 3
