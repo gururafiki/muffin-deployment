@@ -25,10 +25,23 @@ begin;
 -- samples, as flat as STUCK's, so only its age can tell it apart: a rule that drops it for having
 -- few samples, or for any other reason than not being sampled any more, fails STUCK or NEWBIE.
 -- Its last sample is three days old, so a staleness bound of a week keeps it and fails here.
+--   DROPPED  sat at 2000 and was sampled until hours ago; its view is gone         -> absent
+--
+-- DROPPED is the 2026-11-07 case: the views of five retired resources were dropped at 02:38 and
+-- their samples, hours old, kept two alerts firing on a day-old bound. Its samples are as recent
+-- as DRAINER's, so only the missing view tells it apart. The live fixtures therefore get views of
+-- their own: the sampler reads every `market.pending_%` view, so a backlog with no view is one
+-- nothing samples.
 insert into market.backlog_negative_cache (backlog, missing_column) values
   ('pending_zz_drainer', 'zz_drainer_missing_at'),
   ('pending_zz_marker',  'zz_marker_missing_at')
 on conflict (backlog) do update set missing_column = excluded.missing_column;
+
+create view market.pending_zz_drainer as select 1 as x;
+create view market.pending_zz_stuck   as select 1 as x;
+create view market.pending_zz_marker  as select 1 as x;
+create view market.pending_zz_grower  as select 1 as x;
+create view market.pending_zz_newbie  as select 1 as x;
 
 do $$
 declare i int; ts timestamptz;
@@ -44,7 +57,8 @@ begin
       -- AND under a broken one. Measured by mutation — the assertion passed clean until this row
       -- existed. A growing backlog makes the two disagree: the correct rule yields NULL, a rule
       -- that merely divides yields a confident forecast for a queue moving the wrong way.
-      (ts, 'pending_zz_grower',  300 + (i * 700 / 47))
+      (ts, 'pending_zz_grower',  300 + (i * 700 / 47)),
+      (ts, 'pending_zz_dropped', 2000)
     on conflict do nothing;
 
     -- Sampled like STUCK until its view was dropped, three days ago.
@@ -133,7 +147,19 @@ begin
     raise exception 'the RETIRED fixture has too few samples to be FLAT; it would be absent for the wrong reason';
   end if;
 
-  raise notice '  ok  draining, FLAT, draining_by_marking and insufficient_history are distinguished, and a retired backlog is absent';
+  -- ...nor is one whose view was dropped this morning, though its samples are hours old.
+  select state into st from market.backlog_drain where backlog = 'pending_zz_dropped';
+  if found then
+    raise exception 'a backlog whose view no longer exists was called % — it was sampled until hours ago, '
+                    'so a staleness bound keeps it for a day, and both backlog alerts fired on the five '
+                    'views Phase 5 step 9 dropped', st;
+  end if;
+  if (select max(sampled_at) from market.backlog_sample where backlog = 'pending_zz_dropped')
+     < now() - interval '1 day' then
+    raise exception 'the DROPPED fixture is a day old; it would be absent for the wrong reason';
+  end if;
+
+  raise notice '  ok  draining, FLAT, draining_by_marking and insufficient_history are distinguished, and a retired or dropped backlog is absent';
 end $$;
 
 rollback;
