@@ -1,16 +1,16 @@
--- AN INSIDER TRADE TWO WRITERS RECORD IS COUNTED ONCE.
+-- AN INSIDER TRADE IS COUNTED FROM ITS FILING.
 --
--- `insider_trade` is written by the edge `security-insider` resource (no accession) and by the
--- Dagster SEC lanes (with one). The summary must count a trade both record once, keep an edge row
--- for a day the lane has not collected, and judge a day across all securities, because the two
--- writers can date one filing on either side of a day boundary.
+-- Until 2026-11-07 `insider_trade` had two writers: the edge `security-insider` resource (rows with
+-- no accession) and the Dagster Form 4 lane (rows naming their filing). The summary kept an edge
+-- row only for a filing day the lane had not collected. Phase 5 step 9 retired the edge writer, and
+-- the lane's days cover the summary's whole 90-day window, so a row with no accession is a leftover
+-- and is never counted. The legacy rows are deleted at the contract (step 11).
 --
--- THE FIXTURE MAKES FOUR RULES DISAGREE about security T1, whose answer is 2 buys, 1 sell, 3 trades:
---   - count every row (the old view):                 3 buys, 2 sells, 5 trades;
---   - count only the lane's rows:                     1 buy,  1 sell,  2 trades (Grace is lost);
---   - drop an edge row only where the SAME security
---     has a lane row that day:                        2 buys, 2 sells, 4 trades (Alan twice);
---   - drop an edge row on any day the lane collected: 2 buys, 1 sell,  3 trades.
+-- THE FIXTURE MAKES THE RULES DISAGREE about security T1, whose answer is 1 buy, 1 sell, 2 trades:
+--   - count every row:                                3 buys, 2 sells, 5 trades;
+--   - keep an edge row on a day the lane has not
+--     collected (the view until 2026-11-07):          2 buys, 1 sell,  3 trades (Grace kept);
+--   - count only rows that name their filing:         1 buy,  1 sell,  2 trades.
 
 \set ON_ERROR_STOP on
 
@@ -57,12 +57,12 @@ begin
   if v_trades is null then
     raise exception 'T1 has no summary row at all; the view dropped a security it should count';
   end if;
-  if (v_buys, v_sells, v_trades) <> (2, 1, 3) then
-    raise exception 'T1 counted % buys, % sells, % trades, expected 2, 1, 3: a trade two writers record must count once, an edge row on a day the lane has not collected must count, and a filing dated across a day boundary must not count twice',
+  if (v_buys, v_sells, v_trades) <> (1, 1, 2) then
+    raise exception 'T1 counted % buys, % sells, % trades, expected 1, 1, 2: only a row naming its filing counts now the edge writer has retired',
       v_buys, v_sells, v_trades;
   end if;
-  if v_net <> 0 then
-    raise exception 'T1 net shares are %, expected 0 (100 + 200 bought, 300 sold)', v_net;
+  if v_net <> -200 then
+    raise exception 'T1 net shares are %, expected -200 (100 bought, 300 sold)', v_net;
   end if;
 
   select trades into v_t2 from market.security_insider_summary
@@ -72,6 +72,6 @@ begin
   end if;
 end $$;
 
-\echo 'ok: a trade two writers record is counted once'
+\echo 'ok: an insider trade is counted from its filing'
 
 rollback;

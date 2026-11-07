@@ -23,9 +23,9 @@ This has happened twice at scale: 1,369 securities, then ~8,300.
 Yahoo company family on 2026-10-18, so `industry_`, `profile_`, `fundamentals_`, `statements_`,
 `quarters_`, `dividends_`, `share_stats_`, `profile_detail_`, `prices_` and `performance_missing_at`
 only hold old marks until the contract step drops them. The Dagster lanes record absence in their
-own partitions and `identifier_probe`. The edge still sets `statement_currency_missing_at` and
-`xbrl_missing_at` (the SEC family, until Phase 5 retires it), `corporate_actions_missing_at` and
-`wikidata_missing_at`. The loops below still name the old columns, because a wrong old mark still
+own partitions and `identifier_probe`. SEC's `statement_currency_missing_at` and
+`xbrl_missing_at` lost their writers on 2026-10-25 and 2026-11-07, as did
+`corporate_actions_missing_at` on 2026-10-25. The edge still sets only `wikidata_missing_at`. The loops below still name the old columns, because a wrong old mark still
 hides a security from whatever reads it.
 
 ## First: is the mark WRONG, or earned?
@@ -101,7 +101,7 @@ symbol-keyed and why.
 ```bash
 # the mega-cap check should now read 0
 # and the securities should re-enter their backlogs
-curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_xbrl?select=security_id&limit=1" \
+curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_wikidata?select=security_id&limit=1" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'
 ```
 

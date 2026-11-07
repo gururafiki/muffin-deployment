@@ -71,17 +71,6 @@ begin
   if n <> 2 then
     raise exception 'the domestic filer has % periodic filings, expected 2 — a date-ordered list would bury the 10-K under its 8-Ks', n;
   end if;
-
-  -- 6. THE CURSOR IS NOT A NEGATIVE CACHE, and a non-filer is never queued.
-  update market.security set filings_fetched_at = now() - interval '8 days'
-   where security_id = '00000000-0000-0000-0000-000000011701';
-  select count(*) into n from market.pending_filings
-   where security_id = '00000000-0000-0000-0000-000000011701';
-  if n <> 1 then raise exception 'a filer read eight days ago is not queued — companies keep filing'; end if;
-
-  select count(*) into n from market.pending_filings
-   where security_id = '00000000-0000-0000-0000-000000011703';
-  if n <> 0 then raise exception 'a security with no CIK is queued — the endpoint is asked BY cik'; end if;
 end $$;
 
 rollback;

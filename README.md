@@ -574,17 +574,14 @@ venues.
 
 | Resource | Writes | Upstream | TTL |
 |---|---|---|---|
-| `security-statements` | `security_statement` (annual, with the reporting currency) | SEC only, since 2026-10-18 | 10 min (a backlog) |
-| `security-xbrl` | `security_metric` (`sec-xbrl`), the quarterly depth | SEC company facts | 10 min |
-| `security-filing-history` | `security_filing`, `security.sic` | SEC submissions | 10 min |
 | `security-segments` | `security_segment` | each filing's XBRL instance | 10 min |
 | `security-refresh` | nothing itself: queues one security's Dagster `yahoo_companies` partition with `force: true` | — | 1 min |
 
 The table lists the main ones; the function's `EXTRA_TTL_MINUTES` map is the complete list, with
 each resource's TTL.
 
-**Retired: the price family (D2, 2026-09-12), the universe family (2026-09-26) and the Yahoo
-company family (2026-10-18).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
+**Retired: the price family (D2, 2026-09-12), the universe family (2026-09-26), the Yahoo
+company family (2026-10-18) and the SEC family (2026-10-25 and 2026-11-07).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
 `market.performance` became a view over `security_return` and `index_return`; fund holdings, the
 venue directory, symbology and the CIK and NSE registries followed; then Yahoo's company data
 (`yahoo_companies`, a seventh of the universe a day from 03:30 UTC) and the metric derivation
@@ -615,10 +612,17 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `instrument-profile` | Dagster company lane — read `market.instrument_current` |
 | `security-dividends` | Dagster price lane (`yahoo_corporate_action`, from the chart's events) — read `market.security_corporate_action` |
 | `security-metrics` | Dagster `derived_security_metrics` — read `market.security_metric` |
+| `security-statements`, `security-xbrl` | Dagster SEC filer lane (`sec_statement`, then `derived_security_metrics`) — read `market.security_statement_current`, `market.security_metric` |
+| `security-filings`, `security-filing-history` | Dagster SEC filer lane (`sec_filing`, `filer_profile`) — read `market.security_recent_filings` |
+| `security-insider` | Dagster SEC Form 4 lane and the insider data sets — read `market.security_insider_summary` |
+| `security-eps-history` | unscheduled since 2026-08-28; `earnings-history` writes `market.security_eps_history` |
+| `security-price-targets` | finviz moved its quote page (2026-11-04); analyst actions move to the company lane |
 
 The Yahoo company family's handlers, their helper modules (`fundamentals.ts`, the live provider
 check `check.ts`) and their eight `pending_*` views were deleted on 2026-10-24 (Phase 4 step 10), so
-a rollback is now a revert of that change, not a re-enabled row.
+a rollback is now a revert of that change, not a re-enabled row. The SEC family's handlers stay
+until three clean days have passed (Phase 5 step 10); its five backlog views went with the
+retirement, because they are what the backlog alerts sample.
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both
