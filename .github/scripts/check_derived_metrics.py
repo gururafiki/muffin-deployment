@@ -12,11 +12,14 @@ Three ways this goes wrong, all silent:
     produces no error — the metric simply stops appearing, and the chart is merely shorter.
   * A METRIC READS THE WRONG PROVIDER'S FIELD. Pre-tax income is `total_pretax_income` on one and
     `total_pre_tax_income` on the other. Reading the wrong one yields null, not a mistake.
-  * THE VALUE IS TRANSFORMED WHEN IT SHOULD NOT BE. Capex is negative on one provider and positive
-    on the other; free cash flow normalises the sign deliberately, and a REPORTED metric must not.
+  * THE VALUE IS TRANSFORMED WHEN IT SHOULD NOT BE, OR NOT WHEN IT SHOULD. An outflow is stored
+    negative (migration 20261108235000): SEC company facts state capex, buybacks and dividends paid
+    as positive payments and carry `sign = -1`, while Yahoo states them negative and carries 1. A
+    reported metric is the provider's number times that sign, and nothing else.
 
 So: sample real securities, and for each reported (non-derived) metric assert the served value is
-exactly the number in `security_statement.data` under that provider's own field name.
+exactly the number in `security_statement.data` under that provider's own field name, times the
+provider's `sign`.
 """
 import datetime
 import json
@@ -65,10 +68,9 @@ def get(path: str):
 
 
 def main() -> int:
-    mapping = {
-        (m["metric_code"], m["source_code"], m["statement"]): m["field"]
-        for m in get("metric_source_field?select=metric_code,source_code,statement,field")
-    }
+    fields = get("metric_source_field?select=metric_code,source_code,statement,field,sign")
+    mapping = {(m["metric_code"], m["source_code"], m["statement"]): m["field"] for m in fields}
+    signs = {(m["metric_code"], m["source_code"]): int(m["sign"]) for m in fields}
     if not mapping:
         print("::error::metric_source_field is EMPTY — every metric would silently produce nothing")
         return 1
@@ -161,11 +163,14 @@ def main() -> int:
                     continue
                 checked += 1
                 per_source[m["source_code"]] += 1
-                # Exact, not approximate. The derivation copies the number; it does not compute it.
-                if float(raw) != float(m["value"]):
+                # Exact, not approximate. The derivation copies the number in the metric's own sign;
+                # it does not compute it.
+                sign = signs[(m["metric_code"], m["source_code"])]
+                if sign * float(raw) != float(m["value"]):
                     bad.append(
                         f"{m['metric_code']} for {sec_id[:8]} {m['as_of']} "
-                        f"({m['source_code']}.{field}): served {m['value']}, filing says {raw}"
+                        f"({m['source_code']}.{field}, sign {sign}): served {m['value']}, "
+                        f"filing says {raw}"
                     )
                 break
 
