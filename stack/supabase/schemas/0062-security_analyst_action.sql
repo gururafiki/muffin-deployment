@@ -18,7 +18,19 @@ SELECT security_id,
     status,
     rating_change,
     source_code
-   FROM market.security_price_target t
-  WHERE NOT (EXISTS ( SELECT 1
-           FROM market.security_price_target o
-          WHERE o.security_id = t.security_id AND o.published_date = t.published_date AND lower(o.analyst_company) = lower(t.analyst_company) AND market.source_priority(o.source_code) > market.source_priority(t.source_code)));
+   FROM ( SELECT t.security_id,
+            t.published_date,
+            t.analyst_company,
+            t.target_from,
+            t.target_to,
+            t.status,
+            t.rating_change,
+            t.source_code,
+            t.fetched_at,
+            t.published_at,
+            t.currency_code,
+            ds.priority,
+            max(ds.priority) OVER (PARTITION BY t.security_id) AS best
+           FROM market.security_price_target t
+             JOIN market.data_source ds ON ds.code = t.source_code) ranked
+  WHERE priority = best;

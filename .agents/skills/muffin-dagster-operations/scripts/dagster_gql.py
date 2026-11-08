@@ -7,6 +7,8 @@ Commands (arguments are plain tokens, so they survive the ssh single quotes):
     repos
     backfill        --assets a,b --partitions 2026-09-11,2026-09-12 --reason <tag>
                     [--op-config op.key=value,…] [--dry-run]
+                    `--partitions grid:security` names every key of that dynamic grid (one
+                    argument cannot carry twelve thousand ids)
                     every run of the backfill gets the op config: a stage-2 replay over files on disk
                     is `--op-config sec_filer_facts.reparse=true`, without which a filer whose raw
                     was fetched by another run is skipped as unchanged
@@ -60,6 +62,17 @@ def tags(reason: str, max_runtime: int | None = None) -> list[dict[str, str]]:
     if max_runtime:
         out.append({"key": "dagster/max_runtime", "value": str(max_runtime)})
     return out
+
+
+def partition_names(text: str) -> list[str]:
+    """The keys to backfill: a comma-separated list, or `grid:<name>` for every key of a dynamic
+    partition grid. Twelve thousand security ids are ~450 KB, and Linux refuses a single argument
+    over 128 KB (MAX_ARG_STRLEN), so the whole grid is read from the instance here."""
+    if text.startswith("grid:"):
+        from dagster import DagsterInstance
+
+        return list(DagsterInstance.get().get_dynamic_partitions(text.removeprefix("grid:")))
+    return [p for p in text.split(",") if p]
 
 
 def op_config(text: str) -> dict:
@@ -169,7 +182,7 @@ def main() -> None:
         variables = {
             "params": {
                 "assetSelection": assets,
-                "partitionNames": [p for p in args.partitions.split(",") if p],
+                "partitionNames": partition_names(args.partitions),
                 "fromFailure": False,
                 "title": args.reason,
                 "tags": tags(args.reason, args.max_runtime),
