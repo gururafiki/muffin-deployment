@@ -630,8 +630,6 @@ services:
       SEC_FTS_BASE_URL: "{{ 'http://http-cache:8080/sec-fts' if http_cache_enabled | default(true) else '' }}"
       OPENFIGI_BASE_URL: "{{ 'http://http-cache:8080/openfigi' if http_cache_enabled | default(true) else '' }}"
       YAHOO_BASE_URL: "{{ 'http://http-cache:8080/yahoo' if http_cache_enabled | default(true) else '' }}"
-      ALPHAVANTAGE_BASE_URL: "{{ 'http://http-cache:8080/alphavantage' if http_cache_enabled | default(true) else '' }}"
-      TIINGO_BASE_URL: "{{ 'http://http-cache:8080/tiingo' if http_cache_enabled | default(true) else '' }}"
       WIKIDATA_BASE_URL: "{{ 'http://http-cache:8080/wikidata' if http_cache_enabled | default(true) else '' }}"
       DART_BASE_URL: "{{ 'http://http-cache:8080/dart' if http_cache_enabled | default(true) else '' }}"
       # India. Two origins: the results API (uncached — it is session-cookie'd) and the archives
@@ -1111,7 +1109,7 @@ services:
   # calling code knows a cache exists.
   #
   # NEVER GIVE THIS TRAEFIK LABELS. It proxies requests carrying provider API keys
-  # (alphavantage `apikey=`, tiingo `token=`) and holds their responses on disk.
+  # (DART `crtfc_key=` in the query string) and holds their responses on disk.
   #
   # OPENRESTY, NOT nginx, and that is not a preference. The cache key must contain the request
   # body — OpenFIGI POSTs different job arrays to one URL — and plain nginx has two SILENT

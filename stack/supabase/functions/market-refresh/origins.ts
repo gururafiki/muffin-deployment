@@ -39,12 +39,6 @@ export const openFigi = () => origin('OPENFIGI_BASE_URL', 'https://api.openfigi.
 /** `query2.finance.yahoo.com` — ISIN search and FX chart history. */
 export const yahoo = () => origin('YAHOO_BASE_URL', 'https://query2.finance.yahoo.com')
 
-/** `www.alphavantage.co` — historical EPS. 25 calls a DAY, so a cache hit here is worth the most. */
-export const alphaVantage = () => origin('ALPHAVANTAGE_BASE_URL', 'https://www.alphavantage.co')
-
-/** `api.tiingo.com` — splits and dividends. */
-export const tiingo = () => origin('TIINGO_BASE_URL', 'https://api.tiingo.com')
-
 /**
  * `query.wikidata.org` — SPARQL, ISIN -> the industries a crowd says a company is in.
  *
