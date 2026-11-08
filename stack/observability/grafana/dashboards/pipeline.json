@@ -664,6 +664,81 @@
     },
     "overrides": []
    }
+  },
+  {
+   "type": "timeseries",
+   "title": "SEC filers behind their filings",
+   "description": "Each evaluation of the `no_filer_is_behind_its_filings` check, one point per run of the SEC filer lane: of the kept forms (10-K, 10-Q, 20-F, 40-F and the rest `market.filing_form` keeps) that tracked filers filed on the last 7 judged index days, how many `security_filing` does not hold yet. Index days younger than the check's due window are not judged, because the filer sensor reads a day the morning after. A non-zero count that persists is a stopped `sec_filers_due` sensor, a refused run, or a filer the lane cannot see; the check's `first_missing` names five. Read from Dagster's own check history, so it costs the market database nothing.",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 90
+   },
+   "datasource": {
+    "type": "postgres",
+    "uid": "muffin-dagster"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "postgres",
+      "uid": "muffin-dagster"
+     },
+     "format": "time_series",
+     "rawQuery": true,
+     "rawSql": "select create_timestamp as time,\n       ((evaluation_event::jsonb)->'dagster_event'->'event_specific_data'->'metadata'->'missing'->>'value')::int as \"filings not yet held\",\n       ((evaluation_event::jsonb)->'dagster_event'->'event_specific_data'->'metadata'->'filings_named'->>'value')::int as \"kept filings named\"\n  from asset_check_executions\n where check_name = 'no_filer_is_behind_its_filings'\n   and execution_status in ('SUCCEEDED', 'FAILED')\n   and $__timeFilter(create_timestamp)\n order by 1"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "points",
+      "lineWidth": 1,
+      "fillOpacity": 0,
+      "showPoints": "always",
+      "pointSize": 5
+     },
+     "unit": "short"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "kept filings named"
+      },
+      "properties": [
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "filings not yet held"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   }
   }
  ]
 }
