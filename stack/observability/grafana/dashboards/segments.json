@@ -209,7 +209,7 @@
      },
      "format": "time_series",
      "rawQuery": true,
-     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments','security-filing-history','security-filings',\n                    'security-kr-segments','kr-filings',\n                    'security-in-segments','in-filings',\n                    'cn-filings','security-cn-segments')\n group by 1, 2 order by 1"
+     "rawSql": "select date_trunc('hour', started_at) as time, resource as metric, sum(written) as value\n  from market.refresh_run\n where $__timeFilter(started_at)\n   and resource in ('security-segments',\n                    'security-kr-segments','kr-filings',\n                    'security-in-segments','in-filings',\n                    'cn-filings','security-cn-segments')\n group by 1, 2 order by 1"
     }
    ]
   },

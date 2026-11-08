@@ -645,6 +645,126 @@
     },
     "overrides": []
    }
+  },
+  {
+   "type": "timeseries",
+   "title": "SEC requests from the ingest worker, by outcome",
+   "description": "Every request the Dagster SEC lanes make (`sec` is www.sec.gov: the daily index, Form 4 documents, submissions pages, the insider data sets; `sec-data` is data.sec.gov: submissions and company facts), counted in process. `throttled` is a 429 and `refused` a 403 or a 5xx: either stops the run that met it, and the next tick or the partition-scoped schedule asks again. `absent` is a 404 the client proved with a control. SEC's 503 rate on Form 4 documents measured ~1 in 1,650 on the 2026-11-07 backfill. A run of `refused` that does not clear by the next tick is SEC refusing the node, which is the one failure mode the lanes cannot work around (paced at 5 requests a second against SEC's documented 10).",
+   "gridPos": {
+    "h": 8,
+    "w": 16,
+    "x": 0,
+    "y": 77
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "interval": "10m",
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "expr": "sum by (provider, outcome) (increase(muffin_ingest_provider_requests_total{provider=~\"sec|sec-data\"}[$__interval]))",
+     "legendFormat": "{{provider}} {{outcome}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 60,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "unit": "short"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": ".*(refused|throttled|transport).*"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "stat",
+   "title": "SEC refusals and throttles, last 24 h",
+   "description": "403, 429 and 5xx answers to the ingest worker's SEC requests over the last day. Zero is normal; a few are transient (each stops one run, which is asked again). Dozens mean SEC is refusing the node: check the User-Agent and the request rate before anything else.",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 77
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "muffin-prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "muffin-prometheus"
+     },
+     "expr": "sum(increase(muffin_ingest_provider_requests_total{provider=~\"sec|sec-data\",outcome=~\"refused|throttled\"}[24h])) or vector(0)",
+     "legendFormat": "refused or throttled"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 25
+       }
+      ]
+     }
+    },
+    "overrides": []
+   }
   }
  ]
 }

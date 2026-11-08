@@ -20,10 +20,10 @@ adding one.**
 
 | File (uid) | Shows | Reads |
 |---|---|---|
-| `dashboards/pipeline.json` (`muffin-pipeline`) | edge-function backlogs, run outcomes, throttling, pg_cron, drain rate; **Dagster lanes**: runs by job, failed runs, queue wait, asset checks | `refresh_run`, `backlog_sample`, `backlog_drain`, `universe_sample`; `runs`, `run_tags`, `asset_check_executions` on `muffin-dagster` |
+| `dashboards/pipeline.json` (`muffin-pipeline`) | edge-function backlogs, run outcomes, throttling, pg_cron, drain rate; **Dagster lanes**: runs by job, failed runs, queue wait, asset checks, SEC filers behind their filings (from the check's own history) | `refresh_run`, `backlog_sample`, `backlog_drain`, `universe_sample`; `runs`, `run_tags`, `asset_check_executions` on `muffin-dagster` |
 | `dashboards/coverage.json` (`muffin-coverage`) | facet completeness by country, sector, type, tier, cap, style… | `coverage_sample` |
 | `dashboards/universe.json` (`muffin-universe`) | securities, identifiers, negative caches, rows and storage by table | `universe_sample`, `ticker_disagreement` |
-| `dashboards/providers.json` (`muffin-providers`) | http-cache hits, latency, bytes; egress by host and container; the ingest worker's own requests by provider and outcome, and their p95 | Prometheus (`muffin_ingest_provider_*` from the code location's exporter, job `muffin-ingest`) |
+| `dashboards/providers.json` (`muffin-providers`) | http-cache hits, latency, bytes; egress by host and container; the ingest worker's own requests by provider and outcome, and their p95; SEC by outcome with refusals counted | Prometheus (`muffin_ingest_provider_*` from the code location's exporter, job `muffin-ingest`) |
 | `dashboards/segments.json` (`muffin-segments`) | business-line parsing, curation queue, reconciliation | `security_segment_spine`, `security_filing`, `pending_*_segments` (live), `refresh_run` |
 | `dashboards/node.json` (`muffin-node`) | memory, CPU and disk per service; size of each Postgres database; Traefik requests | Prometheus |
 | `provisioning/datasources/muffin.yml` | `muffin-prometheus`; `muffin-postgres` (db `postgres`) and `muffin-dagster` (db `dagster`), both as `metrics_ro` | |
