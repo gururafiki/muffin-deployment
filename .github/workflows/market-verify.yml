@@ -12,6 +12,13 @@
 #
 # Reads only, with the ANON key — exactly what a visitor sees. If a check here fails on
 # data the ingest reported as successful, the RLS or the schema cache is the suspect.
+#
+# ONLY WHAT THE DAGSTER LANES WRITE, since 2026-11-08 (the user's decision). The checks over data
+# the market-refresh edge function still writes left: resource health (`refresh_run`), the
+# `*_missing_at` marks (whose resources retired and which nothing writes any more), segment
+# reconciliation and the segment spine, and the retention of the edge-pruned tables. Those
+# resources answer to Grafana's alerts, not to this gate. The views the app reads over Dagster data
+# are still timed as anon.
 name: Market data verify
 
 on:
@@ -34,8 +41,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      # The health check below is a script in this repo, so the job needs the code. Every other
-      # check is a bare curl, which is why this job never checked out before.
+      # Several checks below are scripts in this repo, so the job needs the code.
       - uses: actions/checkout@v7
       - name: Check market invariants
         env:
@@ -251,26 +257,6 @@ jobs:
             echo "  ok   extreme 1y returns = $extreme (tripwire at 25)"
           fi
 
-          # 7e. A RESOURCE THAT HAS STOPPED WORKING. Every other check here asserts the SHAPE of
-          #     the data, which cannot see a resource failing on every run — the table simply stops
-          #     growing and a floor below the current value stays green for weeks. Both failures
-          #     found on 2026-08-12 were exactly that: a currency foreign key and a missing grant,
-          #     each breaking a resource completely while every count stayed plausible.
-          #     The threshold logic lives in a script, not inline here, because it needs real dates
-          #     and a workflow is a bad place to keep something worth testing.
-          #     READS `resource_health`, NOT `refresh_log`. The latter holds one row per resource,
-          #     overwritten every run, so a resource whose worker DIES on every five-minute firing
-          #     always has a fresh `started_at` and reads as just-started for ever — measured
-          #     2026-09-01, security-segments was dead for two days and this reported healthy.
-          health=$(curl -sS --max-time 60 "$BASE/rest/v1/resource_health?select=resource,first_seen,last_worked,skips_6h,runs_6h,ttl_hours,scheduled" \
-            -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' \
-            | python3 .github/scripts/check_resource_health.py) && rc=0 || rc=1
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::$health"; fail=1
-          else
-            echo "  ok   $health"
-          fi
-
           # 7f. NOTHING IS PERFECTLY FLAT. A delisted instrument keeps being served by the price
           #     provider — the same final bars forever — so every period is measured between two
           #     identical closes and comes back as exactly +0.0%. That reads as "the market was
@@ -310,69 +296,6 @@ jobs:
             fail=1
           else
             echo "  ok   symbols flat on 3+ fresh periods = $flat_syms"
-          fi
-
-          # 7g. A MEGA-CAP IS NEVER UNANSWERABLE. This is the check that was missing on 2026-08-13,
-          #     when an over-eager drain tripped yfinance's rate limit and ~8,300 securities were
-          #     recorded as permanently unanswerable. A throttled yfinance answers 200-WITH-NO-ROWS
-          #     rather than erroring, so every outage rule — all of them THROW checks — stayed
-          #     quiet, and `pending_industry` went to 0 and read as DRAINED.
-          #
-          #     WHAT WAS TRIED AND REJECTED. "Marked a lot today while classifying little" is the
-          #     natural formulation and it does not work: measured on the real incident, the day
-          #     classified 2,020 securities WHILE marking 1,732, because the outage was a
-          #     thirty-minute window inside a productive day. Any day-granularity comparison is
-          #     blind to it, and a version of this check written that way passed on the very data
-          #     it was meant to catch.
-          #
-          #     ABSURDITY IS THE SIGNAL INSTEAD, and it is unmissable: 109 of 213 US mega-caps were
-          #     marked no-industry, 152 marked no-statements. INTC, PEP, XOM, TXN, EA, SCCO, EQH,
-          #     REGN, UPS. Derived from market cap rather than an authored ticker list so it
-          #     maintains itself, and restricted to US securities because `market_cap` is stored in
-          #     each security's own currency and only becomes comparable within one.
-          for col in industry_missing_at statements_missing_at performance_missing_at; do
-            big=$(count "security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000")
-            bad=$(count "security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&$col=not.is.null")
-            if [ -z "${big:-}" ] || [ -z "${bad:-}" ]; then
-              echo "::error::mega-cap check ($col) — could not read a count: $(last_body)"; fail=1
-            elif [ "$big" -lt 100 ]; then
-              echo "::error::only $big US mega-caps have a market cap — the cap refresh has stopped"; fail=1
-            elif [ "$bad" -gt 20 ]; then
-              echo "::error::$bad of $big US mega-caps carry $col — a provider refusal is being recorded as dead securities"
-              fail=1
-            else
-              echo "  ok   US mega-caps carrying $col = $bad of $big (tripwire at 20)"
-            fi
-          done
-
-          # 7i. THE SAME ABSURDITY, BY FUND WEIGHT — because the check above has three blind spots
-          #     and a real incident walked through all of them on 2026-08-14.
-          #
-          #     `statements_missing_at` had 2,445 marks set in three bursts (518 + 725 + 1,032, one
-          #     hour each, against a ~15/hour steady state) while yfinance was throttling. 85 of the
-          #     221 securities that are a >=1.5% holding of a sector fund were marked — Exelon,
-          #     Intuitive Surgical, Martin Marietta, Essex Property Trust, IFF — and driving
-          #     `security-refresh` at ISRG, EXC and MLM returned 12 rows of statements each. The
-          #     mega-cap check reported `0 of 213` that same morning.
-          #
-          #     It could not see any of them, because `country_iso2 = 'US' and market_cap > 50e9`
-          #     misses: securities with NO market cap at all (ISRG had none, and 34% of the
-          #     universe still does not), securities below $50bn (EXC $46bn, MLM $33bn, ESS $19bn),
-          #     and every non-US security (Chubb is Swiss). Market cap cannot be the only lens on a
-          #     universe that is two-thirds uncapped and mostly not American — and it is stored in
-          #     each security's own currency, which is why the check was US-only in the first place.
-          #
-          #     WEIGHT HAS NEITHER PROBLEM. It is a percentage of a fund, so it is free of currency,
-          #     free of market cap and free of country, and "a top-ten holding of a sector ETF" is
-          #     an unambiguous statement that a security matters.
-          #
-          #     In a script, not inline, for the same reason `check_resource_health.py` is: the
-          #     obvious PostgREST spelling does not work (embedding `security` with
-          #     `sector_constituents` is ambiguous — PGRST201 — because both are reachable through
-          #     `fund_holding` as a many-to-many), so the two sets are fetched and intersected,
-          #     and that is worth having somewhere it can be read and tested.
-          if ! BASE="$BASE" ANON="$ANON" python3 .github/scripts/check_significant_holdings.py; then
-            fail=1
           fi
 
           # 8. NO COUNTRY SILENTLY DROPPED. Taiwan had 534 securities and zero provider symbols
@@ -426,19 +349,6 @@ jobs:
             fail=1
           fi
 
-          # 9b. A DISCLOSED SPLIT MUST SUM TO THE FILING'S OWN CONSOLIDATED FIGURE. An XBRL axis can
-          #     carry several overlapping splits that EACH reconcile — Amazon's FY2025 10-K holds
-          #     three, all summing to 716,924,000,000 — so `sum(value)` over an axis doubles the
-          #     company's revenue and over the table triples it, with every individual number still
-          #     correct and no error anywhere. This is the only assertion that can see it.
-          #
-          #     Segment PROFIT is deliberately exempt: ASC 280 and IFRS 8 require a reconciliation
-          #     rather than an identity (Apple's segment operating income sums to ~38.9bn against a
-          #     consolidated ~28.2bn), so demanding that it add up would fail on correct data.
-          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_segments_reconcile.py; then
-            fail=1
-          fi
-
           # 10. THE APP'S OWN READS MUST ANSWER INSIDE THE ANON CEILING. `anon` has a 3-second
           #     statement timeout and `service_role` inherits the 8-second one of `authenticator`,
           #     the role PostgREST connects as, so a slow view fails for the APP while every check
@@ -471,38 +381,11 @@ jobs:
             fail=1
           fi
 
-          # 12. IS THE DATA THAT IS SUPPOSED TO BE DELETED ACTUALLY BEING DELETED?
-          #
-          #     Every other check here asserts data EXISTS and is shaped right. None of them can
-          #     see a retention rule that has stopped running: a table that only grows looks
-          #     exactly like a healthy one, the counts go up and every floor stays green.
-          #
-          #     `earnings_calendar` and `security_news` are both bounded to 90 days, and both
-          #     prunes live in TypeScript inside their resource rather than in the database — so a
-          #     resource that starts failing, or a cutoff someone edits, silently turns a bounded
-          #     table into an unbounded one. The threshold is deliberately looser than the rule
-          #     (120 days against 90): a few days over means the cron is late, which
-          #     `check_resource_health` reports better; a month over means the delete is not
-          #     happening at all.
           # A number that is merely present TWICE, with both copies agreeing, is invisible to every
           # other check here — no floor, no unit band and no freshness rule can see it. It was
           # visible only on the rendered chart, as AAPL's 2025 revenue plotted at both 2025-09-27
           # (the filing) and 2025-09-30 (the provider's rounded month end).
           if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_one_period_one_point.py; then
-            fail=1
-          fi
-
-          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_retention_is_enforced.py; then
-            fail=1
-          fi
-
-          #  A MATVIEW THAT STOPS REFRESHING SERVES STALE DATA AND REPORTS SUCCESS. The segment spine
-          #  is on a CORRECTNESS path (`derive_segment_classification` reads it, migration 179), and it
-          #  was frozen from 2026-09-23 to 10-03 behind 148 timeouts of the PostgREST RPC that refreshed
-          #  it, while `facets-refresh` recorded ok. It refreshes from the pg_cron job
-          #  `muffin-segment-spine` now and records each refresh in `universe_sample`; this asserts
-          #  the newest record is recent (migration 20261003190000).
-          if ! BASE="$BASE" SRV="$SRV" python3 .github/scripts/check_spine_refresh_succeeds.py; then
             fail=1
           fi
 

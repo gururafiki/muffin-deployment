@@ -50,7 +50,6 @@ QUERIES = [
     ("sector page stocks", "sector_constituents?select=security_id,name,symbol,industry,country_iso2,weight,fund_symbol,market_cap,as_of&sector_id=eq.information-technology&order=weight.desc.nullslast,market_cap.desc.nullslast,name.asc&offset=0&limit=20"),
     ("sector page stocks, from a country", "sector_constituents?select=security_id,name,symbol,industry,country_iso2,weight,fund_symbol,market_cap,as_of&sector_id=eq.financials&country_iso2=eq.KR&order=weight.desc.nullslast,market_cap.desc.nullslast,name.asc&offset=0&limit=20"),
     ("screener, two filters", "security_facets?select=security_id&msci_tier=eq.developed&sector_id=eq.information-technology&limit=50"),
-    ("country macro panel", "macro_current?select=code,name,value,as_of&country_iso2=eq.US"),
     # The ratio series range-joins 3.4M price bars to 2.1M metric rows, so it is the biggest join
     # the app sends and it carries the same two-filter shape that broke `price_series` — symbol
     # AND grain. Both grains are timed: weekly reaches back to 2006 and returns the most rows.
@@ -78,17 +77,8 @@ QUERIES = [
     # SEC lanes take from ~70,000 rows to ~8 million when every insider quarter since 2006 lands,
     # and since 2026-10-30 it also asks which days the lane has collected. Apple, ~1 ms in 2026-10.
     ("stock insider card", "security_insider_summary?select=buys,sells,buyers,sellers,net_shares,trades,latest&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834"),
-    # ── The business-lines section (Sankey + donuts), added when the stock page first read the
-    # segment views. Apple, because it is the deepest filer here: three axes, a nested split, and
-    # eighteen years of filings behind the one period the view must choose.
-    #
-    # `security_segment_current` is `security_segment_latest` twice over (a dense_rank across
-    # filings, then a period choice across years), and BOTH views sit above a table that grows with
-    # every filing parsed — 245,000 of them queued. It is exactly the shape that timed out for anon
-    # while answering service_role fine in `fund_sector_weight`, `security_facets` and
-    # `price_series`, so it is timed here before it can do it a fourth time.
-    ("stock business lines", "security_segment_current?select=axis,kind,member_code,member_label,concept_name,revenue,operating_income,operating_margin_pct,revenue_share_pct,currency_code,period_ending&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=revenue.desc.nullslast"),
-    ("stock business lines, nested", "security_segment_detail?select=parent_axis,parent_member,member_code,concept_name,revenue,operating_income,share_of_parent_pct,currency_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=revenue.desc.nullslast"),
+    # The business-lines and macro probes left on 2026-11-08: the edge function writes both, and
+    # this gate checks what the Dagster lanes write (the user's decision).
     # The Sankey's right half. Six metric codes for one security across every annual period it has —
     # an `in.()` over a table of 3.29M rows, which is a different plan from the single-metric reads
     # already timed above.
