@@ -99,8 +99,7 @@ symbol-keyed and why.
 ## Verify
 
 ```bash
-# the mega-cap check should now read 0
-# and the securities should re-enter their backlogs
+# the securities should re-enter their backlogs
 curl -sS -o /dev/null -D - "$BASE/rest/v1/pending_wikidata?select=security_id&limit=1" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'
 ```

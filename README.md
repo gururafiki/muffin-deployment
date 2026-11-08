@@ -560,6 +560,11 @@ things it exists to catch. The PGRST205 incident — fifteen tables 404ing over 
 perfectly present in Postgres — is precisely the bug only an external reader finds. (It moved 03:00
 → 03:30 to stop colliding with the nightly `pg_dumpall`.)
 
+**It checks what the Dagster lanes write, and nothing else** (since 2026-11-08). The checks over data
+the edge function still writes left it: resource health, the frozen `*_missing_at` marks, segment
+reconciliation, the segment spine, and the retention of edge-pruned tables. Grafana's alerts judge
+those resources.
+
 Its zero-expected invariants live in **`market.data_defect`** (migration 134), a view with two
 consumers that cannot drift: market-verify asserts on it over HTTP as anon, and the hourly sampler
 snapshots it into `universe_sample` as `defect.*` — so a defect is caught within an hour and is a
@@ -797,8 +802,8 @@ reason: a sample that grows with the data does not belong under a fixed RPC ceil
 - **`market.security_segment_spine`** — refreshed by `market.refresh_segment_spine()` on the pg_cron
   job `muffin-segment-spine` (:16, hourly) as `postgres` with a 300 s timeout. The function records
   each refresh as `segment_spine.duration_ms` and `segment_spine.rows` in `universe_sample`; a
-  failed refresh rolls its record back, so the record's age is what market-verify and the alert
-  above read. It was a PostgREST RPC inside `facets-refresh` until 2026-10-03, and from 09-23 it
+  failed refresh rolls its record back, so the record's age is what the alert above reads
+  (market-verify read it too, until it narrowed to Dagster data on 2026-11-08). It was a PostgREST RPC inside `facets-refresh` until 2026-10-03, and from 09-23 it
   timed out at the 8 s ceiling on every run.
 - **`http-cache` `/metrics`** — Lua counters in `stack/proxy/nginx.conf`, exposed on the overlay
   only. `provider` is set explicitly per location, never derived from `$proxy_host` (two locations

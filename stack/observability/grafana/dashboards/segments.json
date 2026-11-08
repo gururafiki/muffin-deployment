@@ -297,7 +297,7 @@
   {
    "type": "table",
    "title": "Splits that do NOT reconcile to the filing",
-   "description": "The same arithmetic `check_segments_reconcile.py` runs in market-verify, drawn continuously. A split whose members do not sum to the company's own consolidated revenue means the parser lost a member, counted a subtotal, or partitioned a filing shape it has not seen.\n\nEMPTY IS THE HEALTHY STATE, and that is why this panel has no floor and no limit: the first row to appear is the whole point.",
+   "description": "The reconciliation `check_segments_reconcile.py` ran in market-verify until 2026-11-08, when that gate narrowed to the data the Dagster lanes write; segments are still the edge's, so this panel is now the only place it is drawn. A split whose members do not sum to the company's own consolidated revenue means the parser lost a member, counted a subtotal, or partitioned a filing shape it has not seen.\n\nEMPTY IS THE HEALTHY STATE, and that is why this panel has no floor and no limit: the first row to appear is the whole point.",
    "gridPos": {
     "h": 8,
     "w": 24,
