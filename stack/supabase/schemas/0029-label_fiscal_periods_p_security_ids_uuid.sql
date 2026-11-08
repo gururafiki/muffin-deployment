@@ -4,16 +4,20 @@ CREATE OR REPLACE FUNCTION market.label_fiscal_periods(p_security_ids uuid[])
 AS $function$
 declare v_labelled integer := 0;
 begin
-  with wanted as (
+  with matched as (
     select st.security_id, st.source_code, st.statement, st.period_ending, st.period_type,
-           p.fiscal_year, p.fiscal_period
+           p.fiscal_year, p.fiscal_period, p.distance
       from market.security_statement st
       left join lateral (
-        select fp.fiscal_year, fp.fiscal_period
+        select fp.fiscal_year, fp.fiscal_period, abs(fp.period_end - st.period_ending) as distance
           from market.fiscal_period fp
+          join market.fiscal_calendar fc on fc.security_id = fp.security_id and fc.regime = fp.regime
          where fp.security_id = st.security_id
            and fp.is_canonical
-           and fp.period_end between st.period_ending - 10 and st.period_ending + 10
+           -- The widest window, so the period index serves the range; the rule narrows it below.
+           and fp.period_end between st.period_ending - 25 and st.period_ending + 25
+           and abs(fp.period_end - st.period_ending)
+               <= case when st.period_type = 'quarter' and fc.is_52_53_week then 25 else 10 end
            -- `FY` is the retired spelling of `annual` (2,259 rows until step 2b converts them).
            and fp.fiscal_period = any (case st.period_type
                                          when 'annual'  then array['FY']
@@ -23,7 +27,19 @@ begin
                                        end)
          order by abs(fp.period_end - st.period_ending), fp.period_end desc
          limit 1) p on true
-     where st.security_id = any (p_security_ids))
+     where st.security_id = any (p_security_ids)),
+  ranked as (
+    select m.*,
+           row_number() over (
+             partition by m.security_id, m.source_code, m.statement, m.period_type,
+                          m.fiscal_year, m.fiscal_period
+             order by m.distance, m.period_ending desc) as nearest
+      from matched m),
+  wanted as (
+    select r.security_id, r.source_code, r.statement, r.period_ending, r.period_type,
+           case when r.distance <= 10 or r.nearest = 1 then r.fiscal_year end as fiscal_year,
+           case when r.distance <= 10 or r.nearest = 1 then r.fiscal_period end as fiscal_period
+      from ranked r)
   update market.security_statement st
      set fiscal_year = w.fiscal_year,
          fiscal_period = w.fiscal_period
