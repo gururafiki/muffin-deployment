@@ -7,7 +7,16 @@ Two guards, because migration 126 can be right and still not be enough.
    rows for one (security, metric, period_type) sit within seven days of each other, the collapse
    is not applied — the migration did not reach this database, or its ordering was rewritten.
 
-2. THE RAW TABLE MUST NOT DRIFT PAST THE WINDOW. The collapse spans seven days, which covers every
+2. THE RAW TABLE MUST NOT DRIFT PAST THE WINDOW. RE-KEYED ON FISCAL LABELS 2026-11-07 (Phase 5 step
+   11): a pair whose rows BOTH carry a fiscal label is two years the calendar called different, so
+   one under 300 days apart is a calendar defect and fails outright. A pair with an unlabelled row
+   is a row the calendar placed off the year (decision 11 keeps such rows stored, out of series):
+   counted and reported, never failed. That count replaces the tripwire below, which crept from
+   113 to 122 as weekly waves promoted Korean REITs whose six-month years Yahoo calls annual.
+   Measured 2026-11-07: 123 pairs, 121 with an unlabelled row, and the two labelled ones (Magnera,
+   Republic Airways) were successor calendars overlapping by a quarter, fixed in muffin-ingest#164.
+
+   The history below is the tripwire's. The collapse spans seven days, which covers every
    duplicate measured on 2026-08-22 (18 pairs, all <= 3 days, all agreeing in value). A pair of
    ANNUAL periods 8-299 days apart is a fiscal year reported twice with a gap the window cannot
    see — a new source with a different convention, or a company that changed its year end.
@@ -56,8 +65,8 @@ SAMPLE = 1000
 SAME_YEAR_MAX = 300
 COLLAPSE_WINDOW = 7
 
-# THE KNOWN BACKLOG of the raw half, measured 2026-10-10 over the whole table (see the docstring).
-# Raise it only with a note naming the new pairs; lower it as Phase 5 fixes them.
+# THE KNOWN BACKLOG of the raw half, as it was until the re-key on fiscal labels (2026-11-07). Kept
+# as the history of why the count went; nothing reads it.
 #
 # 113 -> 120 on 2026-10-29, the first run that reached this count since 2026-10-23 (the offset
 # paging timed out before it). Which seven are new cannot be told (the edge rewrites `fetched_at`),
@@ -74,7 +83,6 @@ COLLAPSE_WINDOW = 7
 # evening, the pairs are all known kinds, and in 120 of the 122 at least one row carries no fiscal
 # label, i.e. the calendar has already judged it off the year. Every weekly wave can promote more
 # such REITs, so this constant will keep creeping until the re-key on labels lands.
-KNOWN_DRIFTED_PAIRS = 122
 PAGE = 1000
 
 # A ROTATING SIXTEENTH OF THE UNIVERSE, BY THE FIRST HEX DIGIT OF `security_id`, NEVER THE WHOLE
@@ -150,18 +158,54 @@ def _self_test() -> int:
         print(f"::error::self-test: the keyset read {len(got)} rows of {len(table)}, or reordered")
         return 1
     print(f"  ok   self-test: {len(table)} rows read once each across pages of 4")
+
+    # The rules must DISAGREE on the fixture: a labelled pair 273 days apart fails, an unlabelled
+    # one is only counted, a pair inside the window is the view's, and a year apart is two years.
+    key = ("security_id", "metric_code", "period_type")
+    rows = [
+        {"security_id": "a", "metric_code": "revenue", "period_type": "annual", "as_of": d, "fiscal_year": fy}
+        for d, fy in (("2022-12-31", 2022), ("2023-09-30", 2023), ("2024-09-28", 2024))
+    ] + [
+        {"security_id": "b", "metric_code": "revenue", "period_type": "annual", "as_of": d, "fiscal_year": fy}
+        for d, fy in (("2022-12-31", 2022), ("2023-09-30", None), ("2023-10-02", 2023))
+    ]
+    labelled, unlabelled, within = classify(rows, key)
+    if (len(labelled), len(unlabelled), within) != (1, 1, 1):
+        print(f"::error::self-test: classified {len(labelled)} labelled, {len(unlabelled)} "
+              f"unlabelled and {within} within the window; expected 1, 1 and 1")
+        return 1
+    print("  ok   self-test: a labelled pair fails, an unlabelled one is counted, the window is the view's")
     return 0
 
 
 def pairs_by_gap(rows, key_fields):
     """Consecutive same-key period ends, as (key, gap_days)."""
+    for key, gap, _ in labelled_pairs(rows, key_fields):
+        yield key, gap
+
+
+def labelled_pairs(rows, key_fields):
+    """Consecutive same-key period ends, as (key, gap_days, both rows carry a fiscal label)."""
     by = collections.defaultdict(list)
     for r in rows:
-        by[tuple(r[k] for k in key_fields)].append(datetime.date.fromisoformat(r["as_of"]))
-    for key, dates in by.items():
-        dates.sort()
-        for a, b in zip(dates, dates[1:]):
-            yield key, (b - a).days
+        by[tuple(r[k] for k in key_fields)].append(
+            (datetime.date.fromisoformat(r["as_of"]), r.get("fiscal_year") is not None)
+        )
+    for key, points in by.items():
+        points.sort()
+        for (a, la), (b, lb) in zip(points, points[1:]):
+            yield key, (b - a).days, la and lb
+
+
+def classify(rows, key_fields):
+    """The raw half's verdict: (labelled pairs past the window, unlabelled ones, within it)."""
+    labelled, unlabelled, within = [], [], 0
+    for key, gap, both in labelled_pairs(rows, key_fields):
+        if gap <= COLLAPSE_WINDOW:
+            within += 1
+        elif gap < SAME_YEAR_MAX:
+            (labelled if both else unlabelled).append((key, gap))
+    return labelled, unlabelled, within
 
 
 def main() -> int:
@@ -190,30 +234,29 @@ def main() -> int:
 
     # 2. The raw table, past the window: the WHOLE table, paged, against the known count.
     raw = get_all(
-        "security_metric?select=security_id,metric_code,period_type,as_of"
+        "security_metric?select=security_id,metric_code,period_type,as_of,fiscal_year"
         f"&metric_code=eq.{METRIC}&period_type=eq.annual&order=security_id,as_of"
     )
     if not raw:
         print("::error::security_metric returned no annual rows — the check verified nothing")
         return 1
-    gaps = list(pairs_by_gap(raw, ("security_id", "metric_code", "period_type")))
-    drifted = [(k, g) for k, g in gaps if COLLAPSE_WINDOW < g < SAME_YEAR_MAX]
-    within = sum(1 for _, g in gaps if g <= COLLAPSE_WINDOW)
-    securities = len({k[0] for k, _ in drifted})
-    if len(drifted) > KNOWN_DRIFTED_PAIRS:
-        print(f"::error::{len(drifted)} annual pair(s) are {COLLAPSE_WINDOW}-{SAME_YEAR_MAX} days "
-              f"apart in {securities} securities, above the {KNOWN_DRIFTED_PAIRS} known on "
-              "2026-10-10 — a fiscal year reported twice with a gap the collapse cannot see")
-        for (sid, mc, pt), gap in drifted[:10]:
+    if not any(r.get("fiscal_year") is not None for r in raw):
+        print("::error::no annual row carries a fiscal label — the labelled half verified nothing")
+        return 1
+    labelled, unlabelled, within = classify(raw, ("security_id", "metric_code", "period_type"))
+    if labelled:
+        print(f"::error::{len(labelled)} pair(s) of LABELLED annual periods are {COLLAPSE_WINDOW}-"
+              f"{SAME_YEAR_MAX} days apart in {len({k[0] for k, _ in labelled})} securities — two "
+              "fiscal years the calendar says are different, closer than a year: a calendar defect")
+        for (sid, mc, pt), gap in labelled[:10]:
             print(f"::error::  {sid[:8]} {mc}: {gap} days apart")
         fail = 1
     else:
-        print(f"  ok   {len(drifted)} annual pair(s) beyond the collapse window in {securities} "
-              f"securities, within the {KNOWN_DRIFTED_PAIRS} known ({len(raw)} rows, the whole "
+        print(f"  ok   no labelled annual pair is closer than a year ({len(raw)} rows, the whole "
               f"table; {within} pair(s) inside the window, collapsed by the view)")
-        if len(drifted) < KNOWN_DRIFTED_PAIRS:
-            print(f"::notice::the known backlog shrank to {len(drifted)} — lower "
-                  "KNOWN_DRIFTED_PAIRS so the tripwire keeps its edge")
+    print(f"::notice::{len(unlabelled)} annual pair(s) beyond the window have an unlabelled row in "
+          f"{len({k[0] for k, _ in unlabelled})} securities: rows the calendar placed off the year, "
+          "kept stored and out of series (decision 11). A gauge, not a failure.")
 
     return fail
 
