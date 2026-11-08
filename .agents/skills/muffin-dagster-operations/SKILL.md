@@ -190,6 +190,9 @@ ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 - **A backfill relaunch should name only what is missing.** Read
   `instance.get_materialized_partitions(AssetKey(...))` in the webserver container and launch the
   difference.
+- **A whole dynamic grid is `--partitions grid:<name>`** (for example `grid:security`, 12,846 keys
+  on 2026-11-08). The script reads the keys from the instance, because Linux refuses a single
+  argument over 128 KB. A stage-2 replay over every stored document is one such backfill.
 - **Name every missing partition.** One day left outside a backfill range kept an `eager()` asset
   blocked.
 - **A price recovery names securities, never dates.** The lane is partitioned by security, and each
