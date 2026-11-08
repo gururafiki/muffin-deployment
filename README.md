@@ -312,7 +312,7 @@ the anon key is public and a public cache-buster is a free way to hammer the pro
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_ROLE" -H "Authorization: Bearer $SERVICE_ROLE" \
   -H "Content-Type: application/json" \
-  -d '{"resource":"security-statements","force":true}'
+  -d '{"resource":"security-segments","force":true}'
 ```
 
 `force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
@@ -611,6 +611,7 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `security-quarters` | Dagster company lane — Yahoo's annual and quarterly statements, with their currency |
 | `instrument-profile` | Dagster company lane — read `market.instrument_current` |
 | `security-dividends` | Dagster price lane (`yahoo_corporate_action`, from the chart's events) — read `market.security_corporate_action` |
+| `security-corporate-actions` | Tiingo, retired 2026-10-25; the same Dagster price lane — read `market.security_corporate_action` |
 | `security-metrics` | Dagster `derived_security_metrics` — read `market.security_metric` |
 | `security-statements`, `security-xbrl` | Dagster SEC filer lane (`sec_statement`, then `derived_security_metrics`) — read `market.security_statement_current`, `market.security_metric` |
 | `security-filings`, `security-filing-history` | Dagster SEC filer lane (`sec_filing`, `filer_profile`) — read `market.security_recent_filings` |
@@ -620,9 +621,12 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 
 The Yahoo company family's handlers, their helper modules (`fundamentals.ts`, the live provider
 check `check.ts`) and their eight `pending_*` views were deleted on 2026-10-24 (Phase 4 step 10), so
-a rollback is now a revert of that change, not a re-enabled row. The SEC family's handlers stay
-until three clean days have passed (Phase 5 step 10); its five backlog views went with the
-retirement, because they are what the backlog alerts sample.
+a rollback is now a revert of that change, not a re-enabled row. The SEC family's handlers
+(`security-xbrl`, `-filings`, `-filing-history`, `-insider`, `-statements`, `-eps-history`) went on
+2026-11-08 (Phase 5 step 10), with finviz's `security-price-targets`, Tiingo's
+`security-corporate-actions`, `derive-classifications`, and the helper modules only they used
+(`tiingo.ts`, `alpha-vantage.ts`). Their five backlog views had gone with the retirement, because
+they are what the backlog alerts sample. `xbrl.ts` stays while `security-segments` imports it.
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both
@@ -677,14 +681,14 @@ control is not rendered at all.
 ```bash
 # Any resource, from the node (respects the TTL). The rotation calls this same path:
 docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)" \
-  psql -U postgres -c "select market.cron_post('security-statements')"
+  psql -U postgres -c "select market.cron_post('security-segments')"
 
 # Directly, with `force` to bypass the TTL — SERVICE-ROLE ONLY, because the anon key is public
 # and a public cache-buster is a free way to hammer the provider:
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"resource":"security-statements","force":true}'
+  -d '{"resource":"security-segments","force":true}'
 ```
 
 `force` clears the TTL and the error backoff but **not** the in-flight lock, so concurrent forced

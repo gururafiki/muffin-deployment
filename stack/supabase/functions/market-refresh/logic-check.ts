@@ -216,30 +216,11 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
 {
   const index = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
 
-  // WHY A LIST OF EXACT GATES rather than an analysis of the branches.
-  //
-  // The first version of this check walked from each `… .length === 0` branch to its closing brace
-  // and asked whether a gate appeared inside. It caught ONE of four deleted gates when tested by
-  // mutation: brace depth counted braces in comments and template literals too, so most blocks
-  // ended early and the write fell outside the window — the check reported "all six marking sites
-  // gated" while three were not. It would have shipped as protection while protecting nothing,
-  // which is the failure mode this whole file exists to prevent.
-  //
-  // A named list is brittle to refactoring and that is the acceptable trade: rewording a gate fails
-  // here loudly and the list gets updated, whereas DELETING one — the thing that costs thousands of
-  // securities — can never pass silently.
-  //
-  // Each entry is a site where a batch that produced nothing writes a `*_missing_at`, and the
-  // string is the proof that the endpoint answered for someone in this run.
-  const gates: [string, string][] = [
-    // SEC only since 2026-10-18: the yfinance half and its `statements_missing_at` left the edge.
-    ['security-statements',   'emptyAnswer.length > 0 && secOk'],
-    // The quarters, profile-detail, industries, profiles and fundamentals gates left with their
-    // handlers (2026-10-24, Phase 4 step 10); the Dagster company lane owns that family.
-  ]
-  for (const [resource, gate] of gates) {
-    check(index.includes(gate), `${resource} still gates its empty-answer marking`, gate)
-  }
+  // THE EXACT-GATE LIST THAT STOOD HERE IS EMPTY, SO IT WENT. Each entry was a site where a batch
+  // that produced nothing wrote a `*_missing_at`, and its string was the proof that the endpoint
+  // answered for someone in the run. The last one, `security-statements`, left with the SEC
+  // family's handlers (2026-11-08, Phase 5 step 10); the Dagster lanes record absences through
+  // their own outcome counters, which their tests guard.
 
   // PAGING MUST BE A PARTITION, NOT FOUR SAMPLES. Both multi-page backlog reads order by
   // `best_weight`, which is 0 for every security no tracked fund holds — most of the rows. Postgres
@@ -261,43 +242,6 @@ console.log('\nempty-answer marking — gated on the endpoint having answered')
     'no post-claim validation returns without releasing the lock',
     validationReturns ? `${validationReturns} early return(s) still hold the claim` : 'all release')
 
-  // AN ACTION MUST RECORD THE LISTING IT WAS SEEN ON. Tiingo is asked by US ticker; `security_price`
-  // stores the PRIMARY listing; those differed for 33 of the first 45 securities ingested
-  // (SSNLF vs 005930.KS, NONOF vs NOVO-B.CO, ASMLF vs ASML.AS). A dividend from the OTC line is in
-  // USD against a KRW series — wrong by three orders of magnitude — and unverifiable after the fact
-  // without this column, which is how it survived a full review and a green suite.
-  check(index.includes('observed_symbol: item.symbol'),
-    'a corporate action records the listing it was observed on',
-    'observed_symbol')
-
-  // A SPLIT FACTOR IS A FLOAT, so "no split" is not `=== 1`. Tiingo returns a 3-for-1 as
-  // 3.0000000001 often enough to matter, and the inverse — comparing with `!==` — would record a
-  // split on every ordinary bar of every security, which is 3 million phantom rows.
-  const tiingo = await Deno.readTextFile(new URL('./tiingo.ts', import.meta.url))
-  check(/Math\.abs\(factor - 1\) > 1e-9/.test(tiingo),
-    'splitFactor is compared with a tolerance, not for exact equality',
-    'Math.abs(factor - 1) > 1e-9')
-  // A 404 from Tiingo is a FACT about the symbol (it does not carry local foreign listings), and a
-  // 500 is not. Collapsing them is the throw-vs-empty shape that has cost this pipeline thousands
-  // of securities; the typed error is what keeps the marking path narrow.
-  check(tiingo.includes('export class TiingoNoSuchTicker'),
-    'a Tiingo 404 is a distinct, typed outcome — not a generic failure',
-    'TiingoNoSuchTicker')
-  check(index.includes('e instanceof TiingoNoSuchTicker'),
-    'and only that outcome marks the security',
-    'instanceof check at the marking site')
-
-  // A BACKLOG'S `remaining` MUST BE IN THE SAME UNIT AS WHAT IT COUNTS DOWN FROM. The first live
-  // run of `security-corporate-actions` reported `remaining: 0` on 60 securities that had barely
-  // been touched, because `written` counts ACTION ROWS (521 of them) and `wanted.length` counts
-  // SECURITIES — the subtraction went negative and clamped. A drained backlog and a refused one
-  // looked identical, which is the failure this whole file exists to prevent.
-  // The expression now reports `unanswered` rather than `remaining` (see the scope guard below),
-  // but the UNITS rule it encodes is unchanged and still worth pinning: `covered` counts
-  // securities, `written` counts action rows.
-  check(index.includes('wanted.length - covered - none - noTicker'),
-    'corporate-actions counts SECURITIES, not rows, in its page arithmetic',
-    'the expression uses `covered`, not `written`')
   const pageOrders = index.match(/\.range\(/g)?.length ?? 0
   const tiebreaks = index.match(/\.order\('security_id', \{ ascending: true \}\)/g)?.length ?? 0
   check(tiebreaks >= pageOrders,
@@ -355,89 +299,6 @@ console.log('\nworker budget — a loop must leave room to finish')
   check(reserve >= 10_000,
     'the reserve is big enough for a batch tail to actually finish',
     `reserve ${reserve}ms`)
-}
-
-console.log('\nabsence classifier — a crash in the adapter is still an answer about the symbol')
-{
-  // THE MIRROR OF THE THROTTLE CLASSIFIER BELOW, and it failed the same way: a vocabulary that
-  // knew one wording for a fact the provider states in two.
-  //
-  // Measured 2026-09-06 against the live openbb-api. `security-dividends` had returned
-  // `ok: false, failed: 60, written: 0` on every run since 2026-09-05 with 9,221 securities
-  // pending, because only "No dividend data found" was classified as an absence. A venue yfinance
-  // does not cover crashes the adapter instead, and those securities — being the HEAVIEST holdings
-  // in the backlog — were re-asked eight times a day for ever.
-  //
-  // Every string is quoted from a response on this deployment. AAPL and KO returned full dividend
-  // histories in the same seconds, which is what proves these are statements about the SYMBOL.
-  const mustMatch = [
-    "Error getting data for TSLA: No dividend data found for TSLA",
-    "Error getting data for ICT.PS: 'NoneType' object has no attribute 'empty'",
-    "Error getting data for FAB.AE: 'NoneType' object has no attribute 'empty'",
-    "Error getting data for WARBABAN.KW: 'NoneType' object has no attribute 'empty'",
-    "Error getting data for ANDINAB.SN: 'NoneType' object has no attribute 'empty'",
-    // SEC, via openbb, for a US OTC line absent from SEC's own ticker map. Both name the symbol.
-    "openbb 500 on /api/v1/equity/fundamental/income?provider=sec&symbol=AIBRF: "
-      + "Unexpected Error -> ContentTypeError -> 404, message='Attempt to decode JSON with unexpected mimetype: text/html'",
-    "Could not find CIK for symbol: BRK/B",
-  ]
-  // A NEGATIVE CACHE EARNED ON ONE OF THESE WOULD BE THE 1,369-SECURITY INCIDENT AGAIN: a provider
-  // refusing us, or a transport fault, recorded as thousands of permanently unanswerable companies.
-  const mustNotMatch = [
-    'YFRateLimitError: Too Many Requests',
-    'Error: You have run over your hourly request limit',
-    'our standard API rate limit is 25 requests per day',
-    'Signal timed out.',
-    'client error (Connect): tcp connection refused',
-    'openbb 400 on /api/v1/equity/fundamental/dividends?provider=yfinance&symbol=BRK/B',
-    // A 500 that is NOT a 404 is the provider being unwell, and must never mark a symbol.
-    'openbb 500 on /api/v1/equity/fundamental/income?provider=sec&symbol=AAPL: Internal Server Error',
-  ]
-  const src = await Deno.readTextFile(new URL('./resources.ts', import.meta.url))
-  const handlerSrc = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const body = src.slice(src.indexOf('export function noDataForSymbol'))
-  const terms = [...body.slice(0, body.indexOf('\n}')).matchAll(/includes\((?:'([^']+)'|"([^"]+)")\)/g)]
-    .map((m) => m[1] ?? m[2])
-  check(terms.length >= 4,
-    'the absence classifier knows every wording, not just the tidy one',
-    terms.join(' | '))
-
-  // THE STATEMENTS BACKLOG IS MARKED ON PER-SYMBOL EVIDENCE, NOT ON A
-  // RUN-LEVEL TALLY. `secOk` says the endpoint answered for SOMEONE this run — the right guard
-  // against an outage, and guaranteed false once the answerable head has drained, which is how
-  // this resource sat at `written: 240, remaining: 5972` on six identical runs.
-  check(/if \(rows\.length === 0 && secNoSuchSymbol\) \{\s*await markSecNone/.test(handlerSrc),
-    'a named SEC 404 marks on its own evidence, without the run-level tally in front of it')
-  check(/if \(noDataForSymbol\(msg\)\) \{ secNoSuchSymbol = true; continue \}/.test(handlerSrc),
-    'a SEC 404 is classified as an absence rather than counted as a failure')
-
-  const matches = (msg: string) => terms.some((t) => msg.toLowerCase().includes(t))
-  const missed = mustMatch.filter((m) => !matches(m))
-  check(missed.length === 0,
-    'every "this symbol has no data" wording seen in production is classified',
-    missed.length ? `NOT matched: ${missed.join(' | ')}` : `${mustMatch.length} wordings`)
-
-  const wrong = mustNotMatch.filter((m) => matches(m))
-  check(wrong.length === 0,
-    'a refusal or a transport fault is NEVER mistaken for an absence',
-    wrong.length ? `wrongly matched: ${wrong.join(' | ')}` : `${mustNotMatch.length} negatives`)
-
-  // AND THE TWO CLASSIFIERS MUST NOT OVERLAP. If a wording were in both, the branch that runs
-  // first decides, and marking a throttled symbol absent is the failure this whole file exists to
-  // prevent — so assert it structurally rather than trusting the two lists to stay disjoint.
-  const tbody = src.slice(src.indexOf('export function throttled'))
-  const tterms = [...tbody.slice(0, tbody.indexOf('\n}')).matchAll(/includes\('([^']+)'\)/g)].map((m) => m[1])
-  const overlap = terms.filter((t) => tterms.some((x) => t.includes(x) || x.includes(t)))
-  check(overlap.length === 0,
-    'the absence and throttle classifiers share no vocabulary',
-    overlap.length ? `BOTH claim: ${overlap.join(', ')}` : `${terms.length} vs ${tterms.length} terms, disjoint`)
-
-  // The handler must actually USE it — a classifier nothing calls is the `filing_form` defect.
-  const handler = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  check(/if \(noDataForSymbol\(msg\)\)/.test(handler),
-    'the dividends handler classifies with it rather than carrying its own regex')
-  check(!/\/no dividend data found\/i\.test\(/.test(handler),
-    'the old single-wording regex is GONE from the handler, not merely joined by the classifier')
 }
 
 console.log('\nthrottle classifier — the wordings providers ACTUALLY use')
@@ -636,7 +497,7 @@ console.log('\nresource registry — the cron and the function agree')
 
   // The incremental backlogs specifically. A backlog resource drains a slice per run, so anything
   // longer than the cron interval stalls it for the length of the TTL rather than slowing it.
-  const mustBeBacklog = ['ACTIONS_RESOURCE', 'STATEMENTS_RESOURCE']
+  const mustBeBacklog = ['NEWS_RESOURCE', 'WIKIDATA_RESOURCE']
   const wrongTtl = mustBeBacklog.filter((c) =>
     !ttlKeys.some(([, key, ttl]) => key === c && ttl === 'BACKLOG_TTL_MINUTES'))
   check(wrongTtl.length === 0,
@@ -684,19 +545,10 @@ console.log('\nresource registry — the cron and the function agree')
   // loudly and is a two-second fix, while a row count silently replacing a security count is a
   // backlog that reports itself drained for ever.
   const REMAINING_MAY_USE: Record<string, string[]> = {
-    ACTIONS_RESOURCE: ['wanted', 'covered', 'none', 'noTicker'],
-    // Both of these report the BACKLOG via `backlogSize`, which the loop exempts from the
-    // arithmetic rules — there are no units to confuse in a `content-range` count. They are still
-    // listed so the "has the list rotted" tally keeps meaning "every resource was looked at".
-    STATEMENTS_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
-    INSIDER_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
-    FILINGS_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
+    // These report the BACKLOG via `backlogSize`, which the loop exempts from the arithmetic
+    // rules — there are no units to confuse in a `content-range` count. They are still listed so the
+    // "has the list rotted" tally keeps meaning "every resource was looked at".
     SEGMENTS_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
-    FILING_HISTORY_RESOURCE: [],
     // Korea. `security-kr-segments` reports `pending_kr_segments`; `kr-filings` reports
     // `pending_kr_history`, which is ITS OWN backlog — the companies whose filing history is
     // unwalked — and deliberately not the parse queue, which belongs to the other resource.
@@ -717,17 +569,10 @@ console.log('\nresource registry — the cron and the function agree')
     CN_SEGMENTS_RESOURCE: [],
     // Reports the backlog via `backlogSize`, like the others above.
     WIKIDATA_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
-    EPS_HISTORY_RESOURCE: [],
-    // Analyst actions. Reports `pending_price_targets` via `backlogSize`; `actions` counts ROWS
-    // (one per analyst action) and `advanced` counts SECURITIES whose cursor moved, which are
-    // deliberately different units and named so.
-    PRICE_TARGETS_RESOURCE: [],
     // A SWEEP, NOT A BACKLOG: `remaining` is DAYS still to walk, computed from the cursor
     // against its floor. `walkedTo` and `stopAt` are the only identifiers involved, and
     // the units are days rather than securities — which is exactly why this list exists.
     EARNINGS_HISTORY_RESOURCE: ['walkedTo', 'stopAt', 'getTime'],
-    XBRL_RESOURCE: [],
     NEWS_RESOURCE: [],
   }
   const idxLines = index.split('\n')
@@ -830,7 +675,9 @@ console.log('\nresource registry — the cron and the function agree')
         scopeOffenders.push(`${b.name} reports ${declared} but drives ${views.join('/')}`)
       }
     }
-    check(scopeOffenders.length === 0 && scopeChecked >= 15,
+    // A FLOOR, so a parser that stops finding the blocks cannot pass vacuously. Nine since the SEC
+    // family's handlers left (2026-11-08): news, wikidata, segments and the KR/IN/CN pairs.
+    check(scopeOffenders.length === 0 && scopeChecked >= 9,
       `every backlog-driven resource reports its BACKLOG as remaining — ${scopeChecked} checked`,
       scopeOffenders.join('; ') || `${scopeChecked} backlog-driven resources, all reporting their own pending view`)
   }
@@ -967,113 +814,6 @@ console.log('\nextractMacroPoints — junk is dropped, not coerced')
 }
 
 
-// ── security-statements — SEC only; Yahoo's statements are the company lane's ─
-//
-// 0 of 104,972 statement rows carried a reporting currency, while the `currency` column and the
-// code that reads `reported_currency` had both existed since migration 29 — yfinance simply never
-// sends it. SEC does, along with 18 annual periods against yfinance's 4. Both properties are
-// silent when lost: the rows still arrive, just shallower and unlabelled.
-//
-// Since 2026-10-18 the resource asks SEC alone. Yahoo's annual and quarterly statements are the
-// Dagster company lane's, labelled with their currency; the yfinance half this resource kept held 26
-// securities Yahoo answers nothing for, and would have been a second writer of the lane's rows.
-console.log('\nsecurity-statements — SEC only')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const seg = idx.slice(idx.indexOf('resource === STATEMENTS_RESOURCE'))
-  const end = seg.indexOf('if (resource === ONE_SECURITY_RESOURCE)')
-  if (end < 0) throw new Error('the statements handler is no longer followed by security-refresh')
-  const withComments = seg.slice(0, end)
-  // Comments stripped: every string below also appears in the prose explaining it, and matching
-  // the prose is how three guards passed a mutation earlier in this session.
-  const body = withComments.replace(/\/\/[^\n]*/g, '')
-
-  check(
-    /provider=sec/.test(body),
-    'SEC is called at all — it is the only provider here that returns reported_currency',
-  )
-  check(
-    /period=annual/.test(body),
-    'SEC is asked for ANNUAL periods — period=quarter answers 422, measured',
-  )
-  // THE EDGE NO LONGER ASKS YAHOO FOR STATEMENTS. The company lane writes the same rows (source
-  // `yfinance`, the same key) WITH the currency Yahoo states; an edge write of the same period would
-  // replace it with null.
-  check(
-    !/provider=yfinance/.test(body),
-    'the statements resource does not ask yfinance — Yahoo\'s statements are the Dagster company lane\'s, and a second writer would null the currency the lane wrote',
-  )
-  // SCOPED TO THE SEC REQUEST: the currency must be read from the answer SEC gave, so the write
-  // has to come after the call that produced it.
-  check(
-    body.indexOf('provider=sec') > -1 &&
-      body.indexOf('currency: r.reported_currency') > body.indexOf('provider=sec'),
-    'reported_currency is written to the currency COLUMN from SEC\'s answer — the column has existed since migration 29 and was 0 of 104,972 before SEC was asked',
-  )
-  check(
-    /source_code:\s*'sec'/.test(body),
-    "rows from the filing are attributed to 'sec', so a later disagreement can be resolved by source priority",
-  )
-  check(
-    /item\.usTicker/.test(body) && /if \(!item\.usTicker\) continue/.test(body),
-    'SEC is skipped when there is no US ticker rather than asked with a symbol it cannot resolve (SAP works, SAP.DE does not)',
-  )
-  check(
-    /secFailed\+\+/.test(body) && !/statements_missing_at/.test(body),
-    'a SEC failure is counted, NOT marked — and nothing here writes statements_missing_at, whose only writer was the yfinance half',
-  )
-  // BOTH HALVES EXIT THROUGH SEC'S CACHE. A `missing` security (no statements at all) that SEC has
-  // nothing for must be recorded too, or it is re-asked on every run for ever.
-  check(
-    !/want === 'no_sec'/.test(body),
-    'the SEC mark is not restricted to the no_sec half — a security with no statements that SEC has nothing for is recorded too',
-  )
-  // A THROTTLE MUST STILL TAKE THE FAILURE PATH, or the classifier's new SEC wordings could let a
-  // rate limit mark a page. Ordering is load-bearing: `throttled` is tested BEFORE the absence
-  // classifier, so a refusal can never reach it.
-  check(
-    /throttled\(msg\)[\s\S]{0,120}throttledOut = true; break \}[\s\S]{0,1200}?noDataForSymbol\(msg\)/.test(body),
-    'a throttle is classified BEFORE the absence wordings, so a refusal can never mark a symbol',
-  )
-  // The backlog needs its own exit, or it re-asks for ever — the shape that has now cost this
-  // pipeline five separate resources.
-  check(
-    /update\(\{\s*statement_currency_missing_at:/.test(body),
-    'a company SEC has no filings for is recorded, so the backlog can drain',
-  )
-  // THE RULE MOVED RATHER THAN RELAXED. The EMPTY-ANSWER path still carries all three conditions —
-  // asked to completion, produced nothing, and the endpoint answered for someone this run — which
-  // is the right guard against an outage being recorded as a page of dead securities. What was
-  // added beside it is a path for a 404 that NAMES the symbol, which is evidence about that symbol
-  // and needs no tally in front of it. Requiring the tally there is what kept 2,432 securities at
-  // the head of a weight-ordered backlog for ever: with `fromSec: 0` the whole page is
-  // unanswerable, so `secOk` can never become true.
-  check(
-    /rows\.length === 0 && secAsked && secRows === 0\) \{\s*emptyAnswer\.push/.test(body) &&
-      /if \(emptyAnswer\.length > 0 && secOk\)/.test(body),
-    'an EMPTY answer is held and marked only once the endpoint has answered for someone — a failure, a throttle or a deadline is not evidence it does not file',
-  )
-  // AND A RUN WHERE NOTHING ANSWERED ASKS A CONTROL FILER, or a queue of companies SEC has nothing
-  // for is asked on every run and never recorded (2026-10-18: REAX, OCTLF, CIB, `unanswered: 3`).
-  // Only then, and never past a throttle: a refused control proves nothing.
-  check(
-    /if \(emptyAnswer\.length > 0 && !secOk && !throttledOut && /.test(body) &&
-      /symbol=\$\{SEC_CONTROL_FILER\}/.test(body) &&
-      /if \(controlAnswered\) secOk = true/.test(body),
-    'a run where nothing answered asks a control filer before trusting its empty answers',
-  )
-  // AND PAST THE CACHE (2026-10-20). http-cache serves an expired 200 while its background refresh
-  // fails, so a control answered by the cache would "prove" SEC healthy while it answers nobody —
-  // exactly what kept `security-price-targets` reporting ok through three weeks of finviz 403s.
-  check(
-    /symbol=\$\{SEC_CONTROL_FILER\}[^`]*`,\s*Math\.min\(20_000, deadline - Date\.now\(\)\), \{ uncached: true \},/.test(body),
-    'and the control filer is asked past the cache',
-  )
-  check(
-    /secOk = true/.test(body),
-    'secOk is actually set when SEC returns rows — an success flag that is never raised marks nothing, and one that is never checked marks everything',
-  )
-}
 
 // ── every source a function WRITES must be a source some migration CREATED ───────────────────
 //
@@ -1186,133 +926,6 @@ console.log('\nmigration filenames sort numerically')
 }
 
 
-
-// ── THE EPS SURPRISE UNIT IS DECIDED IN ONE PLACE, AND THE SOURCE DECIDES IT ───────────────────
-//
-// Two spellings of the same number exist and they differ by 100x:
-//
-//   openbb's wrapper   `surprise_percent`     0.125891   a FRACTION
-//   the raw provider   `surprisePercentage`   12.5891    a PERCENT
-//
-// The resource calls the provider DIRECTLY — it has to, because a rate-limited response arrives as
-// a 200 that openbb turns into a 204 indistinguishable from "no data" — so it must NOT multiply.
-// Multiplying would report a 12.59% beat as 1,259% and dividing would report it as 0.13%; both are
-// plausible enough to survive a glance, which is why this is pinned rather than left to a comment.
-//
-// SETTLED BY MEASUREMENT, 2026-08-22. The raw payload was read directly once the quota reset:
-// MSFT's 2026-06-30 quarter reports 4.74 against an estimated 4.21, and `surprisePercentage` is
-// 12.5891 — which is (4.74 - 4.21) / 4.21 as a PERCENT, not a fraction. openbb's wrapper sends
-// 0.125891 for the same quarter, so it is the wrapper that divides. The earlier note here recorded
-// this as inferred-but-unverified; it is now arithmetic against a known beat.
-{
-  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const av = await Deno.readTextFile(new URL('./alpha-vantage.ts', import.meta.url))
-  check(/surprisePct:\s*num\(r\.surprisePercentage\)/.test(av),
-    'the surprise percent is read from the raw provider field',
-    'alpha-vantage.ts must map `surprisePercentage`, not the wrapper\'s `surprise_percent`')
-  check(/surprise_pct:\s*q\.surprisePct,/.test(src) && !/q\.surprisePct\s*\*\s*100/.test(src),
-    'the raw provider percent is stored unscaled — it is already a percent',
-    'multiplying would report a 12.59% beat as 1,259%')
-
-  // ── AN EMPTY BODY IS AN ANSWER ABOUT THE SYMBOL; AN EMPTY ARRAY IS NOT ───────────────────────
-  //
-  // Measured 2026-08-22: `ASMLF` returns `{}` with ZERO keys while `ASML` returns 108 quarters in
-  // the same minute. That zero-key test is the whole discriminator — a renamed field would leave
-  // `symbol` and `annualEarnings` behind, so it can never be mistaken for a symbol the provider
-  // does not carry. Pinned on the KEY COUNT specifically: relaxing it to "no quarterlyEarnings"
-  // would let a renamed field mark every security in the page as uncovered.
-  check(/Object\.keys\(body\)\.length === 0/.test(av) && /notCovered: true/.test(av),
-    'an empty provider body is classified as "does not carry this symbol", by key count',
-    'alpha-vantage.ts must distinguish a zero-key body from a shape it did not expect')
-
-  // And the caller may mark ONLY on that flag. The backlog is ordered by fund weight, so a symbol
-  // the provider cannot answer sits at the head and is re-asked every run until something records
-  // that we asked — the fifth stall of this shape in this schema. Marking on `quarters.length === 0`
-  // instead would re-introduce the defect the flag exists to prevent, because a throttled or
-  // renamed response is empty too.
-  //
-  // Anchored on the LOOP, not on the handler's first `finish_refresh` — this handler calls that
-  // three times (the missing-key return, the drained-backlog return, and the tail), so the obvious
-  // window ends 290 characters in, before the loop it is meant to cover. Written that way first,
-  // and it failed rather than passing vacuously only because the branch it looks for sits after
-  // the cut. That is the same "anchored on the first match in the file" trap logic-check already
-  // records one level down.
-  const eps = src.slice(src.indexOf('resource === EPS_HISTORY_RESOURCE'))
-  const loopAt = eps.indexOf('for (const [i, item] of wanted.entries())')
-  const marking = eps.slice(loopAt, eps.indexOf('p_ok: !rateLimited'))
-  check(loopAt > 0 && marking.length > 500,
-    'the EPS marking window covers the loop',
-    `window is ${marking.length} chars — the anchors have moved`)
-  check(/if \(got\.notCovered\) \{/.test(marking) &&
-        !/quarters\.length === 0[\s\S]{0,200}eps_history_fetched_at/.test(marking),
-    'the EPS backlog marks a symbol only when the provider said it does not carry it',
-    'marking on an empty result would mark every security in a throttled page')
-}
-
-// ── `adj_price_target` IS THE NEW TARGET AND `price_target` IS THE PREVIOUS ONE ────────────────
-//
-// The names invite the opposite reading, which is why this is pinned rather than left to a comment.
-// Measured 2026-09-07 over 160 rows across eight symbols:
-//
-//   both fields present        90
-//   `adj_price_target` alone   55     Initiated / Resumed — there IS no previous target
-//   `price_target` alone        0     never happens
-//   neither                    15
-//
-// and where both appear they ALWAYS differ (48 of 48), which rules out `adj` meaning
-// split-adjusted. So `adj_price_target` is the target the analyst has just set. Reading
-// `price_target` as "the price target" would store the SUPERSEDED number and be null 40% of the
-// time, while looking entirely reasonable on a page — this schema's signature failure.
-{
-  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  // BOUNDED AT BOTH ENDS. Sliced only from the start, this window ran to the end of the file and
-  // the "no flat headroom" check below matched FOUR other handlers that legitimately use
-  // `deadline - 8_000` — a guard failing for a reason unrelated to what it tests. That is the
-  // "anchored on the first match in the file" trap this file already records one level down, and
-  // it was committed here anyway; the fix for it is a real end marker, not a cleverer pattern.
-  const ptStart = src.indexOf('resource === PRICE_TARGETS_RESOURCE')
-  const ptEnd = src.indexOf("remaining: await backlogSize(market, 'pending_price_targets')", ptStart)
-  const pt = ptStart >= 0 && ptEnd > ptStart ? src.slice(ptStart, ptEnd) : ''
-  check(pt.length > 500, 'the price-target handler is findable and bounded',
-    'an anchor has moved and every check below would pass vacuously or match a neighbour')
-  check(/target_to:\s*num\(r\.adj_price_target\)/.test(pt),
-    'the CURRENT target is read from `adj_price_target`',
-    'reading `price_target` stores the superseded number and is null 40% of the time')
-  check(/target_from:\s*num\(r\.price_target\)/.test(pt),
-    'the PREVIOUS target is read from `price_target`',
-    'the two fields are the opposite way round from what their names suggest')
-
-  // THE CURSOR ADVANCES ON A SUCCESSFUL ASK, NOT ON ROWS. A US small cap with no analyst coverage
-  // legitimately returns nothing; advancing only on rows would leave it at the head of a
-  // weight-ordered backlog for ever — the stall this schema has hit in five separate resources.
-  // `fetchWithIsolation` returns a null error only when the provider demonstrably answered, so it
-  // is the honest gate. Anchored inside the handler, because `!iso.error` appears elsewhere.
-  check(/if \(!iso\.error\) \{[\s\S]{0,400}price_targets_fetched_at/.test(pt),
-    'the price-target cursor advances for the whole group on a successful ask',
-    'advancing only on answered symbols stalls every uncovered US small cap at the head')
-  check(!/answered\.has[\s\S]{0,200}price_targets_fetched_at/.test(pt),
-    'the cursor is not gated on a per-symbol answer',
-    'that is the five-times-repeated stall in this schema')
-
-  // THE BATCH BUDGET IS LEARNED, NOT A CONSTANT. The first version gated on a flat
-  // `deadline - 8_000`; a batch of 40 measured ~15s against finviz, so the last batch of EVERY run
-  // was started with 8s left and cut short, reporting `lastError: "Signal timed out."` on every
-  // run for ever. Nothing was corrupted — the cursor correctly did not advance those securities —
-  // but it poisons the one field an operator reads to tell whether anything is wrong. A bigger
-  // constant would only re-tune the magic number to one afternoon's measurement.
-  check(/lastBatchMs/.test(pt) && /Date\.now\(\) \+ lastBatchMs [\s\S]{0,40}> deadline/.test(pt),
-    'a batch is started only if the LAST batch\'s measured duration still fits',
-    'a flat headroom re-tunes a magic number and times out the final batch of every run')
-  check(!/Date\.now\(\) < deadline - 8_000/.test(pt),
-    'the flat 8s headroom is gone',
-    'it guaranteed a timed-out final batch, because a batch costs about twice that')
-  // AND A BATCH THAT ERRORED IS A FAILED BATCH. `fetchWithIsolation` RETURNS its error rather than
-  // throwing, so the catch never sees it and the tally read `batchesFailed: 0` beside a batch that
-  // answered nothing.
-  check(/if \(iso\.error\) \{[\s\S]{0,120}batchesFailed\+\+/.test(pt),
-    'an isolation error counts as a failed batch',
-    'otherwise a run that answered nothing reports a clean tally')
-}
 
 // ── A WHOLE-TABLE SELECT IS SILENTLY CAPPED AT `PGRST_DB_MAX_ROWS` ─────────────────────────────
 //
