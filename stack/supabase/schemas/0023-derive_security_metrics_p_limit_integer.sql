@@ -39,7 +39,9 @@ begin
       f.metric_code,
       src.metric_period_type,
       src.period_ending,
-      (src.data ->> f.field)::numeric,
+      -- IN THE METRIC'S OWN SIGN: an outflow is negative (migration 20261108235000), and a
+      -- provider that states it as a positive payment carries `sign = -1`.
+      f.sign * (src.data ->> f.field)::numeric,
       src.currency,
       src.source_code,
       now(),

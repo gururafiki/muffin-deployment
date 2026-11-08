@@ -20,6 +20,10 @@ begin
   --    admit 13-week quarters (182/91, a 53-week year 182/98 or 189/91) and the 12/12/12/16-week
   --    calendar (168/112, a 53-week year 168/119) that Costco and PepsiCo file.
   --    It is the year's fourth quarter, so it takes the year's fiscal label.
+  --    A SERIES OF ONE SIGN THAT LEAVES A REMAINDER OF THE OTHER is a year and quarters that
+  --    disagree (a restatement, a change of scope): no number rather than a wrong one. Judged in
+  --    each metric's natural orientation, so capex, stored negative, is guarded as it was when
+  --    it was stored positive, and a loss-making company's profitable Q4 is still derived.
   create temporary table _q4 on commit drop as
   select a.security_id, a.metric_code, a.as_of, a.value - q.s3 as value, a.currency_code,
          case when a.fiscal_period = 'FY' then a.fiscal_year end as fiscal_year,
@@ -27,9 +31,12 @@ begin
     from market.security_metric a
     join market.metric mt on mt.code = a.metric_code and mt.is_flow
     join _ttm_page pg on pg.security_id = a.security_id
+   cross join lateral (select case when mt.is_outflow then -1 else 1 end as o) o
    cross join lateral (
      select count(*) as n, sum(m.value) as s3, min(m.as_of) as first_q, max(m.as_of) as last_q,
-            bool_and(m.value >= 0) as nonneg,
+            -- IN THE METRIC'S NATURAL ORIENTATION: an outflow is stored negative, so its series
+            -- is judged as the payments it records (`o` is -1 for an outflow, 1 otherwise).
+            bool_and(m.value * o.o >= 0) as nonneg,
             -- Two unknown currencies are not a match: a null on either side fails this.
             bool_and(m.currency_code = a.currency_code) as same_ccy
        from market.security_metric m
@@ -48,7 +55,7 @@ begin
      and a.as_of - q.last_q between 80 and 120
      and q.last_q - q.first_q between 165 and 200
      and q.same_ccy
-     and not (q.nonneg and a.value >= 0 and a.value - q.s3 < 0)
+     and not (q.nonneg and a.value * o.o >= 0 and (a.value - q.s3) * o.o < 0)
      and not exists (
        select 1 from market.security_metric x
         where x.security_id = a.security_id and x.metric_code = a.metric_code
