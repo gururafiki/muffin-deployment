@@ -88,7 +88,9 @@ groups:
       summary: pg_cron last fired {{ $values.B }} minutes ago (expected every 5)
       description: 'THIS IS THE ALERT THAT REPLACES GITHUB''S OWN VISIBILITY. Moving the warm-up into pg_cron removed the last external scheduler, so nothing else drives the pipeline and the failure mode
         is SILENT — the data simply stops being refreshed while every count stays plausible for days. The rotation fires every 5 minutes; past 30 it has stopped. `coalesce(..., 9999)` is deliberate: NO
-        ROW means the sampler itself is not running, which is the same emergency, and must not read as healthy. Check `select * from cron.job_run_details order by start_time desc limit 20` on the node.'
+        ROW means the sampler itself is not running, which is the same emergency, and must not read as healthy. Check `select * from cron.job_run_details order by start_time desc limit 20` on the node.
+        If `muffin-rotation` is succeeding and `muffin-universe` is failing, the scheduler is fine and the SAMPLE stopped: on 2026-11-08 it was cancelled at its 60 s bound by a 33 s scan of
+        `insider_trade` (migration 20261108170000). Time its parts before raising anything.'
   - uid: muffin-backlog-stalled
     title: A backlog is not draining while its runs report success
     condition: C
