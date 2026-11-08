@@ -76,6 +76,11 @@ QUERIES = [
     # ── The insider card (`use-insider-activity.ts`). The summary reads `insider_trade`, which the
     # SEC lanes take from ~70,000 rows to ~8 million when every insider quarter since 2006 lands,
     # and since 2026-10-30 it also asks which days the lane has collected. Apple, ~1 ms in 2026-10.
+    # ── The analyst-actions card (`use-analyst-actions.ts`), read through the view that serves each
+    # action once by its best source (migration 20261108210000). Its anti-join pairs every row with
+    # its own security's same-day rows, so it grows with Yahoo's history: ~100 actions a company,
+    # AAPL 971. Apple, as the deepest.
+    ("stock analyst actions", "security_analyst_action?select=published_at,published_date,analyst_company,target_from,target_to,currency_code,status,rating_change&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=published_at.desc&limit=8"),
     ("stock insider card", "security_insider_summary?select=buys,sells,buyers,sellers,net_shares,trades,latest&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834"),
     # The business-lines and macro probes left on 2026-11-08: the edge function writes both, and
     # this gate checks what the Dagster lanes write (the user's decision).
