@@ -681,7 +681,8 @@ groups:
 
 
         Why they moved: through PostgREST each was one statement under the role''s 8 s ceiling. `sample_coverage` measured 8.6 s cold on 2026-10-03 and lost whole days of samples (every hourly
-        retry on 2026-09-28) while its run reported `ok: true`.
+        retry on 2026-09-28) while its run reported `ok: true`. Under pg_cron it grew back to its 120 s bound (119 s on 2026-11-07, cancelled on 11-08 05:23), and has had 300 s since
+        migration 20261108130000.
 
 
         RUNBOOK: `select j.jobname, d.status, d.start_time, d.return_message from cron.job_run_details d join cron.job j using (jobid) where j.jobname in (''muffin-coverage'', ''muffin-quality'') order
