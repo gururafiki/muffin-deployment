@@ -92,9 +92,18 @@ PAGE = 1000
 # there twice that day (10:00 and 18:27 UTC). The range pushes into the view, so a sixteenth
 # resolves ~4,700 rows: 1.25 s on a cold range. The day picks the sixteenth, so sixteen days
 # cover every security.
-_DIGIT = datetime.date.today().toordinal() % 16
-RANGE = f"&security_id=gte.{_DIGIT:x}0000000-0000-0000-0000-000000000000" + (
-    f"&security_id=lt.{_DIGIT + 1:x}0000000-0000-0000-0000-000000000000" if _DIGIT < 15 else ""
+#
+# NOW A 256TH, BY THE FIRST TWO HEX DIGITS. The view clusters a fiscal period across all of a
+# security's metrics (#441), so the `revenue` filter cannot reach below its windows: a sixteenth
+# read every annual metric of 791 securities, 128,739 rows, to return 1,000. The SEC history of
+# 2026-11-07 multiplied those rows. Measured 2026-11-09: 0.85 s warm, 4.1 s cold, and past the
+# 8-second ceiling inside the SEC filer tick, where market-verify runs (57014 at 11:57 UTC). A 256th
+# is ~40 securities and ~290 annual revenue points, 51-214 ms. The check is structural (the
+# collapse is applied or it is not), so a smaller daily sample loses nothing; 256 days cover every
+# id.
+_SLICE = datetime.date.today().toordinal() % 256
+RANGE = f"&security_id=gte.{_SLICE:02x}000000-0000-0000-0000-000000000000" + (
+    f"&security_id=lt.{_SLICE + 1:02x}000000-0000-0000-0000-000000000000" if _SLICE < 255 else ""
 )
 
 
@@ -230,7 +239,7 @@ def main() -> int:
         fail = 1
     else:
         print(f"  ok   security_metric_series: one point per fiscal period ({len(view)} rows sampled, "
-              f"ids {_DIGIT:x}…)")
+              f"ids {_SLICE:02x}…)")
 
     # 2. The raw table, past the window: the WHOLE table, paged, against the known count.
     raw = get_all(
