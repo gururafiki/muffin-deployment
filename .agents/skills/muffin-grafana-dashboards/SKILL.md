@@ -44,6 +44,17 @@ ssh muffin 'docker service logs muffin_grafana --since 30m 2>&1 | grep "Sending 
   | sed -E "s/.*rule_uid=([a-z-]+).*/\1/" | sort | uniq -c'
 ```
 
+**In a check-in, widen `--since` to cover everything since the previous check-in** (`24h` or more).
+Some rules fire for an hour and clear. The unit-flip rule compares one hourly sample with the one
+before, so it fired once, on 2026-11-07 at 03:06, and was gone before the 11:13 check-in read the
+last 30 minutes. It was a true positive: company facts had made capex, buybacks and dividends
+positive for ~3,700 filers (muffin-deployment#507).
+
+A rule whose `noDataState` is `NoData` sends a NoData notice when its series goes missing. The
+deploy's own heavy migrations and the `pg_dump` it ends with can starve the exporter's scrape.
+Read the rule's `noDataState`, and the `Detected stale state entry … state=NoData` line, before
+chasing the threshold.
+
 Then replay that rule's own query (see *Verify a panel*) to see what it counts, and read the rows
 it counts. Two other log lines are worth knowing:
 - `Failed to evaluate rule … statement timeout` at 03:00 is the nightly `pg_dump` (03:00 to
