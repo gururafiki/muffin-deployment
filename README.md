@@ -622,7 +622,7 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `security-filings`, `security-filing-history` | Dagster SEC filer lane (`sec_filing`, `filer_profile`) — read `market.security_recent_filings` |
 | `security-insider` | Dagster SEC Form 4 lane and the insider data sets — read `market.security_insider_summary` |
 | `security-eps-history` | unscheduled since 2026-08-28; `earnings-history` writes `market.security_eps_history` |
-| `security-price-targets` | finviz moved its quote page (2026-11-04); analyst actions move to the company lane |
+| `security-price-targets` | finviz moved its quote page (2026-11-04); since 2026-11-08 the Dagster company lane's `yahoo_analyst_action` — read `market.security_analyst_action` |
 
 The Yahoo company family's handlers, their helper modules (`fundamentals.ts`, the live provider
 check `check.ts`) and their eight `pending_*` views were deleted on 2026-10-24 (Phase 4 step 10), so
