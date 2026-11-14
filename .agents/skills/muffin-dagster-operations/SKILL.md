@@ -195,6 +195,15 @@ ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
   argument over 128 KB. A stage-2 replay over every stored document is one such backfill.
 - **Name every missing partition.** One day left outside a backfill range kept an `eager()` asset
   blocked.
+- **A long backfill yields with `--priority -1`.** The queue dequeues the highest `dagster/priority`
+  first, and a GraphQL backfill carries none (0), the same as `nightly_prices` and automation runs.
+  So a backfill still queued at 00:00 would interleave with the price night in creation order.
+  Scheduled runs carry 0, 1 (companies) or 2 (FX, indices), so −1 runs only in the gaps (used for
+  the SEC segment re-read, 2026-11-14).
+- **`--exclude first..last` holds back a chunk that fails every time** while the rest of a grid
+  drains: the keys from first to last, in grid order, are left out. Keep it aligned to the run
+  width, or every chunk after it shifts. On 2026-11-14 one filer's raw file OOM-killed its
+  `sec_segment` chunk on every pass until muffin-ingest#177.
 - **A price recovery names securities, never dates.** The lane is partitioned by security, and each
   run extends its securities from their own newest bar. A night that stopped early left its last
   asked key in the `muffin/sweep_last` tag; the next night resumes after it by itself.
