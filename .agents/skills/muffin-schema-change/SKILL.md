@@ -77,6 +77,16 @@ the node.
 - **Every mutation must be CAUGHT with a different `SIG`.** An identical SIG means the mutation never
   applied, and its "caught" proves nothing. Make the mutations realistic: the old definition, the
   rule half-applied, the tie broken the other way.
+- **Read the clean run before any mutation result.** If the guard fails on the unmutated migration,
+  every mutant is "CAUGHT" by the same failure. On 2026-11-14 all seven mutants of the half-year
+  one-shot read CAUGHT while the clean test failed on `boolean::text`, which renders `false`, not
+  `f`.
+- **A test that runs its migration with `\i` needs `scripts/replay_filemut.sh`.** `replay.sh`
+  applies each mutant on its own and then runs the test, but the test re-reads the migration file
+  from the repo, so the mutant never reaches it (a data repair guarded by `market.one_shot` is the
+  usual case). The variant copies each mutant OVER the migration in a writable copy of the repo and
+  prints its md5 as the SIG. Read the error each mutant was caught by: a mutant that fails for a
+  reason of its own (a leftover temp table, a syntax error) proves nothing.
 
 ## 4. Validate on production's rows, rolled back
 

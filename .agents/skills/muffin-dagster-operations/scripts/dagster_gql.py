@@ -6,6 +6,7 @@
 Commands (arguments are plain tokens, so they survive the ssh single quotes):
     repos
     backfill        --assets a,b --partitions 2026-09-11,2026-09-12 --reason <tag>
+                    [--exclude first..last]
                     [--op-config op.key=value,…] [--dry-run]
                     `--partitions grid:security` names every key of that dynamic grid (one
                     argument cannot carry twelve thousand ids)
@@ -55,24 +56,41 @@ def gql(query: str, variables: dict | None = None) -> dict:
         return {"http_status": error.code, "body": error.read().decode(errors="replace")[:2000]}
 
 
-def tags(reason: str, max_runtime: int | None = None) -> list[dict[str, str]]:
+def tags(
+    reason: str, max_runtime: int | None = None, priority: int | None = None
+) -> list[dict[str, str]]:
     # A tag on every hand-launched run, so the run list says why it exists. Without
     # `dagster/max_runtime` the run monitor allows the instance default, six hours.
+    # `dagster/priority`: the queue dequeues highest first, and scheduled runs carry 0 (prices,
+    # automation), 1 (companies) or 2 (FX, indices). A long backfill at -1 never delays any of them.
     out = [{"key": "muffin/reason", "value": reason}]
     if max_runtime:
         out.append({"key": "dagster/max_runtime", "value": str(max_runtime)})
+    if priority is not None:
+        out.append({"key": "dagster/priority", "value": str(priority)})
     return out
 
 
-def partition_names(text: str) -> list[str]:
+def partition_names(text: str, exclude: str = "") -> list[str]:
     """The keys to backfill: a comma-separated list, or `grid:<name>` for every key of a dynamic
     partition grid. Twelve thousand security ids are ~450 KB, and Linux refuses a single argument
-    over 128 KB (MAX_ARG_STRLEN), so the whole grid is read from the instance here."""
+    over 128 KB (MAX_ARG_STRLEN), so the whole grid is read from the instance here.
+
+    `exclude` is `<first>..<last>`: the keys from first to last, in the grid's own order, are left
+    out. A chunk whose run fails every time (2026-11-14: one filer's raw file OOM-killed stage 2)
+    can then be held back while the rest drains. Keep the exclusion aligned to the run width, or
+    every chunk after it shifts."""
     if text.startswith("grid:"):
         from dagster import DagsterInstance
 
-        return list(DagsterInstance.get().get_dynamic_partitions(text.removeprefix("grid:")))
-    return [p for p in text.split(",") if p]
+        keys = list(DagsterInstance.get().get_dynamic_partitions(text.removeprefix("grid:")))
+    else:
+        keys = [p for p in text.split(",") if p]
+    if exclude:
+        first, last = exclude.split("..", 1)
+        start, end = keys.index(first), keys.index(last)
+        keys = keys[:start] + keys[end + 1 :]
+    return keys
 
 
 def op_config(text: str) -> dict:
@@ -99,8 +117,10 @@ def main() -> None:
         p.add_argument("--reason", required=True)
         p.add_argument("--dry-run", action="store_true")
         p.add_argument("--max-runtime", type=int, help="seconds; the run monitor ends the run past it")
+        p.add_argument("--priority", type=int, help="dagster/priority; -1 yields to every scheduled run")
         if name == "backfill":
             p.add_argument("--partitions", required=True)
+            p.add_argument("--exclude", default="", help="first..last: grid keys to leave out")
             p.add_argument("--op-config", default="", help="op.key=value,…, given to every run")
         else:
             p.add_argument("--checks", default="", help="asset:check,… to run in the same run")
@@ -161,7 +181,7 @@ def main() -> None:
                     # The job's `run_tags` are merged only into runs a schedule or sensor creates:
                     # a launch from here without --max-runtime gets the monitor's six hours.
                     "tags": [{"key": "dagster/partition", "value": key},
-                             *tags(args.reason, args.max_runtime)]
+                             *tags(args.reason, args.max_runtime, getattr(args, 'priority', None))]
                 },
             }
             if args.dry_run:
@@ -182,10 +202,10 @@ def main() -> None:
         variables = {
             "params": {
                 "assetSelection": assets,
-                "partitionNames": partition_names(args.partitions),
+                "partitionNames": partition_names(args.partitions, args.exclude),
                 "fromFailure": False,
                 "title": args.reason,
-                "tags": tags(args.reason, args.max_runtime),
+                "tags": tags(args.reason, args.max_runtime, getattr(args, 'priority', None)),
                 "runConfigData": op_config(args.op_config),
             }
         }
@@ -206,7 +226,7 @@ def main() -> None:
                 },
                 "mode": "default",
                 "runConfigData": {},
-                "executionMetadata": {"tags": tags(args.reason, args.max_runtime)},
+                "executionMetadata": {"tags": tags(args.reason, args.max_runtime, getattr(args, 'priority', None))},
             }
         }
         mutation = """mutation($executionParams: ExecutionParams!) { launchRun(executionParams: $executionParams) {
