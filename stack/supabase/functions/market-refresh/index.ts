@@ -132,7 +132,8 @@ type MarketClient = ReturnType<SupabaseClient['schema']>
  * performance family on 2026-09-12 (D2), the universe family on 2026-09-26 (Phase 3), the Yahoo
  * company family on 2026-10-18 (Phase 4), Tiingo's corporate actions and SEC's openbb statements
  * on 2026-10-25, the Korean and Indian segment parsers on 2026-11-04 (until Phase 6), finviz's
- * price targets on 2026-11-06, and the rest of the SEC family on 2026-11-07 (Phase 5 step 9).
+ * price targets on 2026-11-06, the rest of the SEC family on 2026-11-07 (Phase 5 step 9), and the
+ * SEC segment parser on 2026-11-14 (Phase 6 step 3).
  *
  * Their handlers are still in this file and their `cron_resource` rows are disabled, which stops
  * the SCHEDULE and nothing else. A direct call still reached them: an admin pressing Refresh in the
@@ -182,6 +183,7 @@ const RETIRED: Record<string, string> = {
   'security-statements': 'SEC statements move to the Dagster SEC lane (Phase 5) — read market.security_statement',
   'security-kr-segments': 'retired until Phase 6 moves segments to Dagster — read market.security_segment_current',
   'security-in-segments': 'retired until Phase 6 moves segments to Dagster — read market.security_segment_current',
+  'security-segments': 'Dagster SEC segment lane (raw_sec_instance → sec_segment) — read market.security_segment_current',
   'security-price-targets': 'finviz moved its quote page; analyst actions move to the Dagster company lane (Yahoo) — read market.security_price_target',
   'security-xbrl': 'Dagster SEC filer lane (sec_statement → derived_security_metrics) — read market.security_metric',
   'security-filings': 'Dagster SEC filer lane (sec_filing) — read market.security_recent_filings',
