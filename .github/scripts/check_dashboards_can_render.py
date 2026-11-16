@@ -41,12 +41,14 @@ EXHAUSTIVE = {
 NOT_A_FACET = {'country', 'sector name', 'securities', 'segment capable', 'facet', 'have',
                'missing', 'sector', 'industry name', 'bucket'}
 
-# Panels that plot a HARDCODED list of resources, and the tables whose writers they must cover.
-# Keyed on the dashboard, like EXHAUSTIVE, so renaming a panel elsewhere cannot exempt this one.
-THROUGHPUT = {
-    ('Muffin — Business lines', 'Segment facts written per run'):
-        ('security_segment', 'security_filing'),
-}
+# Panels that plot a HARDCODED list of edge resources, and the tables whose writers they must
+# cover. Keyed on the dashboard, like EXHAUSTIVE, so renaming a panel elsewhere cannot exempt this one.
+#
+# EMPTY SINCE 2026-11-16: the one panel it covered, the Business lines throughput, plots every
+# Dagster asset named `<regulator>_segment` from Dagster's own `asset_keys`, so it enumerates
+# nothing and cannot fall behind. That is the fix this file recommends; the check stays for the
+# next panel that has to list edge resources.
+THROUGHPUT: dict[tuple[str, str], tuple[str, ...]] = {}
 INDEX_TS = pathlib.Path('stack/supabase/functions/market-refresh/index.ts')
 SCHEMAS = pathlib.Path('stack/supabase/schemas')
 
@@ -253,8 +255,7 @@ if failures:
     sys.exit(1)
 
 n = sum(1 for path in DASH.glob('*.json') for _ in panels(json.loads(path.read_text())))
-segment_resources = segment_writing_resources(('security_segment', 'security_filing'))
 print(f"checked {n} panels across {len(list(DASH.glob('*.json')))} dashboards; "
       f"no duplicate aliases, no stale facet enumeration, no uncoloured percentage, "
-      f"throughput covers {len(segment_resources)} segment/filing resources")
+      f"{len(THROUGHPUT)} hardcoded throughput list(s) complete")
 
