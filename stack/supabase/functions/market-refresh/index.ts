@@ -184,6 +184,8 @@ const RETIRED: Record<string, string> = {
   'security-kr-segments': 'retired until Phase 6 moves segments to Dagster — read market.security_segment_current',
   'security-in-segments': 'retired until Phase 6 moves segments to Dagster — read market.security_segment_current',
   'security-segments': 'Dagster SEC segment lane (raw_sec_instance → sec_segment) — read market.security_segment_current',
+  'security-cn-segments': 'Dagster CNINFO lane (cninfo_segment) — read market.security_segment_current',
+  'cn-filings': 'Dagster CNINFO lane (raw_cninfo_filings → cninfo_segment) — read market.security_filing',
   'security-price-targets': 'finviz moved its quote page; analyst actions move to the Dagster company lane (Yahoo) — read market.security_price_target',
   'security-xbrl': 'Dagster SEC filer lane (sec_statement → derived_security_metrics) — read market.security_metric',
   'security-filings': 'Dagster SEC filer lane (sec_filing) — read market.security_recent_filings',
