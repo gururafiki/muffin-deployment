@@ -82,11 +82,15 @@ export const wikidata = () => origin('WIKIDATA_BASE_URL', 'https://query.wikidat
 export const dart = () => origin('DART_BASE_URL', 'https://opendart.fss.or.kr')
 
 /**
- * `www.nseindia.com` — India's corporate financial results API, and the session cookie it needs.
+ * `www.nseindia.in` — India's corporate financial results API, and the session cookie it needs.
  * Unlike DART there is no TLS problem here, so the cache is an optimisation rather than a
  * correctness dependency and the default origin genuinely works.
+ *
+ * NSE MOVED IT FROM `www.nseindia.com`. Measured 2026-11-16: `www.nseindia.com/api/...` answers 301
+ * to the same path on `www.nseindia.in`, whose API answers behind the same cookie handshake. The
+ * archives host (`nseArchives`) still serves the `.com` links every stored filing is keyed by.
  */
-export const nse = () => origin('NSE_BASE_URL', 'https://www.nseindia.com')
+export const nse = () => origin('NSE_BASE_URL', 'https://www.nseindia.in')
 
 /**
  * `www.cninfo.com.cn` — China's CSRC-designated disclosure platform. Its filings are PDFs, so this
