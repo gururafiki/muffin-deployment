@@ -636,7 +636,10 @@ a rollback is now a revert of that change, not a re-enabled row. The SEC family'
 2026-11-08 (Phase 5 step 10), with finviz's `security-price-targets`, Tiingo's
 `security-corporate-actions`, `derive-classifications`, and the helper modules only they used
 (`tiingo.ts`, `alpha-vantage.ts`). Their five backlog views had gone with the retirement, because
-they are what the backlog alerts sample. `xbrl.ts` stays while `security-segments` imports it.
+they are what the backlog alerts sample. The segment parsers and filing walkers (`security-segments`,
+`security-{cn,kr,in}-segments`, `{cn,kr,in}-filings`) went on 2026-11-20 (Phase 6 step 8), with every
+module only they used (`segments.ts`, `xbrl.ts`, `dart.ts`, `in.ts`, `cn.ts`, `cn-pdf.ts`) and their
+checks; the parsers live in muffin-ingest now. All of them still answer 410 from the `RETIRED` list.
 
 **Every `security-*` resource is an INCREMENTAL BACKLOG**, not a full pass: it claims a page ordered
 by fund weight, works until its ~55s deadline, and leaves the rest. Two rules they all share, both

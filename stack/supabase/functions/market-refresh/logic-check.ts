@@ -546,28 +546,9 @@ console.log('\nresource registry — the cron and the function agree')
   // backlog that reports itself drained for ever.
   const REMAINING_MAY_USE: Record<string, string[]> = {
     // These report the BACKLOG via `backlogSize`, which the loop exempts from the arithmetic
-    // rules — there are no units to confuse in a `content-range` count. They are still listed so the
-    // "has the list rotted" tally keeps meaning "every resource was looked at".
-    SEGMENTS_RESOURCE: [],
-    // Korea. `security-kr-segments` reports `pending_kr_segments`; `kr-filings` reports
-    // `pending_kr_history`, which is ITS OWN backlog — the companies whose filing history is
-    // unwalked — and deliberately not the parse queue, which belongs to the other resource.
-    KR_SEGMENTS_RESOURCE: [],
-    KR_FILINGS_RESOURCE: [],
-    // India, the same split: `security-in-segments` reports `pending_in_segments` and `in-filings`
-    // reports `pending_in_history`, its own backlog of companies whose filing history is unwalked.
-    IN_SEGMENTS_RESOURCE: [],
-    IN_FILINGS_RESOURCE: [],
-    // China, the same split as Korea and India. `cn-filings` walks companies and reports its own
-    // `pending_cn_filings`; `security-cn-segments` parses and reports `pending_cn_segments`.
-    //
-    // The comment that stood here said "filing LINKS only — every CNINFO filing is a PDF", which
-    // was migration 183's conclusion and is no longer the whole truth: the PDFs are TEXT, the CSRC
-    // mandates the breakdown table, and migration 195 reads it. PDF is still why China needs its
-    // own parser rather than the XBRL one.
-    CN_FILINGS_RESOURCE: [],
-    CN_SEGMENTS_RESOURCE: [],
-    // Reports the backlog via `backlogSize`, like the others above.
+    // rules — there are no units to confuse in a `content-range` count. They are still listed so
+    // the "has the list rotted" tally keeps meaning "every resource was looked at". The segment
+    // and filing-walker resources that stood here left with Phase 6 step 8 (2026-11-20).
     WIKIDATA_RESOURCE: [],
     // A SWEEP, NOT A BACKLOG: `remaining` is DAYS still to walk, computed from the cursor
     // against its floor. `walkedTo` and `stopAt` are the only identifiers involved, and
@@ -675,9 +656,9 @@ console.log('\nresource registry — the cron and the function agree')
         scopeOffenders.push(`${b.name} reports ${declared} but drives ${views.join('/')}`)
       }
     }
-    // A FLOOR, so a parser that stops finding the blocks cannot pass vacuously. Nine since the SEC
-    // family's handlers left (2026-11-08): news, wikidata, segments and the KR/IN/CN pairs.
-    check(scopeOffenders.length === 0 && scopeChecked >= 9,
+    // A FLOOR, so a parser that stops finding the blocks cannot pass vacuously. Two since the
+    // segment and filing-walker handlers left (Phase 6 step 8, 2026-11-20): news and wikidata.
+    check(scopeOffenders.length === 0 && scopeChecked >= 2,
       `every backlog-driven resource reports its BACKLOG as remaining — ${scopeChecked} checked`,
       scopeOffenders.join('; ') || `${scopeChecked} backlog-driven resources, all reporting their own pending view`)
   }
@@ -688,37 +669,6 @@ console.log('\nresource registry — the cron and the function agree')
   check(checkedExpressions === Object.keys(REMAINING_MAY_USE).length,
     'every declared resource was actually checked — the list has not rotted',
     `${checkedExpressions} expressions vs ${Object.keys(REMAINING_MAY_USE).length} declared`)
-
-  // ── TWO WRITERS TO ONE TABLE MUST NOT DISAGREE ABOUT ITS KEY ────────────────────────────────
-  //
-  // `security_segment` is written by the SEC path and the DART path. The Korean one shipped with
-  // `security_id,axis,member_code,metric_code,period_type,period_ending` — the SEC target minus
-  // `parent_key` — and that does not merely mis-dedupe: it names a constraint that does not exist,
-  // so every write failed with `no unique or exclusion constraint matching the ON CONFLICT
-  // specification`. Nothing offline could see it. The behaviour tests insert rows directly rather
-  // than through a resource, `deno check` cannot know the table's key, and the migration suite
-  // never runs a resource — it took the first live parse.
-  //
-  // `parent_key` is a STORED GENERATED column (`coalesce(parent_member, '')`) because a primary key
-  // admits no NULLs and the flat case must keep working, which is exactly why it is easy to leave
-  // out of a hand-copied target.
-  {
-    // Anchored on the TARGET's own shape, not on distance from `.from('security_segment')`: the
-    // SEC call site carries a nine-line comment between the two, so a windowed match found one
-    // writer and reported the pair as consistent — a guard that cannot see the second thing it is
-    // comparing.
-    const targets = [...index.matchAll(/onConflict: '(security_id,axis,member_code[^']*)'/g)]
-      .map((m) => m[1])
-    const distinct = [...new Set(targets)]
-    check(targets.length >= 2 && distinct.length === 1,
-      'every security_segment writer uses the SAME conflict target',
-      distinct.length === 1
-        ? `${targets.length} writers, all on ${distinct[0]}`
-        : `writers disagree: ${distinct.join('  vs  ')}`)
-    check(distinct.length === 1 && distinct[0].includes('parent_key'),
-      'and that target names parent_key, which is part of the primary key',
-      distinct[0] ?? '(none found)')
-  }
 
   const unreachable = cronResources.filter((r) => !accepted.has(r) && !retired.has(r))
   check(unreachable.length === 0,
@@ -1017,102 +967,6 @@ console.log('\nrefresh_run — every invocation is recorded')
 
   // A skip is a SUCCESS and must stay distinguishable from a run that did work.
   check(/skipped/.test(insert), 'a skipped run is recorded as such, not as a failure')
-}
-
-// ── the member-role table is READ, not merely created ──────────────────────────────────────────
-// A CONTROL TABLE NOTHING READS IS DECORATION, and this repo has shipped that twice: migration 163
-// created `filing_form` and left the hardcoded form list in place, and `exchange-listings` was
-// deployed, reachable and absent from the cron. `segment_member_class` decides which members are a
-// subtotal (dropped) and which are a residual (kept, but never a split on their own) — wired up it
-// is the fix for Chevron's 581m "breakdown", and unwired it is a table with six rows in it.
-{
-  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  check(/from\('segment_member_class'\)/.test(src),
-    'the resource reads market.segment_member_class')
-  const calls = [...src.matchAll(/segmentFactsFrom\(([^)]*)\)/g)].map((m) => m[1])
-  check(calls.length > 0 && calls.every((a) => a.split(',').length === 4),
-    'every segmentFactsFrom call passes the member roles',
-    `${calls.length} call(s): ${calls.map((c) => c.split(',').length).join(', ')} args`)
-}
-
-// ── a retraction fires only on a document that was READ ────────────────────────────────────────
-// A DELETE keyed on a filing is the one operation here that destroys data, and `facts.length === 0`
-// has FOUR causes: no index entry, a null fetch, a size refusal, and a filing that genuinely
-// discloses no segments. Only the last is evidence. The first version of this retraction ran
-// unconditionally behind a comment asserting "a fetch that THREW never reaches here" — true of a
-// throw, false of a null — and 281 filings took that path in three hours while `security_segment`
-// fell by 91 rows during an active re-parse. Seventh instance of throw-vs-empty in this pipeline.
-//
-// The guard is on the GATE, not on the delete: a delete with no condition in front of it is the
-// defect, so the assertion is that each retraction sits inside a test of the parsed document.
-{
-  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  // FIFTEEN LINES OF LOOKBACK, not two. The gate is not always the line directly above the delete —
-  // the NSE writer has an explanatory comment between them, and a two-line window reported a
-  // correctly-gated retraction as ungated. A window that is too NARROW fails safe (it cries wolf)
-  // while one that is too wide fails open, so this is deliberately generous and the gate
-  // expressions below stay specific.
-  const retractions = [...src.matchAll(/((?:[^\n]*\n){15})[ ]*const \{ error: rtErr \}/g)]
-  // FOUR writers now — SEC, DART, NSE and CNINFO. The number is asserted rather than counted
-  // loosely so that adding another is a deliberate act that comes here and reads this comment.
-  check(retractions.length === 4,
-    'every segment writer retracts per accession', `found ${retractions.length}`)
-  // THREE LEGAL SHAPES, because the sources fail differently. SEC and DART can return an oversize
-  // document, so they gate on `xml !== null && !oversize`. NSE cannot — its instances are 77-109 KB
-  // and there is no size gate — but it CAN return the standalone filing rather than the
-  // consolidated one, so its retraction sits inside the branch where `normalise` returned a
-  // document. CNINFO downloads a 1-6 MB PDF that can be absent, oversized or not a PDF at all, so
-  // its retraction sits inside the branch where `fetchReport` returned BYTES and the parse ran.
-  // All three are a test of the parsed document, which is what this guard is really asserting;
-  // what it must never accept is a delete with nothing in front of it.
-  const gated = (before: string) =>
-    (/if \((typeof )?xml (!==|===) /.test(before) && /!oversize/.test(before)) ||
-    /NOT_CONSOLIDATED/.test(before) || /segmentFactsFrom\(norm\.xml/.test(before) ||
-    /segmentFactsFromPdf\(bytes\)/.test(before)
-  check(retractions.every((m) => gated(m[1])),
-    'every retraction is gated on the document having been read',
-    retractions.map((m) => m[1].trim().split('\n')[0].slice(0, 40)).join(' | '))
-
-  // AND KEYED ON THE ACCESSION. Found by mutation: dropping `.eq('accession_number', …)` passed
-  // every check above, and it is the worst defect available here — the delete would take a
-  // company's ENTIRE segment history instead of one filing's, on every re-parse, silently. The
-  // accession is what makes the retraction the filing's own statement of itself; without it this
-  // is not a retraction, it is a purge.
-  const keyed = [...src.matchAll(
-    /const \{ error: rtErr \}[\s\S]{0,220}?security_segment'\)\.delete\(\)([\s\S]{0,200}?)(?:\n\s*if|\n\s*\n)/g,
-  )]
-  check(keyed.length === retractions.length && keyed.every((m) => /accession_number/.test(m[1])),
-    'and every retraction is keyed on the ACCESSION, not just the security',
-    `${keyed.filter((m) => /accession_number/.test(m[1])).length} of ${keyed.length}`)
-}
-
-// ── in-filings ─────────────────────────────────────────────────────────────────────────────────
-console.log('\nin-filings')
-{
-  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  const seg = idx.slice(idx.indexOf('resource === IN_FILINGS_RESOURCE'))
-  const body = seg.slice(0, seg.indexOf('\n    if (resource === ', 1)).replace(/\/\/[^\n]*/g, '')
-
-  // A WALK THAT LISTS NOTHING MUST STILL BE RECORDED. The stamp is an UPDATE of a filer row that
-  // exists only when NSE listed something; an update that matches no row raises nothing, so the
-  // same six companies headed `pending_in_history` for two weeks (2026-10-06..20) with 289 behind
-  // them. The stamp must report what it matched, and a miss must land on the security.
-  check(
-    /update\(\{ history_walked_at: walkedAt \}\)\s*\.eq\('security_id', item\.security_id\)\.eq\('source_code', 'nse'\)\s*\.select\('security_id'\)/.test(body),
-    'the filer-row stamp reports the rows it matched',
-  )
-  check(
-    /if \(\(stamped \?\? \[\]\)\.length === 0\) \{\s*const \{ error: sErr \} = await market\.from\('security'\)\s*\.update\(\{ nse_history_walked_at: walkedAt \}\)/.test(body),
-    'a walk that matched no filer row is recorded on the security, so the queue moves past it',
-  )
-  // AND NEVER BY CREATING A FILER ROW FOR A COMPANY NSE LISTED NOTHING FOR: that row is what the
-  // coverage model reads as a held registration. The only filer write stays inside `listed > 0`.
-  const filerWrites = [...body.matchAll(/from\('security_filer'\)\.upsert\(/g)]
-  check(
-    filerWrites.length === 1 && /if \(listed\.length > 0\) \{[\s\S]{0,120}from\('security_filer'\)\.upsert\(/.test(body),
-    'a filer row is written only when NSE listed a filing',
-    `${filerWrites.length} upsert(s)`,
-  )
 }
 
 console.log(failures === 0 ? '\nALL LOGIC CHECKS PASSED' : `\n${failures} LOGIC CHECK(S) FAILED`)
