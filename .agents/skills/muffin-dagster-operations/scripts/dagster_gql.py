@@ -96,7 +96,17 @@ def partition_names(text: str, exclude: str = "") -> list[str]:
 def op_config(text: str) -> dict:
     """`op.key=value`, comma-separated, as run config. Plain tokens, so they survive ssh quoting."""
     run_config: dict = {}
-    for item in [i for i in text.split(",") if i]:
+    # Split on TOP-LEVEL commas only, so a JSON value may carry its own:
+    # `raw_dart_filings.reread={"00164742":["20240313001451","20260318001394"]}`.
+    items, depth, start = [], 0, 0
+    for n, ch in enumerate(text):
+        depth += ch in "[{"
+        depth -= ch in "]}"
+        if ch == "," and depth == 0:
+            items.append(text[start:n])
+            start = n + 1
+    items.append(text[start:])
+    for item in [i for i in items if i]:
         path, value = item.split("=", 1)
         op, field = path.split(".", 1)
         try:
