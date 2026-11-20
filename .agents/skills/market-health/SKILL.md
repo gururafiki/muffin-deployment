@@ -65,7 +65,7 @@ the total untouched. `market-verify` has a separate equity floor for exactly thi
 ## Backlog depth
 
 ```bash
-for v in pending_segments pending_metrics pending_ttm; do
+for v in pending_news pending_wikidata pending_metrics pending_ttm; do
   printf '%-24s %s\n' "$v" "$(cnt "$v?select=security_id&limit=1")"   # needs SERVICE_ROLE, not anon
 done
 ```
@@ -74,6 +74,10 @@ Symbols, prices, returns and the Yahoo company family have no `pending_*` view a
 lanes own them, and their state is partitions and asset checks (`muffin-dagster-operations`). The
 company family's eight views left on 2026-10-24, and the SEC family's five (`pending_xbrl`,
 `pending_filings`, `pending_filing_history`, `pending_insider`, `pending_eps_history`) on 2026-11-07.
+The seven segment and filing-walker views (`pending_segments`, `pending_{kr,in,cn}_segments`,
+`pending_{kr,in}_history`, `pending_cn_filings`) left on 2026-11-20; each regulator's segment lane
+reports its queue as an asset check (`every_sec_filing_was_read`, `every_cninfo_report_was_read`,
+`every_dart_filing_was_read`, `every_nse_filing_was_read`: never read, behind the parser).
 
 **Zero is only good news if it got there by working.** A backlog empties either by fetching the data
 or by marking securities unanswerable, and the counts look identical. Cross-check:

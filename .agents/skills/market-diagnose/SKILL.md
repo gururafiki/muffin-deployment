@@ -39,13 +39,14 @@ A failed resource answers **HTTP 200 with `"ok": false`** and the reason.
 ```bash
 curl -sS -X POST "$BASE/functions/v1/market-refresh" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"security-segments","force":true}'
+  -d '{"resource":"security-news","force":true}'
 ```
 
 **A 410 names the lane that replaced the resource.** The Yahoo company family (profiles,
 industries, fundamentals, share stats, officers, quarters, dividends, metrics) left the edge on
 2026-10-18, after prices (2026-09-12) and the universe (2026-09-26); SEC's facts, filings and
-insider trades left on 2026-11-07. Diagnose those in Dagster
+insider trades left on 2026-11-07, and the segment parsers and filing walkers of all four
+regulators (SEC, CNINFO, DART, NSE) by 2026-11-16. Diagnose those in Dagster
 (`muffin-dagster-operations`), not here.
 
 **A bare `error code: 502` with no body means the WORKER DIED** — look at memory or a runaway loop,
@@ -183,7 +184,7 @@ Take the queue's head and check each subject against the state the handler write
 Anything already done must NOT still be queued:
 
 ```bash
-curl -sS "$BASE/rest/v1/pending_segments?select=security_id,accession_number&limit=5" \
+curl -sS "$BASE/rest/v1/pending_news?select=security_id&limit=5" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
 # then check those ids for the rows or the stamp the handler writes
 ```
@@ -196,7 +197,7 @@ left together on 2026-10-24. The drain-simulating tests (`a-page-must-advance.sq
 that stamps its subject done reports success while the subject stays queued. `in-filings` stamped
 `security_filer.history_walked_at`, a row it creates only when NSE lists something. Six companies
 NSE lists nothing for therefore headed `pending_in_history` from about 2026-10-06 to 10-20, with
-289 queued behind them. The signature is the same head in consecutive runs, `ok: true` and nothing
+289 queued behind them (that view and the handler left with Phase 6, 2026-11-20). The signature is the same head in consecutive runs, `ok: true` and nothing
 written. Take the queue's head and check that the row the handler updates exists for each. Since
 muffin-deployment#453 that handler selects what its stamp matched.
 

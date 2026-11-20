@@ -8,10 +8,13 @@
 -- resource reported `walked: 6, mapped: 0, failed: 0` — succeeding at asking the wrong question,
 -- with no count in the system able to show it.
 --
+-- That backlog left with Phase 6 step 9 (2026-11-20). The NSE lane in muffin-ingest asks with the
+-- filer id `apply_nse_symbol_map` writes into `security_filer`, so the rule is asserted there now.
+--
 -- THE FIXTURE MAKES THE CANDIDATE RULES DISAGREE. Every security below has a listing symbol that
--- is NOT its NSE symbol, so a backlog still reading `listing.symbol` fails on all of them; and the
--- security NSE does not list keeps its listing symbol, so a rule that simply dropped unresolved
--- securities would pass the first assertion and fail the last.
+-- is NOT its NSE symbol, so a map keyed on `listing.symbol` fails on all of them; and the security
+-- NSE does not list must get no filer id at all, so a rule that fell back to the listing symbol
+-- would pass the first assertions and fail that one.
 
 \set ON_ERROR_STOP on
 
@@ -74,14 +77,15 @@ begin
     'INE190T01060', 'T190RIVALB'       -- 5: ... so it must resolve to NEITHER
   )) into v_updated;
 
-  select symbol into v_one     from market.pending_in_history where security_id = '00000000-0000-0000-0000-000000190a01';
-  select symbol into v_two     from market.pending_in_history where security_id = '00000000-0000-0000-0000-000000190a02';
-  select symbol into v_none    from market.pending_in_history where security_id = '00000000-0000-0000-0000-000000190a03';
+  -- The NSE lane (muffin-ingest, `security_nse_filer`) asks with the filer id this writes.
+  select filer_id into v_one   from market.security_filer where security_id = '00000000-0000-0000-0000-000000190a01' and source_code = 'nse';
+  select filer_id into v_two   from market.security_filer where security_id = '00000000-0000-0000-0000-000000190a02' and source_code = 'nse';
+  select filer_id into v_none  from market.security_filer where security_id = '00000000-0000-0000-0000-000000190a03' and source_code = 'nse';
   select filer_id into v_foreign from market.security_filer where security_id = '00000000-0000-0000-0000-000000190a04' and source_code = 'nse';
   select filer_id into v_ambig from market.security_filer where security_id = '00000000-0000-0000-0000-000000190a05' and source_code = 'nse';
 
   if v_one is distinct from 'T190SUZLON' then
-    raise exception 'the backlog still asks with the vendor abbreviation (got %, wanted T190SUZLON) '
+    raise exception 'the filer id is not NSE''s own symbol (got %, wanted T190SUZLON) '
                     '— NSE answers an unknown symbol with an EMPTY 200, so this reads as a company '
                     'that files nothing rather than as a question asked wrongly',
                     coalesce(v_one,'null');
@@ -92,11 +96,10 @@ begin
                     'luck', coalesce(v_two,'null');
   end if;
 
-  if v_none is distinct from 'T190NONE' then
-    raise exception 'a security NSE does not list lost its listing symbol (got %) — the resolved '
-                    'id must be a PREFERENCE over the listing symbol, not a filter, or a company '
-                    'absent from NSE''s list is silently dropped from the queue instead of tried',
-                    coalesce(v_none,'null');
+  if v_none is not null then
+    raise exception 'a security NSE does not list was given an NSE filer id (%) — asking NSE with '
+                    'a symbol it does not list answers an empty 200, which reads as a company that '
+                    'files nothing', v_none;
   end if;
 
   if v_foreign is not null then
@@ -111,8 +114,8 @@ begin
                     'attributes another company''s filings', v_ambig;
   end if;
 
-  -- Idempotence: re-applying an unchanged map must write nothing. `history_walked_at` lives on
-  -- this table, so a needless update is WAL for nothing on a resource that runs on a TTL.
+  -- Idempotence: re-applying an unchanged map must write nothing; the registry runs weekly and a
+  -- needless update is WAL for nothing.
   select market.apply_nse_symbol_map(jsonb_build_object(
     'INE190T01011', 'T190SUZLON', 'INE190T01029', 'T190HINDUNILVR')) into v_updated;
   if v_updated <> 0 then
@@ -120,8 +123,8 @@ begin
                     'gone', v_updated;
   end if;
 
-  raise notice 'ok  India asks with NSE''s own symbol, keeps the unlisted, and refuses both a '
-               'foreign security and an ambiguous ISIN';
+  raise notice 'ok  India asks with NSE''s own symbol, gives the unlisted no filer id, and '
+               'refuses both a foreign security and an ambiguous ISIN';
 end $$;
 
 rollback;
