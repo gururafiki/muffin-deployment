@@ -82,8 +82,18 @@ QUERIES = [
     # AAPL 971. Apple, as the deepest.
     ("stock analyst actions", "security_analyst_action?select=published_at,published_date,analyst_company,target_from,target_to,currency_code,status,rating_change&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=published_at.desc&limit=8"),
     ("stock insider card", "security_insider_summary?select=buys,sells,buyers,sellers,net_shares,trades,latest&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834"),
-    # The business-lines and macro probes left on 2026-11-08: the edge function writes both, and
-    # this gate checks what the Dagster lanes write (the user's decision).
+    # ── The business-lines section (Sankey + donuts), added when the stock page first read the
+    # segment views, and back since 2026-11-16, when every regulator's segments became Dagster
+    # lanes. Apple, because it is the deepest filer here: three axes, a nested split, and eighteen
+    # years of filings behind the one period the view must choose.
+    #
+    # `security_segment_current` is `security_segment_latest` twice over (a dense_rank across
+    # filings, then a period choice across years), and BOTH views sit above a table that grows with
+    # every filing parsed. It is exactly the shape that timed out for anon while answering
+    # service_role fine in `fund_sector_weight`, `security_facets` and `price_series`.
+    ("stock business lines", "security_segment_current?select=axis,kind,member_code,member_label,concept_name,revenue,operating_income,operating_margin_pct,revenue_share_pct,currency_code,period_ending&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=revenue.desc.nullslast"),
+    ("stock business lines, nested", "security_segment_detail?select=parent_axis,parent_member,member_code,concept_name,revenue,operating_income,share_of_parent_pct,currency_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=revenue.desc.nullslast"),
+    # The macro probe left on 2026-11-08 with the edge's macro resource (Phase 6b).
     # The Sankey's right half. Six metric codes for one security across every annual period it has —
     # an `in.()` over a table of 3.29M rows, which is a different plan from the single-metric reads
     # already timed above.

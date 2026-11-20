@@ -312,7 +312,7 @@ the anon key is public and a public cache-buster is a free way to hammer the pro
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_ROLE" -H "Authorization: Bearer $SERVICE_ROLE" \
   -H "Content-Type: application/json" \
-  -d '{"resource":"security-segments","force":true}'
+  -d '{"resource":"earnings-calendar","force":true}'
 ```
 
 `force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
@@ -561,9 +561,10 @@ perfectly present in Postgres — is precisely the bug only an external reader f
 → 03:30 to stop colliding with the nightly `pg_dumpall`.)
 
 **It checks what the Dagster lanes write, and nothing else** (since 2026-11-08). The checks over data
-the edge function still writes left it: resource health, the frozen `*_missing_at` marks, segment
-reconciliation, the segment spine, and the retention of edge-pruned tables. Grafana's alerts judge
-those resources.
+the edge function still writes left it: resource health, the frozen `*_missing_at` marks and the
+retention of edge-pruned tables. Grafana's alerts judge those resources. Segment reconciliation,
+the segment spine and the business-lines anon probes came back on 2026-11-16, once all four
+regulators' segments were Dagster lanes (Phase 6 step 7).
 
 Its zero-expected invariants live in **`market.data_defect`** (migration 134), a view with two
 consumers that cannot drift: market-verify asserts on it over HTTP as anon, and the hourly sampler
@@ -579,14 +580,14 @@ venues.
 
 | Resource | Writes | Upstream | TTL |
 |---|---|---|---|
-| `security-segments` | `security_segment` | each filing's XBRL instance | 10 min |
 | `security-refresh` | nothing itself: queues one security's Dagster `yahoo_companies` partition with `force: true` | — | 1 min |
 
 The table lists the main ones; the function's `EXTRA_TTL_MINUTES` map is the complete list, with
 each resource's TTL.
 
 **Retired: the price family (D2, 2026-09-12), the universe family (2026-09-26), the Yahoo
-company family (2026-10-18) and the SEC family (2026-10-25 and 2026-11-07).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
+company family (2026-10-18), the SEC family (2026-10-25 and 2026-11-07) and the segment
+readers with the three regulators' filing walkers (Phase 6, 2026-11-14 to 11-16).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
 `market.performance` became a view over `security_return` and `index_return`; fund holdings, the
 venue directory, symbology and the CIK and NSE registries followed; then Yahoo's company data
 (`yahoo_companies`, a seventh of the universe a day from 03:30 UTC) and the metric derivation
@@ -623,6 +624,10 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `security-insider` | Dagster SEC Form 4 lane and the insider data sets — read `market.security_insider_summary` |
 | `security-eps-history` | unscheduled since 2026-08-28; `earnings-history` writes `market.security_eps_history` |
 | `security-price-targets` | finviz moved its quote page (2026-11-04); since 2026-11-08 the Dagster company lane's `yahoo_analyst_action` — read `market.security_analyst_action` |
+| `security-segments` | Dagster SEC segment lane (`raw_sec_instance` → `sec_segment`) — read `market.security_segment_current` |
+| `security-cn-segments`, `cn-filings` | Dagster CNINFO lane (`raw_cninfo_filings` → `cninfo_segment`) |
+| `security-kr-segments`, `kr-filings` | Dagster DART lane (`raw_dart_filings` → `dart_segment`) |
+| `security-in-segments`, `in-filings` | Dagster NSE lane (`raw_nse_filings` → `nse_segment`) |
 
 The Yahoo company family's handlers, their helper modules (`fundamentals.ts`, the live provider
 check `check.ts`) and their eight `pending_*` views were deleted on 2026-10-24 (Phase 4 step 10), so
@@ -686,14 +691,14 @@ control is not rendered at all.
 ```bash
 # Any resource, from the node (respects the TTL). The rotation calls this same path:
 docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)" \
-  psql -U postgres -c "select market.cron_post('security-segments')"
+  psql -U postgres -c "select market.cron_post('earnings-calendar')"
 
 # Directly, with `force` to bypass the TTL — SERVICE-ROLE ONLY, because the anon key is public
 # and a public cache-buster is a free way to hammer the provider:
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"resource":"security-segments","force":true}'
+  -d '{"resource":"earnings-calendar","force":true}'
 ```
 
 `force` clears the TTL and the error backoff but **not** the in-flight lock, so concurrent forced
