@@ -188,6 +188,7 @@ const RETIRED: Record<string, string> = {
   'security-filing-history': 'Dagster SEC filer lane (sec_filing) — read market.security_filing',
   'security-insider': 'Dagster SEC Form 4 lane (sec_form4_trade) — read market.security_insider_summary',
   'security-eps-history': 'unscheduled since 2026-08-28; earnings-history (the nasdaq calendar) writes the same table — read market.security_eps_history',
+  'facets-refresh': 'pg_cron muffin-facets runs market.refresh_facets() as postgres, off the 8 s RPC ceiling — read market.security_facets',
 }
 
 /**
