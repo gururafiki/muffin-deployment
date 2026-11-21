@@ -47,26 +47,50 @@ UA = "muffin-market-verify/1.0"
 # is an INTEGER MULTIPLE — a doubled split is 100% out, a subtotal beside its children ~70% — so
 # half a percent separates the two by two orders of magnitude.
 TOLERANCE_FRACTION = 0.005
-# BOTH TRIPWIRES ARE RATES OVER THE SPLITS RE-CHECKED, NOT CEILINGS ON A VALUE AND NOT COUNTS.
+# WHAT COUNTS AS A DEFECT, AND WHAT DOES NOT (2026-11-21).
 #
-# Not ceilings: these are splits whose `reconciled_to` is wrong rather than splits that are wrong —
-# GE Vernova's three segments sum to a correct $30.1bn against a recorded target of $487m — so the
-# data being served is right and the target it is checked against is not. Failing on every one
-# makes the gate permanently red; letting them GROW silently is how a real regression hides.
+# A split's members can disagree with the target in three ways, and they are different facts:
 #
-# Not counts, because the denominator moves sixfold with the sample. The sample is the 80
-# most-recently-written securities, and a large US filer carries far more splits than a small one:
-# from 2026-09-08 to 10-04 a run re-checked anywhere from 880 to 5,245 splits. The count tripwires
-# set on 2026-09-04 (served 35, historical 900) fired on 10-04 at 36 and 1,085, the largest sample
-# ever, while the served RATE was 0.69% against 0.27-0.91% over the fourteen runs before it. The parser
-# had not changed since 09-06 (version 20), so every one of those runs measured the same code.
+# - NON-POSITIVE: the split, or the target it carries, is zero or less. A revenue split cannot total
+#   nothing, nor be reconciled to a negative revenue. The parser refuses both since muffin-ingest#185,
+#   and the filings that held one were re-queued, so among splits the CURRENT parser produced there
+#   must be NONE. Any one fails.
+# - OVER: the split exceeds its target. A member counted twice, a subtotal beside its children, or
+#   intersegment sales the parser could not match to an elimination. A defect, and a RATE tripwire,
+#   because a few are accepted states the UI already refuses to draw percentages for.
+# - UNDER: the split covers part of its target. A bucket inherits its partition from whichever
+#   bucket placed the most members (a split learned from assets or depreciation applies to revenue
+#   too), and a filer chooses how much of itself to disaggregate. Served on purpose, with the
+#   remainder named by the UI, so it is REPORTED and never failed. It was 85% of what this check
+#   used to call disagreements, which is why its historical rate looked like a rising defect.
 #
-# Served sits above its observed range with room for a small sample's noise. Historical is set
-# above its newest reading, and that reading is the top of a rise — 4.1% on 09-08, 9-16% through
-# September, 20.7% on 10-04 — as the drain reached older filings. Whether the rise is only that is
-# open: umbrella docs/deferred/2026-10-04-the-historical-segment-backlog-is-rising.md.
-SERVED_TRIPWIRE = float(os.environ.get("SEGMENT_SERVED_TRIPWIRE", "0.0125"))
-HISTORICAL_TRIPWIRE = float(os.environ.get("SEGMENT_HISTORICAL_TRIPWIRE", "0.25"))
+# The rates, measured 2026-11-21 over the WHOLE table (revenue, partition 1, flat), by the period's
+# year: over-coverage 2.12% before 2016, 1.36% 2016-19, 1.07% 2020-23, 0.96% 2024 onward, served
+# 0.95%. The tripwires sit at about twice that. A band is judged only once it holds MIN_BAND_SPLITS.
+#
+# WHY THE HISTORICAL RATE ROSE (umbrella docs/deferred/2026-10-04-the-historical-segment-backlog-
+# is-rising.md): the parser was one deterministic function at one version throughout, so a filing's
+# result cannot change; older filings disagree more (22% before 2016 against ~11% from 2024, in
+# rows the edge wrote), and the sample, the most recently written securities, followed the drain to
+# older filings. On 2026-11-21 the same sample read 0 of 6,367 because it was all Chinese companies
+# from that day's CNINFO drain, which is why it is now drawn per regulator.
+SERVED_OVER_TRIPWIRE = float(os.environ.get("SEGMENT_SERVED_TRIPWIRE", "0.025"))
+HISTORICAL_OVER_TRIPWIRE = {"<2016": 0.04, "2016-2019": 0.03, "2020-2023": 0.025, "2024+": 0.025}
+MIN_BAND_SPLITS = 200
+#: Each regulator is sampled on its own, so the lane draining hardest cannot be the whole sample.
+SAMPLE_SOURCES = ("sec-segments", "cninfo", "dart", "nse")
+
+
+def band_of(period_ending: str) -> str:
+    """The year band a period falls in, for the historical tripwire."""
+    year = int(period_ending[:4])
+    if year < 2016:
+        return "<2016"
+    if year < 2020:
+        return "2016-2019"
+    if year < 2024:
+        return "2020-2023"
+    return "2024+"
 # Below this the arithmetic is dominated by rounding rather than by the data.
 MIN_TOTAL = 1000
 
@@ -118,8 +142,8 @@ def get_all(path: str, cap: int = 60_000):
     sys.exit(1)
 
 
-def recent_securities(limit: int) -> list[str]:
-    """The most recently written securities, newest first.
+def recent_securities(limit: int, source: str) -> list[str]:
+    """One regulator's most recently written securities, newest first.
 
     THE SCOPE HAS TO BE SECURITIES, NOT ROWS OR A TIME WINDOW, AND BOTH ALTERNATIVES WERE MEASURED.
 
@@ -154,7 +178,7 @@ def recent_securities(limit: int) -> list[str]:
     # thousand rows to gather the sample. Bounded twice: by the sample size and by the walk.
     while len(seen) < limit and offset < 20_000:
         page = get(
-            "security_segment?select=security_id,as_of"
+            f"security_segment?select=security_id,as_of&source_code=eq.{source}"
             # Tie-broken for the same reason as the row fetch below. Here a duplicate is harmless
             # (the ids go into a set) but a SKIPPED row silently biases which securities are
             # sampled, which is worse — it is invisible.
@@ -184,11 +208,15 @@ def main() -> int:
     # from `MetrologyAndInspection` only in case). Reading the raw table unions two complete
     # splits of the same period; this check found exactly that on its first production run,
     # reporting ASML's FY2022 split at 34,114,800,000 against a filed 21,173,400,000.
-    sample = recent_securities(int(os.environ.get("SEGMENT_SAMPLE_SECURITIES", "80")))
+    per_source = int(os.environ.get("SEGMENT_SAMPLE_SECURITIES", "80"))
+    sample = []
+    for source in SAMPLE_SOURCES:
+        drawn = recent_securities(per_source, source)
+        print(f"  sampling the {len(drawn)} most recently written {source} securities")
+        sample += [sid for sid in drawn if sid not in sample]
     if not sample:
         print("::notice::no segment rows yet — nothing to reconcile")
         return 0
-    print(f"  sampling the {len(sample)} most recently written securities")
 
     rows = []
     # 20 ids per call. The URL's length budget allows ~100, but `get_all`'s cap applies PER CALL,
@@ -324,47 +352,58 @@ def main() -> int:
             served_period[k] = gk[3]
 
     internal_checked = 0
-    internal_bad: list[str] = []
-    internal_old: list[str] = []
+    checked_served = 0
+    checked_band: dict[str, int] = {}
+    non_positive: list[str] = []
+    over_served: list[str] = []
+    over_band: dict[str, list[str]] = {}
+    under_served = 0
+    under_historical = 0
     internal_stale: list[str] = []
     for gk, total_of_split in sums.items():
-        target = targets.get(gk)
-        if target is None:
-            continue
-        # REVENUE ONLY, FOR THE SAME REASON THE SECOND CHECK IS REVENUE ONLY — and this assertion
-        # was missing it, which is what made it report 2,724 failures on correct data.
-        #
-        # `reconciled_to` is stored per (security, axis, period), NOT per metric: measured
-        # 2026-09-04, 82 of 83 multi-metric groups carry ONE value across every metric, and it is
-        # the REVENUE total. That is deliberate — a segment split is learned from the metric that
-        # reconciles and applied to the rest, because ASC 280 and IFRS 8 require a reconciliation
-        # rather than an identity and shared costs are left unallocated. So Apple's FY2025 rows all
-        # carry 416,161,000,000: revenue matches it exactly, while `cost_of_revenue` (220,960m) and
-        # `operating_income` (175,677m) never can and were being failed for it.
+        # REVENUE ONLY. `reconciled_to` is stored per bucket, and only revenue is expected to add
+        # up: ASC 280 and IFRS 8 require a reconciliation of segment profit, not an identity, so
+        # Apple's segment operating income never matches the consolidated figure and must not fail.
         if gk[1] != "revenue":
             continue
-        internal_checked += 1
-        if abs(total_of_split - target) > max(1.0, abs(target) * TOLERANCE_FRACTION):
-            line = (
-                f"{gk[0][:8]} {gk[4].split(':')[-1]} {gk[2]} {gk[3]}: "
-                f"split={total_of_split:,.0f} accepted against={target:,.0f}"
-            )
-            # SERVED OR HISTORICAL, because they are different facts and one of them is urgent.
-            # `security_segment_current` picks the newest annual period per (security, axis) — that
-            # is the only split a reader ever sees, so a defect there is live and fails. A bad
-            # split from 2011 is real and worth counting, but it is a backlog: failing on it makes
-            # the gate permanently red, and a permanently red gate is one nobody reads. Measured
-            # 2026-09-04: 729 historical against a handful served.
-            # AND A SPLIT THE CURRENT PARSER NEVER PRODUCED CANNOT BE EVIDENCE ABOUT IT.
-            # 16 of the 18 served disagreements measured on 2026-09-05 were parsed at version 2 or
-            # 9 against a parser at 14 — already fixed, queued, and waiting on a ~33,000-filing
-            # re-parse. Counted separately so a stalled drain is still visible.
-            if stale_group.get(gk):
+        target = targets.get(gk)
+        line = (
+            f"{gk[0][:8]} {gk[4].split(':')[-1]} {gk[2]} {gk[3]}: "
+            f"split={total_of_split:,.0f} accepted against="
+            + ("none" if target is None else f"{target:,.0f}")
+        )
+        # A SPLIT THE CURRENT PARSER NEVER PRODUCED CANNOT BE EVIDENCE ABOUT IT. A re-queued
+        # filing sits behind the parser until it is read again; counted, never asserted on.
+        if stale_group.get(gk):
+            if target is None or not (target > 0 and total_of_split > 0) \
+                    or abs(total_of_split - target) > max(1.0, abs(target) * TOLERANCE_FRACTION):
                 internal_stale.append(line)
-            elif gk[3] == served_period.get((gk[0], gk[4], gk[2])):
-                internal_bad.append(line)
+            continue
+        # A split totalling nothing is checked even with no target of its own: an inherited
+        # revenue split is placed by another bucket's map and carries none.
+        if total_of_split <= 0 or (target is not None and target <= 0):
+            non_positive.append(line)
+            continue
+        if target is None:
+            continue
+        internal_checked += 1
+        served = gk[3] == served_period.get((gk[0], gk[4], gk[2]))
+        band = band_of(gk[3])
+        if served:
+            checked_served += 1
+        else:
+            checked_band[band] = checked_band.get(band, 0) + 1
+        tol = max(1.0, abs(target) * TOLERANCE_FRACTION)
+        if total_of_split - target > tol:
+            if served:
+                over_served.append(line)
             else:
-                internal_old.append(line)
+                over_band.setdefault(band, []).append(line)
+        elif target - total_of_split > tol:
+            if served:
+                under_served += 1
+            else:
+                under_historical += 1
 
     checked = 0
     skipped_currency = 0
@@ -459,42 +498,54 @@ def main() -> int:
     if internal_checked == 0:
         print("::error::re-checked 0 splits — `reconciled_to` is empty, so nothing was verified")
         return 1
-    old_rate = len(internal_old) / internal_checked
-    bad_rate = len(internal_bad) / internal_checked
 
+    failed = False
     print(
-        f"::notice::{len(internal_old)} HISTORICAL split(s) disagree with their target, "
-        f"{old_rate:.2%} of those re-checked (tripwire {HISTORICAL_TRIPWIRE:.2%}) — a known backlog "
-        "in old filings, not served to anyone"
+        f"::notice::{internal_checked} current-parser revenue splits re-checked: "
+        f"{checked_served} served, {sum(checked_band.values())} historical; "
+        f"{under_served} served and {under_historical} historical cover only part of their target "
+        "(partial disclosures, served on purpose, not failed)"
     )
-    for b in internal_old[:5]:
-        print(f"::notice::  historical: {b}")
 
-    # A SERVED split someone is being shown right now — the urgent half.
+    # NON-POSITIVE: none allowed among what the current parser produced.
+    if non_positive:
+        print(
+            f"::error::{len(non_positive)} current-parser revenue split(s) total zero or less, or "
+            "are reconciled to a non-positive total — the parser refuses both (muffin-ingest#185)"
+        )
+        for b in non_positive[:20]:
+            print(f"::error::  non-positive: {b}")
+        failed = True
+
+    # OVER, SERVED: a split a reader is being shown exceeds its company's revenue.
+    served_rate = len(over_served) / checked_served if checked_served else 0.0
     print(
-        f"::notice::{len(internal_bad)} SERVED split(s) disagree with their target, "
-        f"{bad_rate:.2%} of those re-checked (tripwire {SERVED_TRIPWIRE:.2%})"
+        f"::notice::{len(over_served)} SERVED split(s) exceed their target, {served_rate:.2%} of "
+        f"{checked_served} (tripwire {SERVED_OVER_TRIPWIRE:.2%})"
     )
-    for b in internal_bad[:20]:
-        print(f"::notice::  served: {b}")
-    if bad_rate > SERVED_TRIPWIRE:
-        print(
-            f"::error::{len(internal_bad)} of {internal_checked} served splits ({bad_rate:.2%}) "
-            f"disagree with their target, above the {SERVED_TRIPWIRE:.2%} tripwire — a split a "
-            "reader is being shown does not add up"
-        )
-        return 1
-    if old_rate > HISTORICAL_TRIPWIRE:
-        # Not a ceiling on the value, a tripwire on the rate — the backlog is allowed to exist and
-        # is not allowed to GROW, which is the only way a regression in historical parsing shows up.
-        print(
-            f"::error::historical disagreements rose to {len(internal_old)} of {internal_checked} "
-            f"({old_rate:.2%}), above the {HISTORICAL_TRIPWIRE:.2%} tripwire — something "
-            "regressed in how old filings are parsed"
-        )
-        return 1
-    return 0
+    for b in over_served[:10]:
+        print(f"::notice::  served over: {b}")
+    if checked_served >= MIN_BAND_SPLITS and served_rate > SERVED_OVER_TRIPWIRE:
+        print(f"::error::served over-coverage {served_rate:.2%} is above {SERVED_OVER_TRIPWIRE:.2%}")
+        failed = True
 
+    # OVER, HISTORICAL, per year band: older filings are messier, so one rate would either cry wolf
+    # on them or hide a regression in the newer ones.
+    for band, ceiling in HISTORICAL_OVER_TRIPWIRE.items():
+        n = checked_band.get(band, 0)
+        over = over_band.get(band, [])
+        rate = len(over) / n if n else 0.0
+        judged = n >= MIN_BAND_SPLITS
+        print(
+            f"::notice::historical {band}: {len(over)} of {n} exceed their target ({rate:.2%}, "
+            f"tripwire {ceiling:.2%}{'' if judged else ', too few to judge'})"
+        )
+        if judged and rate > ceiling:
+            print(f"::error::historical over-coverage for {band} is {rate:.2%}, above {ceiling:.2%}")
+            for b in over[:5]:
+                print(f"::error::  {b}")
+            failed = True
+    return 1 if failed else 0
 
 if __name__ == "__main__":
     sys.exit(main())
