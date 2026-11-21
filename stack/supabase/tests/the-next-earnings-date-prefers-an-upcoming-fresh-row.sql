@@ -23,18 +23,18 @@ insert into market.security (security_id, name, security_type_code) values
   ('00000000-0000-0000-0000-00000000e6c4', 'E6C4', 'equity')
 on conflict (security_id) do nothing;
 
--- The key is still (symbol, report_date) until the cutover migration, so each row has its own
--- symbol spelling, as a Yahoo row's provider symbol may differ from nasdaq's.
+-- Both providers name the company by the same symbol, which the provider key allows
+-- (20261122110000).
 insert into market.earnings_calendar (symbol, report_date, security_id, source_code, as_of)
 values
-  ('E6C1',    current_date + 10, '00000000-0000-0000-0000-00000000e6c1', 'nasdaq',   now()),
-  ('E6C1.Y',  current_date - 30, '00000000-0000-0000-0000-00000000e6c1', 'yfinance', now()),
-  ('E6C2',    current_date - 20, '00000000-0000-0000-0000-00000000e6c2', 'nasdaq',   now()),
-  ('E6C2.Y',  current_date + 40, '00000000-0000-0000-0000-00000000e6c2', 'yfinance', now() - interval '3 days'),
-  ('E6C3',    current_date + 12, '00000000-0000-0000-0000-00000000e6c3', 'nasdaq',   now()),
-  ('E6C3.Y',  current_date + 5,  '00000000-0000-0000-0000-00000000e6c3', 'yfinance', now() - interval '1 day'),
-  ('E6C4',    current_date - 60, '00000000-0000-0000-0000-00000000e6c4', 'nasdaq',   now()),
-  ('E6C4.Y',  current_date - 15, '00000000-0000-0000-0000-00000000e6c4', 'yfinance', now());
+  ('E6C1', current_date + 10, '00000000-0000-0000-0000-00000000e6c1', 'nasdaq',   now()),
+  ('E6C1', current_date - 30, '00000000-0000-0000-0000-00000000e6c1', 'yfinance', now()),
+  ('E6C2', current_date - 20, '00000000-0000-0000-0000-00000000e6c2', 'nasdaq',   now()),
+  ('E6C2', current_date + 40, '00000000-0000-0000-0000-00000000e6c2', 'yfinance', now() - interval '3 days'),
+  ('E6C3', current_date + 12, '00000000-0000-0000-0000-00000000e6c3', 'nasdaq',   now()),
+  ('E6C3', current_date + 5,  '00000000-0000-0000-0000-00000000e6c3', 'yfinance', now() - interval '1 day'),
+  ('E6C4', current_date - 60, '00000000-0000-0000-0000-00000000e6c4', 'nasdaq',   now()),
+  ('E6C4', current_date - 15, '00000000-0000-0000-0000-00000000e6c4', 'yfinance', now());
 
 do $$
 declare got text;

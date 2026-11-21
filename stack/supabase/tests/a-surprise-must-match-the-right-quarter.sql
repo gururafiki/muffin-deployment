@@ -38,7 +38,7 @@ insert into market.earnings_calendar
   ('T120B', current_date - 10, '00000000-0000-0000-0000-000000012002', '2026-06', -0.10, 'nasdaq'),
   -- NOT yet reported. A consensus with no actual behind it must produce nothing.
   ('T120C', current_date + 20, '00000000-0000-0000-0000-000000012003', '2026-06', 1.00, 'nasdaq')
-on conflict (symbol, report_date) do nothing;
+on conflict do nothing;
 
 insert into market.security_metric
   (security_id, metric_code, period_type, as_of, value, currency_code, source_code) values

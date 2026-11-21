@@ -33,7 +33,7 @@ insert into market.earnings_calendar
   ('T115B', current_date - 10, '00000000-0000-0000-0000-000000011502', 4.00, 'after-hours', 'nasdaq'),
   -- An untracked company: the feed covers far more listings than this universe holds.
   ('T115Z', current_date + 3,  null, 9.00, 'after-hours', 'nasdaq')
-on conflict (symbol, report_date) do nothing;
+on conflict do nothing;
 
 do $$
 declare d date; up boolean; v numeric; n integer;
