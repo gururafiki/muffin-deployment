@@ -210,7 +210,11 @@ ssh muffin "$G backfill-status --id <backfillId>" < scripts/dagster_gql.py
 - **Order by run length.** Every stage-2 asset holds the `sql` pool for the whole run, so launch the
   short lanes (FX ~25 s, indices ~20 s) before a price backfill. The heartbeat holds no pool since
   2026-09-17, so it never queues behind one.
-- **Do not roll while a long run is in flight.** The roll kills it (`muffin-deploy`).
+- **Do not roll while a long run is in flight.** The roll kills it (`muffin-deploy`) and reports
+  it failed; its log names each (`<id>  __ASSET_JOB: STARTED -> FAILURE`). Re-execute what it
+  killed with `reexecute --runs <full id>,<full id>`: ALL_STEPS keeps the parent's partition range
+  and tags, so a backfill's run counts for its backfill again, and an eager run (which a kill
+  leaves "handled") is not left until its upstream next updates.
 - **A lane fetched through http-cache** (FX spot) can receive the previous day's body. Check
   `docker service logs muffin_http-cache --since 1h` for `STALE`, and check the table, not the run.
 

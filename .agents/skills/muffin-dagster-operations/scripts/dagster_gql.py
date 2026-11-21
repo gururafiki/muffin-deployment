@@ -23,6 +23,9 @@ Commands (arguments are plain tokens, so they survive the ssh single quotes):
                     `run_tags` (only scheduler-created runs do), so pass --max-runtime.
     backfill-status --id <backfillId>
     schedule-dry-run --schedule <name> --at 2026-09-26T00:00:00      read-only: what a tick would ask
+    reexecute       --runs <run-id>,<run-id> [--dry-run]
+                    a run the roll killed, again: ALL_STEPS with the parent's partition range and
+                    tags (a backfill's run keeps its backfill tag). Full run ids, not prefixes.
     sensor-dry-run   --sensor <name> [--cursor <value>]               read-only: what a tick would ask
                     with no --cursor it evaluates a FIRST tick, which is what starting a
                     stopped sensor does; pass the stored cursor to see its next tick
@@ -150,6 +153,9 @@ def main() -> None:
     dry = sub.add_parser("schedule-dry-run")
     dry.add_argument("--schedule", required=True)
     dry.add_argument("--at", required=True, help="the tick time, ISO, read as UTC")
+    reexec = sub.add_parser("reexecute")
+    reexec.add_argument("--runs", required=True, help="comma-separated full run ids")
+    reexec.add_argument("--dry-run", action="store_true")
     sensor = sub.add_parser("sensor-dry-run")
     sensor.add_argument("--sensor", required=True)
     sensor.add_argument("--cursor", help="omit to evaluate a first tick (no stored cursor)")
@@ -161,6 +167,24 @@ def main() -> None:
 
     if args.command == "sensor-dry-run":
         sensor_dry_run(args.sensor, args.cursor)
+        return
+
+    if args.command == "reexecute":
+        # A ROLL KILLS IN-FLIGHT RUNS AND REPORTS THEM FAILED. Re-executing keeps the parent's
+        # partition range and tags, so a backfill's run is counted by its backfill again, and an
+        # eager run killed by the roll (which counts as "handled") is not left until its upstream
+        # next updates.
+        mutation = (
+            "mutation($p: ReexecutionParams!) { launchRunReexecution(reexecutionParams: $p) "
+            "{ __typename ... on LaunchRunSuccess { run { runId } } ... on PythonError { message } "
+            "... on RunConfigValidationInvalid { errors { message } } } }"
+        )
+        for run_id in [r for r in args.runs.split(",") if r]:
+            variables = {"p": {"parentRunId": run_id, "strategy": "ALL_STEPS"}}
+            if args.dry_run:
+                print(json.dumps(variables))
+                continue
+            print(run_id[:8], json.dumps(gql(mutation, variables)))
         return
 
     if args.command == "repos":
