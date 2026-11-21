@@ -124,3 +124,14 @@ export const cninfoArchives = () =>
 
 /** `nsearchives.nseindia.com` — where the `INDAS_*` XBRL instances themselves live. */
 export const nseArchives = () => origin('NSE_ARCHIVES_BASE_URL', 'https://nsearchives.nseindia.com')
+
+/**
+ * `feeds.finance.yahoo.com` — Yahoo's per-company RSS headlines, the news lane's source since
+ * Phase 6b. Fetched by muffin-ingest, never by this function: it is listed here because this file
+ * is the registry `http-cache-covers-every-provider` reads, as DART's and NSE's are after their
+ * handlers left.
+ */
+export const yahooRss = () => origin('YAHOO_RSS_BASE_URL', 'https://feeds.finance.yahoo.com')
+
+/** `api.nasdaq.com` — nasdaq's earnings calendar, one date per request; muffin-ingest's lane. */
+export const nasdaq = () => origin('NASDAQ_BASE_URL', 'https://api.nasdaq.com')

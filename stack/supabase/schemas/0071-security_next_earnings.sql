@@ -17,7 +17,17 @@ SELECT DISTINCT ON (security_id) security_id,
     reporting_time,
     period_ending,
     report_date >= CURRENT_DATE AS upcoming,
-    as_of
+    as_of,
+    report_date_end,
+    is_date_estimate,
+    eps_low,
+    eps_high,
+    revenue_consensus,
+    source_code
    FROM market.earnings_calendar e
   WHERE security_id IS NOT NULL
-  ORDER BY security_id, (report_date >= CURRENT_DATE) DESC, (abs(report_date - CURRENT_DATE));
+  ORDER BY security_id, (
+        CASE
+            WHEN report_date >= CURRENT_DATE THEN as_of
+            ELSE NULL::timestamp with time zone
+        END) DESC NULLS LAST, (abs(report_date - CURRENT_DATE)), as_of DESC;
