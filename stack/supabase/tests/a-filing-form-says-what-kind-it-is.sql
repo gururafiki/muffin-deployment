@@ -2,8 +2,9 @@
 --
 -- Migration 20261025100300 made `market.filing_form` the SEC forms' control table. Three things
 -- must hold for that to be safe while the edge segments handler still reads it:
---   1. `carries_segments` is true on EXACTLY 10-K, 10-Q, 20-F and 40-F, so a seeded amendment or
---      event cannot enter `pending_segments`;
+--   1. `carries_segments` is true on EXACTLY 10-K, 10-Q, 20-F and 40-F, plus the amended and
+--      transition forms measured to carry segments on 2026-11-21 (10-Q/A, 20-F/A, 10-KT, 10-QT;
+--      migration 20261121150000), so a 10-K/A, 40-F/A or event cannot enter the SEC segment queue;
 --   2. every SEC report type production holds has a row, so the SEC lane's `kept` set loses nothing
 --      the edge stores today (the list is the measured one of 2026-10-24);
 --   3. the forms that change a company's XBRL facts are exactly the accounts forms, and a 6-K is
@@ -21,8 +22,8 @@ declare
 begin
   select string_agg(form_code, ',' order by form_code) into got
     from market.filing_form where source_code = 'sec' and carries_segments;
-  if got is distinct from '10-K,10-Q,20-F,40-F' then
-    raise exception 'carries_segments must be true on exactly 10-K, 10-Q, 20-F and 40-F, got %', got;
+  if got is distinct from '10-K,10-KT,10-Q,10-Q/A,10-QT,20-F,20-F/A,40-F' then
+    raise exception 'carries_segments must be true on exactly 10-K, 10-KT, 10-Q, 10-Q/A, 10-QT, 20-F, 20-F/A and 40-F, got %', got;
   end if;
 
   select string_agg(f, ',') into missing
