@@ -192,6 +192,7 @@ const RETIRED: Record<string, string> = {
   'earnings-calendar': 'Dagster earnings lanes (raw_nasdaq_earnings → nasdaq_earnings, yahoo_earnings) — read market.security_next_earnings',
   'earnings-history': 'Dagster earnings lanes (nasdaq_earnings, yahoo_earnings) — read market.security_earnings_history',
   'security-news': 'Dagster news lane (raw_yahoo_news → company_news) — read market.security_news',
+  'macro-indicators': 'Dagster macro lane (raw_macro_series → macro_observation) — read market.macro_current',
 }
 
 /**
