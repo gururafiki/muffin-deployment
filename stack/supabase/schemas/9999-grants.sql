@@ -27,6 +27,7 @@ grant DELETE, INSERT, SELECT, UPDATE on market.security_analyst_action to ingest
 grant DELETE, INSERT, SELECT, UPDATE on market.security_currency to ingest_rw;
 grant DELETE, INSERT, SELECT, UPDATE on market.security_current to ingest_rw;
 grant DELETE, INSERT, SELECT, UPDATE on market.security_disclosure to ingest_rw;
+grant DELETE, INSERT, SELECT, UPDATE on market.security_earnings_history to ingest_rw;
 grant DELETE, INSERT, SELECT, UPDATE on market.security_earnings_surprise to ingest_rw;
 grant DELETE, INSERT, SELECT, UPDATE on market.security_facet_status to ingest_rw;
 grant DELETE, INSERT, SELECT, UPDATE on market.security_facets to ingest_rw;
@@ -130,6 +131,9 @@ grant SELECT on market.security_current to service_role;
 grant SELECT on market.security_disclosure to anon;
 grant SELECT on market.security_disclosure to authenticated;
 grant SELECT on market.security_disclosure to service_role;
+grant SELECT on market.security_earnings_history to anon;
+grant SELECT on market.security_earnings_history to authenticated;
+grant SELECT on market.security_earnings_history to service_role;
 grant SELECT on market.security_earnings_surprise to anon;
 grant SELECT on market.security_earnings_surprise to authenticated;
 grant SELECT on market.security_earnings_surprise to service_role;
