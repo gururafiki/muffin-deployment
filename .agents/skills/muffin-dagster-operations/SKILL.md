@@ -257,6 +257,39 @@ distinct values, and the leaf entries of each mapping the run configs name.
   `get_materialized_partitions(raw_sec_companyfacts)`).
 - The sensor's own log line (`N filers due in M runs`) is not returned by a dry run.
 
+## The segment lanes: drain, read a pass, start a floor
+
+Four regulators, each with its own filer grid: `sec_filer` (shared with the SEC filer lane),
+`cninfo_filer`, `dart_filer`, `nse_filer`. Each lane's queue is an asset check:
+`every_sec_filing_was_read`, `every_cninfo_report_was_read`, `every_dart_filing_was_read`,
+`every_nse_filing_was_read` (metadata `never_read`, `behind_the_parser`).
+
+- **A history or a parser bump drains by backfill, never by the floor.** A floor schedule treats a
+  filer never collected as due, so its first tick would ask the whole grid at priority 0, ahead of
+  the night. Launch both stages over the grid at priority −1 with a run limit:
+  ```bash
+  ssh muffin "$G backfill --assets raw_cninfo_filings,cninfo_segment --partitions grid:cninfo_filer --priority -1 --max-runtime 1800 --reason <why>" < scripts/dagster_gql.py
+  ```
+  **DART runs its stages as separate backfills** (`raw_dart_filings`, pool `dart`; then
+  `dart_segment`, pool `sql`), because DART is slow from outside Korea and a run holds every pool it
+  touches for its whole length. Run stage 2 once stage 1 has nothing unasked.
+- **A run's budget is in bytes, so a pass leaves reports unasked.** Read the pass, then launch the
+  next while `*_unasked` is non-zero:
+  ```bash
+  ssh muffin "docker exec -i \$(docker ps -qf name=muffin_dagster-webserver) python - <backfillId>" < scripts/backfill_counters.py
+  ```
+  CNINFO pass 2 (2026-11-20) read 7,665 reports and left 16,796 of 24,661; DART stage 1 pass 2
+  fetched 2,380 archives and left 1,375. Outcome counters sum to their `*_named` or `filings`;
+  `failed` must be 0.
+- **Split a no-result counter by the population before scaling.** CNINFO pass 1's `no_table` 643 of
+  714 was 0 of 562 Shenzhen reports against 61 of 163 Shanghai: the reader could not read half of
+  China. After the composition reader, pass 2's was 809 of 7,665.
+- **China's PDFs are pruned to 5 GB** by `cninfo_retention` (every 15 minutes) whatever the drain
+  fetches (26 GB in pass 2); `cninfo_reports_within_cap` watches it.
+- **Start a floor after its drain, with a dry run first** (`schedule-dry-run`, above):
+  `nse_filers_floor`'s next ticks were 19 and 16 small runs once all 642 filers were collected.
+  Then declare it `RUNNING` in code, or a state reset stops it.
+
 ## Replay stage 2 on the stored files
 
 No provider call. It reproduces exactly what a partition's rule saw:
