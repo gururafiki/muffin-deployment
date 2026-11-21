@@ -81,6 +81,13 @@ QUERIES = [
     # its own security's same-day rows, so it grows with Yahoo's history: ~100 actions a company,
     # AAPL 971. Apple, as the deepest.
     ("stock analyst actions", "security_analyst_action?select=published_at,published_date,analyst_company,target_from,target_to,currency_code,status,rating_change&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=published_at.desc&limit=8"),
+    # ── Phase 6b (2026-11-22): the news panel reads `security_news` by SYMBOL, which on
+    # `security_symbol` resolved all 30,131 securities to find one (234-259 ms); and the earnings
+    # card reads the next date and the recent quarters by security.
+    ("stock news", "security_news?select=url,title,published_at,source,summary&symbol=eq.AAPL&order=published_at.desc&limit=10"),
+    ("stock news, local listing", "security_news?select=url,title,published_at,source,summary&symbol=eq.7203.T&order=published_at.desc&limit=10"),
+    ("stock next earnings", "security_next_earnings?select=report_date,eps_consensus,eps_previous,num_estimates,reporting_time,period_ending,upcoming&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&limit=1"),
+    ("stock earnings history", "security_earnings_history?select=period_ending,actual,estimate,surprise_pct,beat,source_code&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834&order=period_ending.desc&limit=8"),
     ("stock insider card", "security_insider_summary?select=buys,sells,buyers,sellers,net_shares,trades,latest&security_id=eq.1b68c902-a3dc-4cc9-8574-f431dacfd834"),
     # ── The business-lines section (Sankey + donuts), added when the stock page first read the
     # segment views, and back since 2026-11-16, when every regulator's segments became Dagster

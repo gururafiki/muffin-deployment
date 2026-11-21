@@ -189,6 +189,9 @@ const RETIRED: Record<string, string> = {
   'security-insider': 'Dagster SEC Form 4 lane (sec_form4_trade) — read market.security_insider_summary',
   'security-eps-history': 'unscheduled since 2026-08-28; earnings-history (the nasdaq calendar) writes the same table — read market.security_eps_history',
   'facets-refresh': 'pg_cron muffin-facets runs market.refresh_facets() as postgres, off the 8 s RPC ceiling — read market.security_facets',
+  'earnings-calendar': 'Dagster earnings lanes (raw_nasdaq_earnings → nasdaq_earnings, yahoo_earnings) — read market.security_next_earnings',
+  'earnings-history': 'Dagster earnings lanes (nasdaq_earnings, yahoo_earnings) — read market.security_earnings_history',
+  'security-news': 'Dagster news lane (raw_yahoo_news → company_news) — read market.security_news',
 }
 
 /**
