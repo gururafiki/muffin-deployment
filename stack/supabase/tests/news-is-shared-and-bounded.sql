@@ -27,6 +27,10 @@ insert into market.security_identifier (kind_code, value, security_id, source_co
   ('ticker', 'T100B', '00000000-0000-0000-0000-000000010002', 'yfinance')
 on conflict (kind_code, value) do nothing;
 
+-- `security_news` resolves symbols through the materialised `symbol_security` (20261122110000),
+-- which sees these securities only once refreshed.
+refresh materialized view market.symbol_security;
+
 do $$
 declare n integer; s1 text; s2 text;
 begin

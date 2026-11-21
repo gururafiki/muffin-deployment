@@ -18,4 +18,4 @@ SELECT ns.security_id,
     ns.source_code
    FROM market.news_security ns
      JOIN market.news_article a ON a.url = ns.url
-     JOIN market.security_symbol sym ON sym.security_id = ns.security_id;
+     JOIN market.symbol_security sym ON sym.security_id = ns.security_id;
