@@ -645,7 +645,7 @@ groups:
         refId: A
         format: table
         rawQuery: true
-        rawSql: "select (\n  (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '26 hours' then 1 else 0 end\n     from market.coverage_sample)\n + (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '3 hours' then 1 else 0 end\n     from market.universe_sample where metric like 'defect.%')\n + (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '3 hours' then 1 else 0 end\n     from market.universe_sample where metric = 'segment_spine.duration_ms')\n)::float8 as value"
+        rawSql: "select (\n  (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '26 hours' then 1 else 0 end\n     from market.coverage_sample)\n + (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '3 hours' then 1 else 0 end\n     from market.universe_sample where metric like 'defect.%')\n + (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '3 hours' then 1 else 0 end\n     from market.universe_sample where metric = 'segment_spine.duration_ms')\n + (select case when max(sampled_at) is null or max(sampled_at) < now() - interval '3 hours' then 1 else 0 end\n     from market.universe_sample where metric = 'facets.duration_ms')\n)::float8 as value"
     - refId: B
       datasourceUid: __expr__
       model:
@@ -670,7 +670,7 @@ groups:
     labels:
       muffin: pipeline
     annotations:
-      summary: The coverage sample, the data-quality sample or the segment spine has stopped refreshing
+      summary: The coverage sample, the data-quality sample, the segment spine or the screener spine has stopped refreshing
       description: 'Both are taken by pg_cron jobs as `postgres` (migration 20261003170000): `muffin-coverage` at 05:23 and 17:23 UTC, `muffin-quality` at :06 every hour. A pg_cron job writes no
         `refresh_run` row, so the stalled-resource alert cannot see one stop, and a sample that stops looks exactly like a healthy one on every panel that reads it. Worse for quality: "A data-correctness
         invariant is broken" reads the NEWEST `defect.*` group, so a stopped sample silently freezes that alert on whatever it last saw.
@@ -678,6 +678,7 @@ groups:
 
         This fires when the newest coverage sample is more than 26 hours old (two missed runs), or the newest `defect.*` sample or the newest `segment_spine.duration_ms` is more than 3 hours old.
         The segment spine (`muffin-segment-spine`, :16 hourly, migration 20261003190000) records its own refresh; a refresh that times out rolls the record back, so age is the failure signal.
+        The screener spine (`muffin-facets`, :14 hourly, migration 20261121140000, `facets.duration_ms`) does the same; it failed 1-10 times a day as an edge RPC under the 8 s ceiling before it moved.
         It was frozen for ten days (2026-09-23 to 10-03) behind 148 timeouts that nothing alerted on. The universe sample is watched by "The scheduler
         has stopped firing", which already treats a sample older than 3 hours as 9999.
 
@@ -689,6 +690,53 @@ groups:
 
         RUNBOOK: `select j.jobname, d.status, d.start_time, d.return_message from cron.job_run_details d join cron.job j using (jobid) where j.jobname in (''muffin-coverage'', ''muffin-quality'') order
         by d.start_time desc limit 10;` (add ''muffin-segment-spine'' for the spine). A timeout names the statement; run the function by hand as `postgres` to measure it.'
+  - uid: muffin-cron-headroom
+    title: A pg_cron job is nearing its time bound
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: muffin-postgres
+      model:
+        refId: A
+        format: table
+        rawQuery: true
+        rawSql: "select count(*)::float8 as value\n  from market.cron_job_headroom()\n where slowest_s > bound_s * 2 / 3"
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        reducer: last
+        expression: A
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: Alerting
+    execErrState: Alerting
+    for: 30m
+    labels:
+      muffin: pipeline
+    annotations:
+      summary: A pg_cron job's slowest run today passed two-thirds of its statement timeout
+      description: 'The observability samples and the segment spine run from pg_cron as `postgres`, each behind a leading `set statement_timeout`. Their inputs grow with the data, so their
+        durations walk toward that bound, and "An observability sample has stopped arriving" can only fire once a run has already timed out. Measured 2026-11-21 over 7 days: `muffin-quality` 58 s of
+        60 s, `muffin-coverage` 177 s of 300 s, `muffin-universe` 143 s, `muffin-segment-spine` 126 s (11 s through October). `market.cron_job_headroom()` (migration 20261121130000) reports each
+        active job''s bound and its slowest run in the last 24 hours; this fires when any passes two-thirds.
+
+
+        RUNBOOK: `select * from market.cron_job_headroom() order by slowest_s / bound_s desc;`. If a drain or backfill was writing that day, read the trend over a week in `cron.job_run_details`
+        before acting. Then raise the bound (a sample is observability: a longer statement costs only CPU), or make the sample read a cheaper source.'
   - uid: muffin-dagster-run-failed
     title: A Dagster run failed
     condition: C
