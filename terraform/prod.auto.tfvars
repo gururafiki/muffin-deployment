@@ -25,7 +25,10 @@ cloudflare_create_service_token = true
 boot_volume_size_in_gbs = 95
 
 # Persistent data volume (Docker data-root). See terraform/storage.tf. Grown 100 -> 105 on
-# 2026-11-01 with the last free 5 GB, when /mnt/data reached 76% during the SEC filer backfill. Grown
-# IN PLACE; the filesystem follows in ansible/roles/block_storage.
-data_volume_size_in_gbs = 105
+# 2026-11-01 with the last free 5 GB, when /mnt/data reached 76% during the SEC filer backfill.
+# Grown 105 -> 135 on 2026-11-21 (the user's decision, PAID: 30 GB past the free 200, about $1.30 a
+# month), at 88%: http-cache 32 GB of its 40 GB cap, the database 33 GB, raw 15 GB, with China's
+# segment drain holding its PDFs at the 5 GB cap. Grown IN PLACE; the filesystem follows in
+# ansible/roles/block_storage.
+data_volume_size_in_gbs = 135
 data_volume_vpus_per_gb = 10
