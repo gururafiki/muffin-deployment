@@ -39,15 +39,16 @@ A failed resource answers **HTTP 200 with `"ok": false`** and the reason.
 ```bash
 curl -sS -X POST "$BASE/functions/v1/market-refresh" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Content-Type: application/json' \
-  -d '{"resource":"security-news","force":true}'
+  -d '{"resource":"security-wikidata-industries","force":true}'
 ```
 
 **A 410 names the lane that replaced the resource.** The Yahoo company family (profiles,
 industries, fundamentals, share stats, officers, quarters, dividends, metrics) left the edge on
 2026-10-18, after prices (2026-09-12) and the universe (2026-09-26); SEC's facts, filings and
 insider trades left on 2026-11-07, and the segment parsers and filing walkers of all four
-regulators (SEC, CNINFO, DART, NSE) by 2026-11-16. Diagnose those in Dagster
-(`muffin-dagster-operations`), not here.
+regulators (SEC, CNINFO, DART, NSE) by 2026-11-16, and company news, the earnings calendar and
+history, and macro on 2026-11-21/22. Diagnose those in Dagster (`muffin-dagster-operations`), not
+here. Only `security-wikidata-industries` and the observability resources remain.
 
 **A bare `error code: 502` with no body means the WORKER DIED** — look at memory or a runaway loop,
 not at your error handling. Application failures do not look like that any more.
@@ -78,7 +79,9 @@ SQL
 ```
 
 On 2026-10-20 it named exactly two resources, both invisible to every alert:
-- `earnings-history`, asking for the window ending 2016-06-30 every hour since 2026-09-06;
+- `earnings-history`, asking for the window ending 2016-06-30 every hour since 2026-09-06 (retired
+  2026-11-21: Nasdaq answers `data: null` for those days, and the Dagster lane records that as an
+  empty day instead of retrying it);
 - `security-segments`, failing on one 2014 10-Q every five minutes since 2026-09-30.
 
 Umbrella note: `docs/deferred/2026-10-20-a-resource-can-repeat-the-same-failure-for-weeks.md`.
@@ -184,7 +187,7 @@ Take the queue's head and check each subject against the state the handler write
 Anything already done must NOT still be queued:
 
 ```bash
-curl -sS "$BASE/rest/v1/pending_news?select=security_id&limit=5" \
+curl -sS "$BASE/rest/v1/pending_wikidata?select=security_id&limit=5" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
 # then check those ids for the rows or the stamp the handler writes
 ```

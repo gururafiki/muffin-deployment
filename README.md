@@ -312,7 +312,7 @@ the anon key is public and a public cache-buster is a free way to hammer the pro
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_ROLE" -H "Authorization: Bearer $SERVICE_ROLE" \
   -H "Content-Type: application/json" \
-  -d '{"resource":"earnings-calendar","force":true}'
+  -d '{"resource":"security-wikidata-industries","force":true}'
 ```
 
 `force` bypasses the TTL and the error backoff but **not** the in-flight lock — two concurrent
@@ -586,8 +586,9 @@ The table lists the main ones; the function's `EXTRA_TTL_MINUTES` map is the com
 each resource's TTL.
 
 **Retired: the price family (D2, 2026-09-12), the universe family (2026-09-26), the Yahoo
-company family (2026-10-18), the SEC family (2026-10-25 and 2026-11-07) and the segment
-readers with the three regulators' filing walkers (Phase 6, 2026-11-14 to 11-16).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
+company family (2026-10-18), the SEC family (2026-10-25 and 2026-11-07), the segment
+readers with the three regulators' filing walkers (Phase 6, 2026-11-14 to 11-16), and news,
+earnings and macro (Phase 6b, 2026-11-21/22).** Prices, returns and FX moved to Dagster (`muffin-ingest`), and
 `market.performance` became a view over `security_return` and `index_return`; fund holdings, the
 venue directory, symbology and the CIK and NSE registries followed; then Yahoo's company data
 (`yahoo_companies`, a seventh of the universe a day from 03:30 UTC) and the metric derivation
@@ -628,6 +629,10 @@ holds the refusal list equal to the migrations' `-- RETIRES:` markers.
 | `security-cn-segments`, `cn-filings` | Dagster CNINFO lane (`raw_cninfo_filings` → `cninfo_segment`) |
 | `security-kr-segments`, `kr-filings` | Dagster DART lane (`raw_dart_filings` → `dart_segment`) |
 | `security-in-segments`, `in-filings` | Dagster NSE lane (`raw_nse_filings` → `nse_segment`) |
+| `earnings-calendar`, `earnings-history` | Dagster `nasdaq_earnings_window` (07:10 UTC, the last 7 days and the next 21) and `yahoo_earnings` in the company job — read `market.security_next_earnings`, `market.security_earnings_history` |
+| `security-news` | Dagster `raw_yahoo_news` → `company_news` in the company job (Yahoo's RSS feed, each company weekly) — read `market.security_news` |
+| `macro-indicators` | Dagster `macro_daily` (07:40 UTC, one partition per enabled `macro_indicator` row) — read `market.macro_current` |
+| `facets-refresh` | pg_cron `muffin-facets` runs `market.refresh_facets()` as postgres, off the 8 s RPC ceiling |
 
 The Yahoo company family's handlers, their helper modules (`fundamentals.ts`, the live provider
 check `check.ts`) and their eight `pending_*` views were deleted on 2026-10-24 (Phase 4 step 10), so
@@ -694,14 +699,14 @@ control is not rendered at all.
 ```bash
 # Any resource, from the node (respects the TTL). The rotation calls this same path:
 docker exec -i "$(docker ps -qf name=muffin_supabase-db | head -1)" \
-  psql -U postgres -c "select market.cron_post('earnings-calendar')"
+  psql -U postgres -c "select market.cron_post('security-wikidata-industries')"
 
 # Directly, with `force` to bypass the TTL — SERVICE-ROLE ONLY, because the anon key is public
 # and a public cache-buster is a free way to hammer the provider:
 curl -X POST "https://supabase.<domain>/functions/v1/market-refresh" \
   -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"resource":"earnings-calendar","force":true}'
+  -d '{"resource":"security-wikidata-industries","force":true}'
 ```
 
 `force` clears the TTL and the error backoff but **not** the in-flight lock, so concurrent forced
