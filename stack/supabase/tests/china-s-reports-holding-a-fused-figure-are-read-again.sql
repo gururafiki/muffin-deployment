@@ -6,6 +6,7 @@
 --   re-queued:
 --     cn-fused      a CNINFO report whose member carries `16,327,089.58` in its name
 --     cn-negative   a revenue split placed with no target (China Eastern FY2020's shape)
+--     cn-norows     a full report read into no rows
 --   untouched:
 --     cn-clean      a CNINFO report with ordinary names
 --     cn-share      a CNINFO name carrying a share and no money figure (`钒钛铁精矿（61%）`)
@@ -14,6 +15,8 @@
 --     cn-cost       a cost row placed with no target
 --     cn-queued     a fused report already behind the parser
 --     sec-fused     the same name on an SEC filing (another source)
+--     cn-summary    a summary read into no rows (it carries no table)
+--     sec-norows    an SEC filing read into no rows (another source)
 
 \set ON_ERROR_STOP on
 
@@ -33,17 +36,21 @@ insert into market.security (security_id, name, security_type_code) values
 on conflict (security_id) do nothing;
 
 insert into market.security_filing
-  (security_id, accession_number, source_code, segments_parsed_at, segments_parser_version)
+  (security_id, accession_number, source_code, segments_parsed_at, segments_parser_version,
+   report_type)
 values
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-fused.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-clean.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-share.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-queued.PDF', 'cninfo', '2026-11-20', 0),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-negative.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-unplaced.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-cell.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'cn-cost.PDF', 'cninfo', '2026-11-20', 20),
-  ('00000000-0000-0000-0000-00000000cf01', 'sec-fused', 'sec-submissions', '2026-11-20', 20);
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-fused.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-clean.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-share.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-queued.PDF', 'cninfo', '2026-11-20', 0, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-negative.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-unplaced.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-cell.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-cost.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'sec-fused', 'sec-submissions', '2026-11-20', 20, '10-K'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-norows.PDF', 'cninfo', '2026-11-20', 20, '年度报告'),
+  ('00000000-0000-0000-0000-00000000cf01', 'cn-summary.PDF', 'cninfo', '2026-11-20', 20, '年度报告摘要'),
+  ('00000000-0000-0000-0000-00000000cf01', 'sec-norows', 'sec-submissions', '2026-11-20', 20, '10-K');
 
 insert into market.security_segment
   (security_id, accession_number, axis, member_code, metric_code, period_type, period_start,
@@ -79,8 +86,9 @@ do $$
 declare
   got text;
   want text := concat_ws(' | ', 'cn-cell.PDF v20', 'cn-clean.PDF v20', 'cn-cost.PDF v20',
-    'cn-fused.PDF v0', 'cn-negative.PDF v0', 'cn-queued.PDF v0', 'cn-share.PDF v20',
-    'cn-unplaced.PDF v20', 'sec-fused v20');
+    'cn-fused.PDF v0', 'cn-negative.PDF v0', 'cn-norows.PDF v0', 'cn-queued.PDF v0',
+    'cn-share.PDF v20', 'cn-summary.PDF v20', 'cn-unplaced.PDF v20', 'sec-fused v20',
+    'sec-norows v20');
 begin
   select string_agg(format('%s v%s', accession_number, segments_parser_version), ' | '
                     order by accession_number)
@@ -92,8 +100,8 @@ begin
   end if;
   if not exists (select 1 from market.one_shot
                   where key = 'cninfo-requeue-fused-figure-2026-11-22'
-                    and reason like 're-queued 2 %') then
-    raise exception 'the re-queue did not record itself as having re-queued 2 reports';
+                    and reason like 're-queued 3 %') then
+    raise exception 'the re-queue did not record itself as having re-queued 3 reports';
   end if;
 end $$;
 

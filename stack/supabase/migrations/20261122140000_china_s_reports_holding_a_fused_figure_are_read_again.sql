@@ -22,7 +22,14 @@
 -- #195 stops placing a split against a total of zero or less; a report holding a placed top-level
 -- revenue row with no target is exactly that (1 report, measured 2026-11-22).
 --
--- So every report whose stored rows hold such a member is put behind the parser: parser version 0,
+-- AND EVERY FULL REPORT READ INTO NO ROWS AT ALL. #196 also reads mandated tables in 千元 or 百万元
+-- that print whole numbers, which yielded nothing before (中国神华, 中国国航, 工业富联). Over the
+-- 760 other reports held on the node, 8 of the 35 that read into no facts now read reconciling
+-- splits, and nothing else changed. Production holds 4,147 full reports read into no rows
+-- (2026-11-22). Summaries and English editions stay: they carry no table.
+--
+-- So every report whose stored rows hold such a member, or that holds none, is put behind the
+-- parser: parser version 0,
 -- `segments_parsed_at` kept, as the CNINFO re-queues of 2026-11-15 and 11-16 did. Stage 2 retracts
 -- the report's rows by accession and writes what the reader now produces. A name with a share but
 -- no money figure is real (`钒钛铁精矿（61%）`, a product grade) and is not matched.
@@ -42,19 +49,23 @@ begin
      set segments_parser_version = 0
    where f.source_code = 'cninfo'
      and coalesce(f.segments_parser_version, 0) <> 0  -- read, and not already behind the parser
-     and exists (
+     and (exists (
            select 1 from market.security_segment g
             where g.security_id = f.security_id
               and g.accession_number = f.accession_number
               and g.source_code = 'cninfo'
               and (g.member_code ~ '[0-9]{1,3}(,[0-9]{3})+\.[0-9]{2}'
                    or (g.metric_code = 'revenue' and g.partition_id > 0
-                       and g.parent_member is null and g.reconciled_to is null)));
+                       and g.parent_member is null and g.reconciled_to is null)))
+         or (f.report_type = '年度报告'
+             and not exists (select 1 from market.security_segment g
+                              where g.security_id = f.security_id
+                                and g.accession_number = f.accession_number)));
   get diagnostics n = row_count;
 
   insert into market.one_shot (key, reason) values (
     'cninfo-requeue-fused-figure-2026-11-22',
     format('re-queued %s CNINFO reports holding a member name with a money figure fused into it, '
-           'or a split placed against no positive total', n));
+           'a split placed against no positive total, or no rows at all', n));
   raise notice 'cninfo-requeue-fused-figure: re-queued % rows', n;
 end $$;
