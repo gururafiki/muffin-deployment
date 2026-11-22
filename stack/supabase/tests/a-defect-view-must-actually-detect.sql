@@ -148,50 +148,9 @@ end $$;
 -- must stay SILENT on the innocent shape. Asserting only that it fires on a real defect is what
 -- let them through in the first place.
 
--- 6. A FLAT PRICE DOES NOT CONTRADICT A `performance_missing_at` MARK.
---    Migration 055's header predicted this exactly: a money-market line "has a bar every day and a
---    single distinct close forever, so it legitimately yields no return, earns its mark honestly".
---    Measured on the first read, 15 of 29 flagged securities were this shape. Holding BARS is not
---    evidence; holding bars that MOVE is.
-insert into market.security (security_id, name, security_type_code, country_iso2, performance_missing_at)
-values ('00000000-0000-0000-0000-0000000d0060','T134 Flat Money Market','equity','ZD', now() - interval '2 days')
-on conflict (security_id) do nothing;
-insert into market.price_bar (security_id, trade_date, close, source_code) values
-  ('00000000-0000-0000-0000-0000000d0060', current_date - 1, 100.00, 'yfinance'),
-  ('00000000-0000-0000-0000-0000000d0060', current_date - 2, 100.00, 'yfinance'),
-  ('00000000-0000-0000-0000-0000000d0060', current_date - 3, 100.00, 'yfinance')
-on conflict do nothing;
-
-do $$
-declare n_flat bigint;
-begin
-  select n into n_flat from market.data_defect where defect = 'contradicted_negative_cache';
-  if n_flat <> (select n from before_ where defect = 'contradicted_negative_cache') then
-    raise exception 'a FLAT series (one distinct close) was reported as contradicting its mark — '
-                    'this is migration 055''s GVMXX case and the mark is honest';
-  end if;
-end $$;
-
---    ...and a MOVING price must still fire, or the fix has simply disabled the check.
-insert into market.security (security_id, name, security_type_code, country_iso2, performance_missing_at)
-values ('00000000-0000-0000-0000-0000000d0061','T134 Moving And Marked','equity','ZD', now() - interval '2 days')
-on conflict (security_id) do nothing;
-insert into market.price_bar (security_id, trade_date, close, source_code) values
-  ('00000000-0000-0000-0000-0000000d0061', current_date - 1, 101.50, 'yfinance'),
-  ('00000000-0000-0000-0000-0000000d0061', current_date - 2, 100.00, 'yfinance'),
-  ('00000000-0000-0000-0000-0000000d0061', current_date - 3,  99.25, 'yfinance')
-on conflict do nothing;
-
-do $$
-declare n_move bigint; base bigint;
-begin
-  select n into n_move from market.data_defect where defect = 'contradicted_negative_cache';
-  select n into base   from before_ where defect = 'contradicted_negative_cache';
-  if n_move <= base then
-    raise exception 'a MOVING series under a `performance_missing_at` mark was not reported '
-                    '(% -> %) — requiring the price to move has disabled the check entirely', base, n_move;
-  end if;
-end $$;
+-- 6. (The `contradicted_negative_cache` gauge and its two checks went with
+--    `security.performance_missing_at` on 2026-11-22, 20261122160000: nothing had set the mark since
+--    the edge price resources retired on 2026-09-12.)
 
 -- 7. A COUNTRY WHOSE SECURITIES HAVE TICKERS IS NOT "SILENTLY DROPPED".
 --    The fetch key everywhere in this pipeline is `coalesce(provider_symbol, ticker)`. The first

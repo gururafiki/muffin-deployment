@@ -80,14 +80,9 @@ begin
     raise exception 'a restated short interest did not land (%)', v;
   end if;
 
-  -- 5. BOTH NEW CACHES ARE CLASSIFIED. `negative-caches-are-classified.sql` fails CI on an
-  --    unclassified `%_missing_at`; this asserts the DIRECTION, which that file cannot: both are
-  --    fetched by the priced symbol, so a corrected symbol must clear them.
-  select count(*) into n from market.symbol_cache_classification
-   where column_name in ('share_stats_missing_at','estimates_missing_at') and symbol_keyed;
-  if n <> 2 then
-    raise exception 'the new caches are not classified as symbol-keyed (% of 2) — a corrected symbol would leave them set for 30 days', n;
-  end if;
+  -- (A fifth check, that `share_stats_missing_at` and `estimates_missing_at` were classified as
+  --  symbol-keyed, went with the columns on 2026-11-22: their writer, the edge's
+  --  `security-share-stats`, retired on 2026-10-18.)
 end $$;
 
 rollback;

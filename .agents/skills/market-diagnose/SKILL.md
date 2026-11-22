@@ -166,7 +166,7 @@ curl -sS -o /dev/null -D - "$BASE/rest/v1/security?select=security_id&security_t
 
 ```bash
 # US mega-caps carrying a negative cache. Should be ~0. It read 109 of 213 during the incident,
-# on industry_missing_at (no writer since 2026-10-18). statement_currency_missing_at is SEC's mark.
+# on industry_missing_at (dropped 2026-11-22). statement_currency_missing_at is SEC's mark.
 curl -sS -o /dev/null -D - \
   "$BASE/rest/v1/security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&statement_currency_missing_at=not.is.null" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market' -H 'Prefer: count=exact'

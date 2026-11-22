@@ -8,7 +8,7 @@ description:
 license: GPL-3.0
 metadata:
   author: muffin
-  version: '1.0.0'
+  version: '1.1.0'
 ---
 
 # Repair a wrongly-set negative cache
@@ -19,14 +19,19 @@ count stays plausible.
 
 This has happened twice at scale: 1,369 securities, then ~8,300.
 
-**Most of these columns no longer have a writer.** The price family retired on 2026-09-12 and the
-Yahoo company family on 2026-10-18, so `industry_`, `profile_`, `fundamentals_`, `statements_`,
-`quarters_`, `dividends_`, `share_stats_`, `profile_detail_`, `prices_` and `performance_missing_at`
-only hold old marks until the contract step drops them. The Dagster lanes record absence in their
-own partitions and `identifier_probe`. SEC's `statement_currency_missing_at` and
-`xbrl_missing_at` lost their writers on 2026-10-25 and 2026-11-07, as did
-`corporate_actions_missing_at` on 2026-10-25. The edge still sets only `wikidata_missing_at`. The loops below still name the old columns, because a wrong old mark still
-hides a security from whatever reads it.
+**Four columns are left, and only one has a writer.** The price, universe and Yahoo company
+families' columns were dropped on 2026-11-22 (muffin-deployment 20261122160000). The Dagster lanes
+record absence in their own partitions and `identifier_probe`, where a miss expires by itself.
+What remains:
+
+| Column | Writer | Keyed on |
+|---|---|---|
+| `wikidata_missing_at` | the edge's `security-wikidata-industries` (live) | the ISIN |
+| `statement_currency_missing_at` | none since 2026-10-25 (drops 2026-12-07) | the US ticker |
+| `xbrl_missing_at` | none since 2026-11-07 (drops 2026-12-07) | the CIK |
+| `corporate_actions_missing_at` | none since 2026-10-25 (drops 2026-12-07) | the US ticker |
+
+A wrong old mark still hides a security from whatever reads it, so the loops below name all four.
 
 ## First: is the mark WRONG, or earned?
 
@@ -43,20 +48,21 @@ cnt() { curl -sS -o /dev/null -D - "$BASE/rest/v1/$1" \
   -H 'Accept-Profile: market' -H 'Prefer: count=exact' \
   | sed -n 's/.*content-range: [0-9*-]*\///Ip' | tr -d '\r'; }
 
-for col in statement_currency_missing_at xbrl_missing_at industry_missing_at fundamentals_missing_at; do
+for col in wikidata_missing_at statement_currency_missing_at xbrl_missing_at corporate_actions_missing_at; do
   printf '  %-26s %s of %s US mega-caps\n' "$col" \
     "$(cnt "security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&$col=not.is.null")" \
     "$(cnt 'security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000')"
 done
 ```
 
-**Should be ~0 of ~213.** It read `109 of 213` during the incident. A company worth over $50bn
-having no industry is not a provider limitation, it is the bug.
+**Should be ~0 of ~213.** It read `109 of 213` (for the industry mark, since dropped) during the
+incident. A company worth over $50bn that a provider has nothing for is not a provider limitation,
+it is the bug.
 
 Then name some, so you are looking at companies rather than counts:
 
 ```bash
-curl -sS "$BASE/rest/v1/security?select=name,industry_missing_at&country_iso2=eq.US&market_cap=gt.50000000000&industry_missing_at=not.is.null&limit=10" \
+curl -sS "$BASE/rest/v1/security?select=name,wikidata_missing_at&country_iso2=eq.US&market_cap=gt.50000000000&wikidata_missing_at=not.is.null&limit=10" \
   -H "apikey: $SRV" -H "Authorization: Bearer $SRV" -H 'Accept-Profile: market'
 ```
 
@@ -72,8 +78,8 @@ throttle cannot mark anything — but confirm the deploy that carries that is li
 
 ```bash
 DAY=$(date -u +%F)
-for col in statement_currency_missing_at xbrl_missing_at industry_missing_at \
-           fundamentals_missing_at profile_missing_at; do
+for col in wikidata_missing_at statement_currency_missing_at xbrl_missing_at \
+           corporate_actions_missing_at; do
   before=$(cnt "security?select=security_id&security_type_code=eq.equity&$col=gte.$DAY")
   curl -sS -o /dev/null -X PATCH \
     "$BASE/rest/v1/security?security_type_code=eq.equity&$col=gte.$DAY" \
@@ -89,12 +95,12 @@ every mark re-asks the provider for thousands of answers it already gave, and th
 justifies the ones you have reason to doubt: clearing a legitimate mark costs one re-fetch, keeping
 a wrong one costs thirty days.
 
-## Do NOT clear these two
+## A corrected symbol does not clear the ISIN- or CIK-keyed marks
 
-`figi_missing_at` and `local_symbol_missing_at` are keyed on the **ISIN**, not the symbol. A
-corrected symbol says nothing about them, and clearing them re-asks a rate-limited provider for an
-answer already held. `market.symbol_cache_classification` states which of the nine columns is
-symbol-keyed and why.
+`wikidata_missing_at` is keyed on the **ISIN** and `xbrl_missing_at` on the **CIK**. A corrected
+symbol says nothing about either, and clearing them re-asks a provider for an answer already held.
+`market.symbol_cache_classification` states which column is symbol-keyed and why; the trigger on
+`security_provider_symbol` clears only those.
 
 ## Verify
 
@@ -109,5 +115,5 @@ Then run `market-refresh-routine` to fill them, and `market-health` to confirm.
 ## If you are writing a repair as a MIGRATION instead
 
 Migrations re-run on every deploy, so a data repair must go through `market.one_shot` or it runs
-forever. Clearing `prices_missing_at` on every deploy would permanently defeat the negative cache —
+forever. Clearing a `%_missing_at` mark on every deploy would permanently defeat the negative cache —
 the exact failure the flag exists to prevent, reintroduced as the fix for it.

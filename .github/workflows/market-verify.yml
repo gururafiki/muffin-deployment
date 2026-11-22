@@ -151,12 +151,8 @@ jobs:
           # `extreme_1y_returns` is a GAUGE, not an invariant: of 40 securities returning >= +300%,
           # 34 were real. It is recorded and deliberately not asserted on.
           #
-          # `contradicted_negative_cache` joined it 2026-09-05, after a third false-positive round.
-          # It compares OUR STORED BARS against a mark recording what the provider returned on a
-          # FRESH fetch — two sources that legitimately disagree. Measured: Thailand's NVDR lines
-          # return 272 bars with ONE distinct close from yfinance and produce no computable return,
-          # so the marks are honest, while our stored history for the same securities moves. No
-          # threshold reconciles that, so the count is recorded as a pointer and not asserted.
+          # `contradicted_negative_cache` was a gauge from 2026-09-05 until it went with
+          # `security.performance_missing_at` on 2026-11-22.
           #
           # `returns_at_minus_100` joined them 2026-10-03. It names a zero close becoming a total
           # loss, and `price_bar` can no longer hold one (`price_bar_close_positive`). What it found
@@ -171,7 +167,7 @@ jobs:
           else
             python3 - "$defects" <<'PYCHK' || fail=1
           import json, sys
-          GAUGES = {'extreme_1y_returns', 'contradicted_negative_cache', 'returns_at_minus_100'}
+          GAUGES = {'extreme_1y_returns', 'returns_at_minus_100'}
           rows = json.loads(sys.argv[1])
           bad = 0
           for r in sorted(rows, key=lambda x: x['defect']):
