@@ -86,8 +86,8 @@ report it.
 or by marking securities unanswerable, and the counts look identical. Cross-check:
 
 ```bash
-# should be ~0 of ~213. The 2026-08-13 incident read 109 on industry_missing_at, which has had no
-# writer since 2026-10-18. statement_currency_missing_at is SEC's "asked, got no statements", which
+# should be ~0 of ~213. The 2026-08-13 incident read 109 on industry_missing_at, which was
+# dropped on 2026-11-22. statement_currency_missing_at is SEC's "asked, got no statements", which
 # a US mega-cap cannot honestly earn.
 cnt 'security?select=security_id&country_iso2=eq.US&market_cap=gt.50000000000&statement_currency_missing_at=not.is.null'
 ```

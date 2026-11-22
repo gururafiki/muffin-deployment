@@ -61,15 +61,8 @@ begin
     raise exception 'the ANNUAL revenue is now % — one quarter overwrote the year, which is a figure four times too small and in the right units', v;
   end if;
 
-  -- 3. THE NEGATIVE CACHE IS CLEARED BY A NEW SYMBOL, via the shared function rather than a
-  --    hand-written list at one call site.
-  update market.security set quarters_missing_at = now()
-   where security_id = '00000000-0000-0000-0000-000000010603';
-  perform market.clear_symbol_caches('00000000-0000-0000-0000-000000010603');
-  if (select quarters_missing_at from market.security
-       where security_id = '00000000-0000-0000-0000-000000010603') is not null then
-    raise exception 'a corrected symbol left quarters_missing_at set — the question was asked under the OLD spelling';
-  end if;
+  -- (A third check, that a new symbol cleared `quarters_missing_at`, went with the column on
+  --  2026-11-22: its writer, the edge's `security-quarters`, retired on 2026-10-18.)
 end $$;
 
 rollback;

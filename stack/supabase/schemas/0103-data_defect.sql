@@ -44,16 +44,6 @@ UNION ALL
           GROUP BY performance.scope_id
          HAVING count(*) FILTER (WHERE performance.change_pct = 0::numeric) >= 3 AND count(*) FILTER (WHERE performance.change_pct IS NOT NULL AND performance.change_pct <> 0::numeric) = 0) q
 UNION ALL
- SELECT 'contradicted_negative_cache'::text AS defect,
-    count(*) AS n,
-    'securities marked as having no returns while holding recent bars that MOVE'::text AS detail
-   FROM market.security s
-  WHERE s.performance_missing_at IS NOT NULL AND (( SELECT count(DISTINCT p.close) AS count
-           FROM market.price_bar p
-          WHERE p.security_id = s.security_id AND p.trade_date > (CURRENT_DATE - 30))) > 1 AND (EXISTS ( SELECT 1
-           FROM market.price_bar p
-          WHERE p.security_id = s.security_id AND p.trade_date > (CURRENT_DATE - 7)))
-UNION ALL
  SELECT 'country_with_no_symbols'::text AS defect,
     count(*) AS n,
     'countries with 20+ equities and not one provider symbol'::text AS detail
