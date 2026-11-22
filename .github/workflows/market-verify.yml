@@ -17,7 +17,8 @@
 # the market-refresh edge function still writes left: resource health (`refresh_run`), the
 # `*_missing_at` marks (whose resources retired and which nothing writes any more) and the
 # retention of the edge-pruned tables. Those resources answer to Grafana's alerts, not to this gate.
-# The views the app reads over Dagster data are still timed as anon. Segment reconciliation and the
+# The views the app reads over Dagster data are still timed as anon. News joined on 2026-11-22, once
+# the Dagster news lane replaced the edge's `security-news`. Segment reconciliation and the
 # segment spine came back on 2026-11-16 (Phase 6 step 7): all four regulators' segments are Dagster
 # lanes since then.
 name: Market data verify
@@ -234,6 +235,17 @@ jobs:
           # 6. Ticker resolution is incremental, so this is a PROGRESS check rather than a floor
           #    on the final state — it fails only if resolution has produced essentially nothing.
           check_min "resolved tickers" "$(count 'security_identifier?select=value&kind_code=eq.ticker')" 100
+
+          # 6b. NEWS IS CURRENT (Phase 6b): the guard that would have caught seven weeks of silence.
+          #     The edge's `security-news` stored nothing from 2026-10-01 while stamping every
+          #     company as asked, so every count it reported read healthy. The Dagster news lane
+          #     visits a seventh of the companies a day with the company rotation: 1,284 article
+          #     links were published in the last 3 days on 2026-11-22, the lane's first scheduled
+          #     day. A lane that stops falls to 0 here within three days. Links, not articles: the
+          #     view the stock page reads is one row per (article, company).
+          news_since=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          check_min "news links published in the last 3 days" \
+            "$(count "security_news?select=url&published_at=gte.$news_since")" 100
 
           # 7b (a backlog must be satisfiable) left with `pending_industry` on 2026-10-24 (Phase 4
           #     step 10); tests/backlogs-are-satisfiable.sql went with it. The rule it carried is in
