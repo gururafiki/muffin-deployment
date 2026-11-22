@@ -1,17 +1,17 @@
 ---
 name: market-refresh-routine
 description:
-  Drain the edge function's two remaining market-data backlogs (company news and Wikidata
-  industries) by hand, PACED so they do not trip a provider's rate limit, or drain a Dagster
-  segment lane's backlog with a paced backfill. Use when someone asks to "refresh the market data",
-  "catch the backlogs up" or "ingest what is missing". Yahoo company data, prices and the universe
-  are Dagster lanes since 2026-10-18, SEC's facts, filings and insider trades since 2026-11-07, and
-  every regulator's segments since 2026-11-16 (muffin-dagster-operations). Do NOT use for a single
-  security (market-refresh-security) or a new ETF (market-add-fund).
+  Drain the edge function's one remaining market-data backlog (Wikidata industries) by hand,
+  PACED so it does not trip the provider's limit, or drain a Dagster lane's backlog with a paced
+  backfill. Use when someone asks to "refresh the market data", "catch the backlogs up" or "ingest
+  what is missing". Yahoo company data, prices and the universe are Dagster lanes since 2026-10-18,
+  SEC's facts, filings and insider trades since 2026-11-07, every regulator's segments since
+  2026-11-16, and company news, earnings and macro since 2026-11-22 (muffin-dagster-operations).
+  Do NOT use for a single security (market-refresh-security) or a new ETF (market-add-fund).
 license: GPL-3.0
 metadata:
   author: muffin
-  version: '1.2.0'
+  version: '1.3.0'
 ---
 
 # Refresh the market data
@@ -34,8 +34,23 @@ time (`muffin-dagster-operations`): for China,
 `backfill --assets raw_cninfo_filings,cninfo_segment --partitions grid:cninfo_filer --priority -1`.
 A parser bump is drained the same way.
 
-What remains on the edge is `security-news` and `security-wikidata-industries`, each on its own
-pg_cron slot. Run them by hand only when you want them **sooner**.
+**News, earnings and macro left on 2026-11-21/22**, Phase 6b. `security-news`,
+`earnings-calendar`, `earnings-history` and `macro-indicators` answer 410:
+
+- **News** is `raw_yahoo_news` → `company_news` in the `yahoo_companies` job, so each company is
+  re-read on its weekly visit (Yahoo's RSS feed, one request per company). The stock page's Refresh
+  button re-reads it with the rest of the company.
+- **Earnings** come from two lanes: `nasdaq_earnings_window` at 07:10 UTC (the last 7 days and the
+  next 21, one partition per day) and `yahoo_earnings` in the company job (Yahoo's stored
+  `calendarEvents` and `earningsHistory`, no extra request). Nasdaq history before the window is a
+  backfill of `raw_nasdaq_earnings,nasdaq_earnings` over `nasdaq_day` partitions.
+- **Macro** is `macro_daily` at 07:40 UTC, one partition per enabled `market.macro_indicator` row.
+
+Each reports through an asset check (`news_is_current`, `nasdaq_window_is_current`,
+`macro_series_fresh`), and market-verify counts the news links of the last 3 days.
+
+What remains on the edge is `security-wikidata-industries`, on its own pg_cron slot. Run it by
+hand only when you want it **sooner**.
 
 ## The one thing that matters
 
@@ -65,7 +80,6 @@ only — the anon key is public and a public cache-buster is a free way to hamme
 ## What is left to drain
 
 ```
-security-news                  pending_news: recent articles per security, kept 90 days.
 security-wikidata-industries   pending_wikidata: industry (P452) by ISIN, 12 ISINs a SPARQL request.
 ```
 
@@ -74,7 +88,7 @@ security-wikidata-industries   pending_wikidata: industry (P452) by ISIN, 12 ISI
 ```bash
 for cycle in 1 2 3 4 5 6; do
   throttled=0
-  for r in security-news security-wikidata-industries; do
+  for r in security-wikidata-industries; do
     out=$(call "$r")
     echo "$r: $out"
     case "$out" in *RateLimit*|*"Too Many Requests"*|*RATE-LIMITING*) throttled=1;; esac
@@ -113,7 +127,7 @@ replaced the body, so the reason never arrived. A bare 502 now means a genuinely
 ## Checking progress
 
 ```bash
-for v in pending_news pending_wikidata; do
+for v in pending_wikidata; do
   printf '%-24s %s\n' "$v" "$(curl -sS -o /dev/null -D - \
     "$BASE/rest/v1/$v?select=security_id&limit=1" \
     -H "apikey: $SRV" -H "Authorization: Bearer $SRV" \
