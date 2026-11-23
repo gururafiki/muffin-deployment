@@ -302,17 +302,37 @@ def main() -> int:
         parser_version = int(pv[0]["version"]) if pv else None
     except Exception:
         parser_version = None
+    # Asked through the primary key, (security_id, accession_number). No index leads on the
+    # accession alone, so filtering by it scanned the whole table: 7.2 s cold for one chunk of 60
+    # at 1,240,755 rows (2026-11-23), and 57014 under load, which failed market-verify that day.
     version_of: dict[str, int] = {}
     if parser_version is not None:
-        accs = sorted({r["accession_number"] for r in rows if r.get("accession_number")})
-        for i in range(0, len(accs), 60):
-            chunk = ",".join(accs[i : i + 60])
-            for f in get_all(
-                "security_filing?select=accession_number,segments_parser_version"
-                f"&accession_number=in.({chunk})"
-            ):
-                if f.get("segments_parser_version") is not None:
-                    version_of[f["accession_number"]] = int(f["segments_parser_version"])
+        by_security: dict[str, set[str]] = {}
+        for r in rows:
+            if r.get("accession_number"):
+                by_security.setdefault(r["security_id"], set()).add(r["accession_number"])
+        batch_ids: list[str] = []
+        batch_accs: set[str] = set()
+
+        def ask_versions() -> None:
+            accs = sorted(batch_accs)
+            for i in range(0, len(accs), 60):
+                for f in get_all(
+                    "security_filing?select=accession_number,segments_parser_version"
+                    f"&security_id=in.({','.join(batch_ids)})"
+                    f"&accession_number=in.({','.join(accs[i : i + 60])})"
+                ):
+                    if f.get("segments_parser_version") is not None:
+                        version_of[f["accession_number"]] = int(f["segments_parser_version"])
+
+        for sid, accs_of in sorted(by_security.items()):
+            batch_ids.append(sid)
+            batch_accs.update(accs_of)
+            if len(batch_ids) >= 20 or len(batch_accs) >= 60:
+                ask_versions()
+                batch_ids, batch_accs = [], set()
+        if batch_ids:
+            ask_versions()
 
     def is_stale(acc: str | None) -> bool:
         """True when this split predates the current parser, so its defects are already fixed."""
