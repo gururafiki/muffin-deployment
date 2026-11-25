@@ -9,12 +9,7 @@
 //
 //   deno run stack/supabase/functions/market-refresh/logic-check.ts
 
-import {
-  dedupeBy,
-  extractMacroPoints,
-  fetchWithIsolation,
-  symbolList,
-} from './resources.ts'
+import { dedupeBy } from './resources.ts'
 
 // WHERE THE MIGRATION HISTORY LIVES, IN ONE PLACE.
 //
@@ -47,19 +42,6 @@ const check = (ok: boolean, label: string, detail = '') => {
   console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${detail ? ` — ${detail}` : ''}`)
 }
 
-// ── symbols are not URL-safe ─────────────────────────────────────────────────
-// Shipped: `BRK/B` 400s and takes its whole batch of 20 with it; `PE&OLES*.MX` unencoded ENDS the
-// symbol parameter and silently truncates the request, which still returns 200.
-console.log('\nsymbolList — real tickers are not URL-safe')
-check(symbolList(['AAPL', 'MSFT']) === 'AAPL,MSFT', 'ordinary symbols are untouched')
-check(symbolList(['BRK/B']) === 'BRK%2FB', 'a slash is encoded (it 400s the whole batch raw)')
-check(symbolList(['PE&OLES*.MX']).indexOf('&') === -1,
-  'an ampersand cannot terminate the parameter', symbolList(['PE&OLES*.MX']))
-check(symbolList(['A', 'B']).split(',').length === 2, 'the comma SEPARATOR stays literal')
-check(symbolList(['NESN.SW']) === 'NESN.SW', 'a dot suffix is not mangled')
-check(symbolList(['005930.KS', 'BP/.L']) === '005930.KS,BP%2F.L',
-  'a mixed batch encodes only what needs it')
-
 // ── the same conflict key twice fails the WHOLE statement ────────────────────
 // Shipped: `security-industries` returned a bare 502 on any page big enough to contain a security
 // classified into two sectors. Postgres refuses `ON CONFLICT DO UPDATE` when one statement carries
@@ -78,90 +60,6 @@ console.log('\ndedupeBy — one row per conflict key')
   check(dedupeBy([], (x: { id: string }) => x.id).length === 0, 'an empty list stays empty')
   const keys = out.map((w) => `${w.security_id}|${w.node_id}|${w.source_code}`)
   check(new Set(keys).size === keys.length, 'no duplicate key survives — the actual DB constraint')
-}
-
-// ── one dead symbol must not kill nineteen good ones ─────────────────────────
-// The most repeated failure in this pipeline: group-performance on FM, security-profiles on foreign
-// listings, and security-industries on the Bloomberg spellings that 400 even once encoded. Because
-// the backlog is ordered by fund weight, that batch sat at the head of EVERY run.
-console.log('\nfetchWithIsolation — a bad symbol costs only itself')
-{
-  const far = Date.now() + 60_000
-  const path = (syms: string[]) => `/p?symbol=${syms.join(',')}`
-
-  // The healthy case must cost exactly ONE call — isolation is for failures only.
-  let calls = 0
-  const ok = await fetchWithIsolation(
-    async (_p) => { calls++; return [{ symbol: 'A' }, { symbol: 'B' }] },
-    path, ['A', 'B'], 5_000, far,
-  )
-  check(calls === 1, 'a healthy batch makes exactly one request', `made ${calls}`)
-  check(ok.rows.length === 2 && ok.dead.length === 0 && ok.error === null, 'and reports no failure')
-
-  // One poison symbol: the other nineteen must still come back, and only the bad one is blamed.
-  const bad = 'BRK/B'
-  const isolated = await fetchWithIsolation(
-    async (p: string) => {
-      if (p.includes(encodeURIComponent(bad)) || p.includes(bad)) throw new Error('openbb 400')
-      return [{ symbol: p.split('=')[1] }]
-    },
-    (syms) => `/p?symbol=${symbolList(syms)}`,
-    ['GOOD1', bad, 'GOOD2'], 5_000, far,
-  )
-  check(isolated.rows.length === 2, 'the good symbols still return', `got ${isolated.rows.length}`)
-  check(isolated.dead.length === 1 && isolated.dead[0] === bad,
-    'only the failing symbol is marked dead', JSON.stringify(isolated.dead))
-  check(isolated.error !== null, 'the original batch error is still reported')
-
-  // EVERY symbol failing is an OUTAGE, not twenty bad symbols. Draining aggressively tripped
-  // yfinance's rate limit and this negative-cached 1,369 securities for 30 days — including HTHT
-  // and LEGN, ordinary Nasdaq tickers — while reporting `classified: 0, noIndustry: 200`, which
-  // reads as healthy progress.
-  const outage = await fetchWithIsolation(
-    async () => { throw new Error('openbb 400') },
-    path, ['A', 'B', 'C'], 5_000, far,
-  )
-  check(outage.dead.length === 0,
-    'when NOTHING answers, no symbol is blamed', JSON.stringify(outage.dead))
-  check((outage.error ?? '').includes('provider outage'),
-    'and the reason says so, so the tally is not read as progress')
-
-  // A THROTTLE IS STATED, NOT INFERRED — and it is the case the count rule cannot see.
-  //
-  // The count rule only fires when NOTHING in a batch answers. yfinance throttles progressively, so
-  // it refuses some symbols while answering others: `rows.length > 0`, the rule stays silent, and
-  // the refused ones are recorded as permanently unanswerable. Caused deliberately 2026-08-13 by
-  // draining six resources back to back — the message said `YFRateLimitError: Too Many Requests`
-  // the whole time and nothing was reading it, which is how this costs 1,369 negative-cached
-  // securities while every count looks like healthy progress.
-  const RATE_LIMITED =
-    'openbb 400: {"detail":"Error getting data for WK -> YFRateLimitError: Too Many Requests."}'
-  const partialThrottle = await fetchWithIsolation(
-    async (p: string) => {
-      // The BATCH carries the rate-limit message — that is how the provider actually reports it,
-      // measured: `openbb 400 on …symbol=GPGI,ITGR,CNK,…: {"detail":"… -> YFRateLimitError …"}`.
-      // Isolation then retries one at a time and some still get through, which is what makes the
-      // count rule blind to this: `rows.length > 0`, so it never fires.
-      if (p.includes(',')) throw new Error(RATE_LIMITED)
-      if (p.includes('GOOD')) return [{ symbol: 'GOOD' }]
-      throw new Error(RATE_LIMITED)
-    },
-    path, ['GOOD', 'RATELIMITED'], 5_000, far,
-  )
-  check(partialThrottle.dead.length === 0,
-    'a rate-limited symbol is NOT blamed even when others answered',
-    JSON.stringify(partialThrottle.dead))
-  check((partialThrottle.error ?? '').includes('RATE-LIMITING'),
-    'and the reason names the rate limit, not the symbol')
-  check(partialThrottle.rows.length === 1, 'while the symbols that did answer are kept')
-
-  // Out of budget: untried symbols must NOT be recorded as unanswerable. Negative-caching a symbol
-  // we never asked about is how a backlog loses work permanently.
-  const expired = await fetchWithIsolation(
-    async () => { throw new Error('openbb 400') },
-    path, ['A', 'B', 'C'], 5_000, Date.now() - 1,
-  )
-  check(expired.dead.length === 0, 'a blown deadline blames nobody', JSON.stringify(expired.dead))
 }
 
 // ── every resource the cron calls must be one the function ACCEPTS ───────────
@@ -497,7 +395,7 @@ console.log('\nresource registry — the cron and the function agree')
 
   // The incremental backlogs specifically. A backlog resource drains a slice per run, so anything
   // longer than the cron interval stalls it for the length of the TTL rather than slowing it.
-  const mustBeBacklog = ['NEWS_RESOURCE', 'WIKIDATA_RESOURCE']
+  const mustBeBacklog = ['WIKIDATA_RESOURCE']
   const wrongTtl = mustBeBacklog.filter((c) =>
     !ttlKeys.some(([, key, ttl]) => key === c && ttl === 'BACKLOG_TTL_MINUTES'))
   check(wrongTtl.length === 0,
@@ -549,12 +447,8 @@ console.log('\nresource registry — the cron and the function agree')
     // rules — there are no units to confuse in a `content-range` count. They are still listed so
     // the "has the list rotted" tally keeps meaning "every resource was looked at". The segment
     // and filing-walker resources that stood here left with Phase 6 step 8 (2026-11-20).
+    // The earnings sweep and the news backlog left with Phase 6b step 7 (2026-11-25).
     WIKIDATA_RESOURCE: [],
-    // A SWEEP, NOT A BACKLOG: `remaining` is DAYS still to walk, computed from the cursor
-    // against its floor. `walkedTo` and `stopAt` are the only identifiers involved, and
-    // the units are days rather than securities — which is exactly why this list exists.
-    EARNINGS_HISTORY_RESOURCE: ['walkedTo', 'stopAt', 'getTime'],
-    NEWS_RESOURCE: [],
   }
   const idxLines = index.split('\n')
   const resourceAt = (line: number): string | null => {
@@ -656,9 +550,9 @@ console.log('\nresource registry — the cron and the function agree')
         scopeOffenders.push(`${b.name} reports ${declared} but drives ${views.join('/')}`)
       }
     }
-    // A FLOOR, so a parser that stops finding the blocks cannot pass vacuously. Two since the
-    // segment and filing-walker handlers left (Phase 6 step 8, 2026-11-20): news and wikidata.
-    check(scopeOffenders.length === 0 && scopeChecked >= 2,
+    // A FLOOR, so a parser that stops finding the blocks cannot pass vacuously. One since news
+    // left (Phase 6b step 7, 2026-11-25): wikidata is the last backlog-driven resource.
+    check(scopeOffenders.length === 0 && scopeChecked >= 1,
       `every backlog-driven resource reports its BACKLOG as remaining — ${scopeChecked} checked`,
       scopeOffenders.join('; ') || `${scopeChecked} backlog-driven resources, all reporting their own pending view`)
   }
@@ -698,70 +592,6 @@ console.log('\nresource registry — the cron and the function agree')
     unscheduled.length ? `absent from market.cron_resource: ${unscheduled.join(', ')}` : '')
 }
 
-// ── extractMacroPoints — five providers, five shapes, none of them agree ─────
-//
-// WHY THIS IS CHECKED OFFLINE. Every shape below was measured against the deployed openbb-api, and
-// getting one wrong is SILENT: the extractor returns no points, the resource reports "no data",
-// and the series looks like one the provider has retired. The FRED shape is the trap — its value
-// sits under a key NAMED AFTER THE SERIES, so a fixed `r.value` read returns undefined for every
-// row and a working series reads as a dead one.
-console.log('\nextractMacroPoints — one shape per provider')
-{
-  const oecd = extractMacroPoints(
-    [{ date: '2026-01-01', country: 'united_states', value: 0.0239, expenditure: 'total' }], 'us-cpi')
-  check(oecd.length === 1 && oecd[0].value === 0.0239, 'oecd cpi -> value', JSON.stringify(oecd))
-  check(oecd[0]?.dimension === '', 'oecd cpi has no dimension', JSON.stringify(oecd[0]))
-
-  const curve = extractMacroPoints([
-    { date: '2026-08-17', maturity: 'month_1', rate: 0.0379, maturity_years: 0.083 },
-    { date: '2026-08-17', maturity: 'year_10', rate: 0.0422, maturity_years: 10 },
-  ], 'us-yield-curve')
-  check(curve.length === 2, 'yield curve keeps BOTH maturities', JSON.stringify(curve))
-  check(curve.map((p) => p.dimension).join(',') === 'month_1,year_10', 'maturity becomes the dimension', JSON.stringify(curve))
-  check(new Set(curve.map((p) => p.as_of)).size === 1, 'a curve shares one date')
-
-  const effr = extractMacroPoints([{ date: '2026-08-15', rate: 0.0433 }], 'us-effr')
-  check(effr.length === 1 && effr[0].value === 0.0433, 'effr -> rate', JSON.stringify(effr))
-
-  const ohlc = extractMacroPoints(
-    [{ date: '2026-08-15', open: 3400, high: 3450, low: 3380, close: 3421, volume: 12 }], 'gold')
-  check(ohlc.length === 1 && ohlc[0].value === 3421, 'yfinance -> CLOSE, not open', JSON.stringify(ohlc))
-
-  // THE FRED TRAP: the value key is the series id.
-  const fred = extractMacroPoints([{ date: '2026-06-01', LRHUTTTTDEM156S: 3.9 }], 'de-unemployment-fred')
-  check(fred.length === 1 && fred[0].value === 3.9, 'fred -> the value under its SERIES-NAMED key', JSON.stringify(fred))
-
-  // …and it must not hijack a shape that HAS a real value field.
-  // THE STRAY NUMBER COMES FIRST, deliberately: the fallback walks Object.entries in insertion
-  // order, so putting `value` first makes the assertion pass whether or not the precedence exists.
-  const both = extractMacroPoints([{ date: '2026-01-01', some_other_number: 99, value: 1.5 }], 'x')
-  check(both[0]?.value === 1.5, 'a real `value` field wins over a stray number', JSON.stringify(both))
-}
-
-console.log('\nextractMacroPoints — the duplicate key that would fail the WHOLE upsert')
-{
-  // OECD returns several `expenditure` breakdowns per date. Carrying a key twice makes Postgres
-  // fail the statement with 21000 and take the resource with it — the documented dedupeBy trap.
-  const dupes = extractMacroPoints([
-    { date: '2026-01-01', value: 1, expenditure: 'total' },
-    { date: '2026-01-01', value: 2, expenditure: 'food' },
-  ], 'us-cpi')
-  check(dupes.length === 1, 'one point per (date, dimension)', JSON.stringify(dupes))
-
-  const curveDupes = extractMacroPoints([
-    { date: '2026-08-17', maturity: 'year_10', rate: 0.04 },
-    { date: '2026-08-17', maturity: 'year_10', rate: 0.05 },
-  ], 'c')
-  check(curveDupes.length === 1, 'a repeated maturity is deduped too', JSON.stringify(curveDupes))
-}
-
-console.log('\nextractMacroPoints — junk is dropped, not coerced')
-{
-  check(extractMacroPoints([{ value: 5 }], 'x').length === 0, 'a row with no date is dropped')
-  check(extractMacroPoints([{ date: '2026-01-01', note: 'n/a' }], 'x').length === 0, 'a row with no numeric value is dropped')
-  check(extractMacroPoints([{ date: '2026-01-01', value: 'abc' }], 'x').length === 0, 'a non-finite value is dropped')
-  check(extractMacroPoints([], 'x').length === 0, 'an empty response yields no points')
-}
 
 
 

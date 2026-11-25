@@ -23,19 +23,8 @@
 
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.58.0'
 import { fetchIndustries, slug } from './wikidata.ts'
-import {
-  BACKLOG_TTL_MINUTES,
-  dedupeBy,
-  fetchWithIsolation,
-  extractMacroPoints,
-  openbbFetcher,
-  NEWS_RETENTION_DAYS,
-  DAILY_TTL_MINUTES,
-  symbolList,
-  throttled,
-} from './resources.ts'
+import { BACKLOG_TTL_MINUTES, dedupeBy } from './resources.ts'
 
-const OPENBB_URL = Deno.env.get('OPENBB_API_URL') ?? 'http://openbb-api:6900'
 // Dagster's GraphQL, on the stack's overlay network. Not through http-cache, because it is not a
 // provider: the refresh button launches a run there (`launchCompanyRun`).
 const DAGSTER_GRAPHQL_URL = Deno.env.get('DAGSTER_GRAPHQL_URL') ?? 'http://dagster-webserver:3000/graphql'
@@ -295,7 +284,6 @@ async function handle(req: Request): Promise<Response> {
 
   const FACETS_RESOURCE = 'facets-refresh'
   const OBSERVABILITY_RESOURCE = 'observability-sample'
-  const MACRO_RESOURCE = 'macro-indicators'
   const ONE_SECURITY_RESOURCE = 'security-refresh'
   /**
  * How many securities the backlog still holds — the TRUE total, via `content-range`.
@@ -313,7 +301,6 @@ async function backlogSize(market: MarketClient, view: string): Promise<number |
   return error ? null : (count ?? null)
 }
 
-const NEWS_RESOURCE = 'security-news'
 const WIKIDATA_RESOURCE = 'security-wikidata-industries'
 /**
  * ISINs per SPARQL request. The endpoint is public, free and SHARED — a politeness limit rather
@@ -362,8 +349,6 @@ const SEGMENT_METRICS = [
   // segment because that is where impairment is tested. 722 and 3,347 filers respectively.
   'long_lived_assets', 'goodwill',
 ]
-const EARNINGS_HISTORY_RESOURCE = 'earnings-history'
-const EARNINGS_RESOURCE = 'earnings-calendar'
   // EVERY RESOURCE DECLARES ITS TTL HERE, AND THERE IS NO DEFAULT.
   //
   // This was a ternary chain ending in `: PROFILE_TTL_MINUTES`, with the set of known resources
@@ -395,13 +380,7 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
     // Incremental backlogs: each run drains a SLICE, so the TTL only has to permit the NEXT run.
     // A completion-shaped TTL here does not slow the resource down, it stalls the backlog for the
     // length of the TTL.
-    [NEWS_RESOURCE]: BACKLOG_TTL_MINUTES,
     [WIKIDATA_RESOURCE]: BACKLOG_TTL_MINUTES,
-    [EARNINGS_HISTORY_RESOURCE]: BACKLOG_TTL_MINUTES,
-    // NOT the backlog TTL: this resource has no slice to permit. It re-reads the whole
-    // forward window every time, so the TTL is the real cadence of the underlying data —
-    // dates get rescheduled and consensus is revised, but not many times a day.
-    [EARNINGS_RESOURCE]: DAILY_TTL_MINUTES,
     // THE FILTER SPINE IS A SNAPSHOT (migration 80) and its TTL is the staleness the app inherits.
     // Every column in it is reference data written by the backlogs, which the cron drives ~8x a
     // day, so an hour bounds how long a newly ingested security can be missing from a filtered
@@ -414,10 +393,6 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
     // flight`, 14:14 refreshed, 15:14 skipped, so the spine refreshed every two hours while every
     // run recorded ok.
     [FACETS_RESOURCE]: 50,
-    // Macro series move on a MONTHLY-to-DAILY cadence depending on the series (CPI monthly, EFFR
-    // daily), and the resource re-reads all of them in one pass. Six hours is well inside the
-    // slowest series' publication rhythm and far outside any provider's patience.
-    [MACRO_RESOURCE]: 6 * 60,
     // TEN MINUTES, which is shorter than anything else here and is the point. This resource takes
     // a MEASUREMENT; a TTL on a measurement means "the last reading is still true", which is
     // exactly the assumption that makes a gauge useless. It is called twice per sweep — once
@@ -493,79 +468,7 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
     return json(body, status)
   }
 
-  const fetcher = openbbFetcher(OPENBB_URL)
   try {
-    // Macro series, driven ENTIRELY by `market.macro_indicator`. There is no hardcoded list here:
-    // adding a series is a row, which is the whole reason that table is a control table. The route,
-    // provider and extra params all come from the row.
-    if (resource === MACRO_RESOURCE) {
-      const { data: series, error: sErr } = await market
-        .from('macro_indicator')
-        .select('code,route,provider,params,provider_country,unit')
-        .eq('enabled', true)
-        .order('sort_order')
-      if (sErr) throw new Error(`macro_indicator read failed: ${sErr.message}`)
-      const rows = series ?? []
-      if (rows.length === 0) throw new Error('no enabled macro series — the catalogue is empty')
-
-      const out: Record<string, string> = {}
-      let wrote = 0
-      let answered = 0
-      let lastError = ''
-      for (const s of rows) {
-        try {
-          const qs = new URLSearchParams({ provider: s.provider })
-          if (s.provider_country) qs.set('country', s.provider_country)
-          for (const [k, v] of Object.entries((s.params ?? {}) as Record<string, string>)) {
-            qs.set(k, String(v))
-          }
-          // A bounded window: these are latest-value panels, not chart history, and an unbounded
-          // request on a daily series is the difference between 30 rows and 20,000.
-          const since = new Date(Date.now() - 400 * 86_400_000).toISOString().slice(0, 10)
-          qs.set('start_date', since)
-          const res = await fetcher(`${s.route}?${qs.toString()}`)
-          const points = extractMacroPoints(res as Record<string, unknown>[], s.code)
-          if (points.length === 0) {
-            // AN EMPTY ANSWER IS NOT A FAILURE, and it is not success either. FRED retires series
-            // (JPNCPIALLMINMEI returns 0 rows), and a retired id must not sit as a silently blank
-            // panel forever — it is reported per series so the catalogue can be corrected.
-            out[s.code] = 'no data'
-            continue
-          }
-          answered += 1
-          const { error } = await market.from('macro_observation').upsert(
-            dedupeBy(
-              points.map((pt) => ({
-                indicator_code: s.code,
-                as_of: pt.as_of,
-                dimension: pt.dimension,
-                value: pt.value,
-                fetched_at: new Date().toISOString(),
-              })),
-              (r) => `${r.indicator_code}|${r.as_of}|${r.dimension}`,
-            ),
-            { onConflict: 'indicator_code,as_of,dimension' },
-          )
-          if (error) throw new Error(`macro_observation upsert failed: ${error.message}`)
-          wrote += points.length
-          out[s.code] = `${points.length} points`
-        } catch (e) {
-          // Per SERIES, so one dead route cannot take the other eleven with it — the same rule as
-          // batching provider calls everywhere else in this file.
-          lastError = e instanceof Error ? e.message : String(e)
-          out[s.code] = `failed: ${lastError.slice(0, 120)}`
-        }
-      }
-      // A run where NOTHING answered is a provider or network event, not twelve dead series.
-      // Reported as a failure so it cannot look like a quiet success.
-      if (answered === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: false })
-        return json({ resource, ok: false, series: rows.length, wrote, detail: out, lastError }, 200)
-      }
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({ resource, series: rows.length, answered, wrote, detail: out })
-    }
-
     if (resource === OBSERVABILITY_RESOURCE) {
       // THE LOOP IS HERE, NOT IN SQL, AND THAT IS THE WHOLE POINT OF MIGRATION 128.
       //
@@ -676,114 +579,6 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
         resource,
         rows_refreshed: rows,
         refreshed_at: row?.refreshed_at ?? null,
-      })
-    }
-
-    if (resource === NEWS_RESOURCE) {
-      const deadline = Date.now() + 60_000
-      const { data: pending, error: pErr } = await market
-        .from('pending_news')
-        .select('security_id,symbol,fetch_symbol')
-        .limit(scopeLimit ?? 400)
-      if (pErr) throw new Error(`pending_news read failed: ${pErr.message}`)
-
-      const wanted = (pending ?? []).map((r) => ({
-        securityId: r.security_id as string,
-        fetchSymbol: String(r.fetch_symbol ?? r.symbol),
-      }))
-      if (wanted.length === 0) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, articles: 0, links: 0, remaining: 0, note: 'every equity is current' })
-      }
-
-      let articles = 0
-      let links = 0
-      let batches = 0
-      let batchesFailed = 0
-      let pruned = 0
-      let throttledOut = false
-      let lastError: string | null = null
-
-      const BATCH = 20
-      for (let i = 0; i < wanted.length && Date.now() < deadline - 10_000; i += BATCH) {
-        const group = wanted.slice(i, i + BATCH)
-        const bySymbol = new Map(group.map((g) => [g.fetchSymbol.toUpperCase(), g.securityId]))
-        batches++
-        try {
-          const rows = await fetcher(
-            `/api/v1/news/company?symbol=${symbolList(group.map((g) => g.fetchSymbol))}` +
-              `&provider=yfinance&limit=10`,
-            Math.min(30_000, deadline - Date.now()),
-          )
-
-          // ONE ROW PER ARTICLE, not per (article, security). 11% of articles come back for more
-          // than one security and a market-wide story for hundreds; `text` is dropped because it
-          // was byte-identical to `summary` in all 200 rows measured.
-          const articleRows = new Map<string, Record<string, unknown>>()
-          const linkRows: { url: string; security_id: string; source_code: string }[] = []
-          for (const r of rows) {
-            const url = String(r.url ?? '')
-            const published = String(r.date ?? '')
-            const title = String(r.title ?? '')
-            if (!url || !published || !title) continue
-            const id = bySymbol.get(String(r.symbol ?? '').toUpperCase())
-            if (!id) continue
-            articleRows.set(url, {
-              url,
-              published_at: published,
-              title,
-              source: typeof r.source === 'string' ? r.source : null,
-              summary: typeof r.summary === 'string' ? r.summary : null,
-            })
-            linkRows.push({ url, security_id: id, source_code: 'yfinance' })
-          }
-
-          if (articleRows.size > 0) {
-            const list = [...articleRows.values()]
-            for (let j = 0; j < list.length; j += 500) {
-              const { error } = await market.from('news_article')
-                .upsert(list.slice(j, j + 500), { onConflict: 'url' })
-              if (error) throw new Error(`news_article upsert failed: ${error.message}`)
-            }
-            articles += list.length
-
-            // THE ARTICLE FIRST, THE LINK SECOND. `news_security.url` is a foreign key, so a link
-            // written before its article fails the statement and takes the batch with it.
-            const deduped = dedupeBy(linkRows, (r) => `${r.url}|${r.security_id}`)
-            for (let j = 0; j < deduped.length; j += 500) {
-              const { error } = await market.from('news_security')
-                .upsert(deduped.slice(j, j + 500), { onConflict: 'url,security_id', ignoreDuplicates: true })
-              if (error) throw new Error(`news_security upsert failed: ${error.message}`)
-            }
-            links += deduped.length
-          }
-
-          // STAMPED WHETHER OR NOT ANYTHING CAME BACK. The backlog is keyed on when we asked, so a
-          // security the provider has no news for would otherwise be re-asked every run for ever.
-          for (const g of group) {
-            const { error } = await market.from('security')
-              .update({ news_fetched_at: new Date().toISOString() })
-              .eq('security_id', g.securityId)
-            if (error) throw new Error(`news_fetched_at update failed: ${error.message}`)
-          }
-        } catch (e) {
-          batchesFailed++
-          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          lastError = msg
-          if (throttled(msg)) { throttledOut = true; break }
-        }
-      }
-
-      // PRUNED EVERY RUN, not on a separate schedule. A retention window enforced by a resource
-      // nobody remembers to call is a retention window that does not exist.
-      const { data: prunedCount, error: prErr } = await market.rpc('prune_news', { p_days: NEWS_RETENTION_DAYS })
-      if (prErr) throw new Error(`prune_news failed: ${prErr.message}`)
-      pruned = typeof prunedCount === 'number' ? prunedCount : 0
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource, articles, links, batches, batchesFailed, pruned, throttledOut, lastError,
-        remaining: await backlogSize(market, 'pending_news'),
       })
     }
 
@@ -915,292 +710,6 @@ const EARNINGS_RESOURCE = 'earnings-calendar'
       return json({
         resource, written, matched, unmatched, batches, batchesFailed, firstError, lastError,
         remaining: await backlogSize(market, 'pending_wikidata'),
-      })
-    }
-
-    if (resource === EARNINGS_HISTORY_RESOURCE) {
-      // ACTUAL-VERSUS-ESTIMATE, FROM THE ENDPOINT WE ALREADY CALL.
-      //
-      // `security-eps-history` bought this from alpha_vantage at 25 calls a DAY, one symbol per
-      // call, and reached 79 securities in weeks. The forward earnings calendar had the same data
-      // all along and nobody had asked it for a PAST range: measured 2026-08-28, one 3-day window
-      // returns 643 companies WITH `eps_actual`, `eps_consensus` and `surprise_percent`, and 2018
-      // answers as readily as 2024. That resource is retired (migration 138).
-      //
-      // A SWEEP, NOT A BACKLOG. There is no entity to ask about — the resource walks a calendar
-      // backwards — so what it remembers is a POSITION, not a negative cache.
-      const deadline = Date.now() + 60_000
-      const CHUNK_DAYS = 3
-
-      const { data: cur, error: cErr } = await market
-        .from('earnings_history_cursor')
-        .select('walked_to,stop_at')
-        .limit(1)
-        .maybeSingle()
-      if (cErr) throw new Error(`earnings_history_cursor read failed: ${cErr.message}`)
-      let walkedTo = new Date(String(cur?.walked_to ?? new Date().toISOString().slice(0, 10)))
-      const stopAt = new Date(String(cur?.stop_at ?? '2015-01-01'))
-
-      if (walkedTo <= stopAt) {
-        await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-        return json({ resource, written: 0, remaining: 0, note: 'the sweep has reached its floor' })
-      }
-
-      // The same resolver the forward calendar uses, and for the same reason: loading
-      // `symbol_security` whole silently returns a twelfth of it under PGRST_DB_MAX_ROWS, which
-      // once matched 22 of 753 rows while reading like a fact about coverage.
-      const idBySymbol = new Map<string, string>()
-      const resolve = async (symbols: string[]) => {
-        const unknown = [...new Set(symbols)].filter((sym) => !idBySymbol.has(sym))
-        for (let i = 0; i < unknown.length; i += 100) {
-          const chunk = unknown.slice(i, i + 100)
-          const { data, error } = await market
-            .from('symbol_security')
-            .select('symbol,security_id')
-            .in('symbol', chunk)
-          if (error) throw new Error(`symbol_security read failed: ${error.message}`)
-          for (const r of data ?? []) idBySymbol.set(String(r.symbol).toUpperCase(), r.security_id as string)
-          for (const sym of chunk) if (!idBySymbol.has(sym)) idBySymbol.set(sym, '')
-        }
-      }
-
-      const iso = (d: Date) => d.toISOString().slice(0, 10)
-      let fetched = 0, written = 0, matched = 0, windows = 0, failed = 0
-      let lastError: string | null = null
-
-      while (walkedTo > stopAt && Date.now() < deadline - TAIL_RESERVE_MS) {
-        const end = new Date(walkedTo)
-        const start = new Date(end.getTime() - (CHUNK_DAYS - 1) * 86_400_000)
-        windows++
-        let rows: Record<string, unknown>[] = []
-        try {
-          // THREE DAYS, NOT FIVE. A five-day window times out on this endpoint — the chunk size is
-          // part of the contract rather than a tuning knob.
-          rows = await fetcher(
-            `/api/v1/equity/calendar/earnings?provider=nasdaq` +
-              `&start_date=${iso(start)}&end_date=${iso(end)}`,
-            Math.min(30_000, deadline - Date.now()),
-          )
-        } catch (e) {
-          failed++
-          const msg = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          lastError = msg
-          if (throttled(msg)) break
-          // THE CURSOR IS NOT ADVANCED ON A FAILURE. A window we could not read must be re-read,
-          // or a thirty-second provider blip costs three days of history permanently — the same
-          // rule `security-insider`'s cursor follows.
-          break
-        }
-        fetched += rows.length
-
-        // Only rows that actually REPORTED carry a surprise; the rest are scheduled dates the
-        // forward calendar already owns.
-        const reported = rows.filter((r) => r.eps_actual !== null && r.eps_actual !== undefined)
-        await resolve(reported.map((r) => String(r.symbol ?? '').toUpperCase()))
-
-        const out: Record<string, unknown>[] = []
-        for (const r of reported) {
-          const sid = idBySymbol.get(String(r.symbol ?? '').toUpperCase())
-          if (!sid) continue
-          const actual = Number(r.eps_actual)
-          const est = r.eps_consensus === null || r.eps_consensus === undefined ? null : Number(r.eps_consensus)
-          // PERIOD END: the calendar reports a MONTH ('2026-06') while this table's key is a DATE.
-          // A 52/53-week filer closes its quarter on the Saturday nearest the month end and lands
-          // in the following month about half the time, so no exact date is recoverable here — the
-          // month's last day is used CONSISTENTLY, which is what a primary key needs. The precise
-          // fiscal end lives in `security_metric.as_of`, from the filing.
-          const pe = String(r.period_ending ?? '')
-          const periodEnding = /^\d{4}-\d{2}$/.test(pe)
-            ? iso(new Date(Date.UTC(Number(pe.slice(0, 4)), Number(pe.slice(5, 7)), 0)))
-            : (/^\d{4}-\d{2}-\d{2}$/.test(pe) ? pe : null)
-          if (!periodEnding) continue
-          // A FRACTION FROM THE WRAPPER, A PERCENT IN THE COLUMN. Measured: XOM -0.0435 against a
-          // computed -4.35%. Storing it raw in a column named `_pct` is the fraction/percent
-          // confusion this schema has already had three times.
-          const spRaw = r.surprise_percent
-          out.push({
-            security_id: sid,
-            period_ending: periodEnding,
-            eps_actual: actual,
-            eps_estimated: est,
-            surprise: est === null ? null : actual - est,
-            surprise_pct: spRaw === null || spRaw === undefined ? null : Number(spRaw) * 100,
-            reported_date: r.report_date ?? null,
-            source_code: 'nasdaq',
-            as_of: new Date().toISOString(),
-          })
-        }
-        matched += out.length
-
-        for (let i = 0; i < out.length; i += 500) {
-          const { error } = await market
-            .from('security_eps_history')
-            .upsert(
-              dedupeBy(out.slice(i, i + 500), (r) => `${r.security_id}|${r.period_ending}`),
-              { onConflict: 'security_id,period_ending' },
-            )
-          if (error) throw new Error(`security_eps_history upsert failed: ${error.message}`)
-        }
-        written += out.length
-
-        // Advanced ONLY after the window's rows are written, for the same reason the deep-daily
-        // marker is: a cursor that moves before the data lands loses the window silently.
-        walkedTo = new Date(start.getTime() - 86_400_000)
-        const { error: uErr } = await market
-          .from('earnings_history_cursor')
-          .update({ walked_to: iso(walkedTo), updated_at: new Date().toISOString() })
-          .eq('only_row', true)
-        if (uErr) throw new Error(`earnings_history_cursor update failed: ${uErr.message}`)
-      }
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: true })
-      return json({
-        resource,
-        written,
-        matched,
-        fetched,
-        windows,
-        failed,
-        lastError,
-        walkedTo: iso(walkedTo),
-        remaining: Math.max(0, Math.round((walkedTo.getTime() - stopAt.getTime()) / 86_400_000)),
-      })
-    }
-
-    // WHEN THIS COMPANY NEXT REPORTS.
-    //
-    // `equity/calendar/earnings` takes a DATE RANGE, not a symbol — one call returned 116 companies
-    // for a three-day window (measured). That makes it the cheapest thing here per fact delivered.
-    // A FIVE-DAY window timed out, so the chunk size is part of the contract, not a tuning knob.
-    //
-    // A ROLLING REFRESH, NOT A BACKLOG. Every other resource drains a queue; the earnings horizon
-    // MOVES, dates are rescheduled and estimates revised up to the day. So each run re-reads the
-    // whole forward window and the newest answer wins — a backlog here would freeze a date that
-    // later changed.
-    if (resource === EARNINGS_RESOURCE) {
-      const deadline = Date.now() + 60_000
-      const CHUNK_DAYS = 3
-      const HORIZON_DAYS = 21
-      const day = (offset: number) =>
-        new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
-
-      // RESOLVED BY ASKING FOR THE SYMBOLS WE ACTUALLY GOT, NEVER BY LOADING THE MAP.
-      //
-      // The first version selected all of `symbol_security` in one go. It holds 12,090 rows and
-      // `PGRST_DB_MAX_ROWS` is 1,000, so the map silently contained a twelfth of the universe:
-      // measured, a run wrote 753 calendar rows and matched **22** of them, with NVDA and CRM
-      // landing at `security_id: null` while both are tracked. No error, and the count reads like
-      // a fact about coverage rather than about paging. Third time this cap has bitten in this
-      // codebase — the FX history probe did the same thing yesterday.
-      //
-      // An `in.()` filter is a URL, so its chunk size is a LENGTH budget rather than a row budget:
-      // 500 ISINs is a ~6.5 KB URL and the proxy answers a bare 502. 100 is the documented safe size.
-      const idBySymbol = new Map<string, string>()
-      const resolve = async (symbols: string[]) => {
-        const unknown = [...new Set(symbols)].filter((sym) => !idBySymbol.has(sym))
-        for (let i = 0; i < unknown.length; i += 100) {
-          const chunk = unknown.slice(i, i + 100)
-          const { data, error } = await market
-            .from('symbol_security')
-            .select('symbol,security_id')
-            .in('symbol', chunk)
-          if (error) throw new Error(`symbol_security read failed: ${error.message}`)
-          for (const r of data ?? []) {
-            idBySymbol.set(String(r.symbol).toUpperCase(), r.security_id as string)
-          }
-          // Remember the misses too, so a symbol nasdaq reports and this universe does not track is
-          // asked about once per run rather than once per window.
-          for (const sym of chunk) if (!idBySymbol.has(sym)) idBySymbol.set(sym, '')
-        }
-      }
-
-      let fetched = 0
-      let written = 0
-      let matched = 0
-      let windows = 0
-      let failed = 0
-      let lastError: string | null = null
-
-      for (let offset = -7; offset < HORIZON_DAYS && Date.now() < deadline - TAIL_RESERVE_MS; offset += CHUNK_DAYS) {
-        let rows: Record<string, unknown>[] = []
-        try {
-          rows = await fetcher(
-            `/api/v1/equity/calendar/earnings?provider=nasdaq` +
-              `&start_date=${day(offset)}&end_date=${day(offset + CHUNK_DAYS - 1)}`,
-            Math.min(25_000, deadline - Date.now()),
-          )
-        } catch (e) {
-          failed++
-          lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
-          continue
-        }
-        windows++
-        fetched += rows.length
-
-        await resolve(
-          rows.map((r) => String(r.symbol ?? '').toUpperCase()).filter((sym) => sym.length > 0),
-        )
-
-        const out: Record<string, unknown>[] = []
-        for (const r of rows) {
-          const symbol = String(r.symbol ?? '').toUpperCase()
-          const reportDate = String(r.report_date ?? '').slice(0, 10)
-          if (!symbol || !reportDate) continue
-          // '' is a remembered MISS, not an id.
-          const securityId = idBySymbol.get(symbol) || null
-          if (securityId) matched++
-          const consensus = Number(r.eps_consensus)
-          const previous = Number(r.eps_previous)
-          const estimates = Number(r.num_estimates)
-          out.push({
-            symbol,
-            report_date: reportDate,
-            // NULL rather than dropped when we do not track the company: nasdaq covers far more US
-            // listings than this universe holds, and discarding them would mean re-fetching the
-            // same unresolvable rows for ever to learn the same nothing.
-            security_id: securityId,
-            name: r.name ? String(r.name) : null,
-            eps_consensus: Number.isFinite(consensus) ? consensus : null,
-            eps_previous: Number.isFinite(previous) ? previous : null,
-            num_estimates: Number.isFinite(estimates) ? Math.round(estimates) : null,
-            period_ending: r.period_ending ? String(r.period_ending) : null,
-            reporting_time: r.reporting_time ? String(r.reporting_time) : null,
-            source_code: 'nasdaq',
-            as_of: new Date().toISOString(),
-          })
-        }
-
-        if (out.length > 0) {
-          const { error } = await market
-            .from('earnings_calendar')
-            .upsert(dedupeBy(out, (r) => `${r.symbol}|${r.report_date}`),
-              { onConflict: 'symbol,report_date' })
-          if (error) throw new Error(`earnings_calendar upsert failed: ${error.message}`)
-          written += out.length
-        }
-      }
-
-      // A CALENDAR, NOT AN ARCHIVE. Ninety days of history so a page can say "reported on the 26th"
-      // as well as "reports on the 26th"; beyond that the row is answering no question anyone asks
-      // and `security_statement` already holds what was actually reported.
-      const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10)
-      const { error: delErr } = await market
-        .from('earnings_calendar')
-        .delete()
-        .lt('report_date', cutoff)
-      if (delErr) throw new Error(`earnings_calendar prune failed: ${delErr.message}`)
-
-      await market.rpc('finish_refresh', { p_resource: resource, p_ok: failed === 0 })
-      return json({
-        resource,
-        windows,
-        fetched,
-        written,
-        // How many of the calendar's companies this universe actually tracks. A collapse here means
-        // the symbol map broke, not that companies stopped reporting.
-        matched,
-        failed,
-        lastError,
       })
     }
 

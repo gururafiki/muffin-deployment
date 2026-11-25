@@ -816,7 +816,6 @@ jobs:
         run: |
           deno check stack/supabase/functions/market-refresh/index.ts \
                      stack/supabase/functions/market-refresh/logic-check.ts \
-                     stack/supabase/functions/market-refresh/isolation-check.ts \
                      stack/supabase/functions/market-refresh/wikidata-check.ts
       # Pure logic only — no network, no database, so it runs on every PR. A check that needs a
       # live provider only runs when someone remembers; that is the difference between a rule that
@@ -832,11 +831,8 @@ jobs:
           deno run --allow-read stack/supabase/functions/market-refresh/logic-check.ts
           # The segment parsers and their checks (xbrl, segments, dart, in, cn, cn-pdf) left with
           # Phase 6 step 8 (2026-11-20); their rules are pytest in muffin-ingest now.
-          # `fetchWithIsolation` decides whether a security may be recorded as unanswerable. Both
-          # failure directions are silent: too eager writes a rate limit down as thousands of dead
-          # companies (it once cost 1,369), too cautious stalls a backlog for ever on a batch it
-          # refuses to judge. Driven offline against a stub fetcher.
-          deno run --allow-read stack/supabase/functions/market-refresh/isolation-check.ts
+          # `isolation-check.ts` left with `fetchWithIsolation` (Phase 6b step 7, 2026-11-25): the
+          # last batched handler that used it was earnings, and the lanes left are Dagster's.
           # Wikidata is the loosest-shaped source here — crowd-sourced, open-vocabulary, and the
           # only multi-valued one. The failures it guards against are shapes: an empty industry
           # list read as one blank entry, a duplicate label hitting SQLSTATE 21000 on the node
