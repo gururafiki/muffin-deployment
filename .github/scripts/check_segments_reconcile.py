@@ -24,6 +24,8 @@ must NOT reconcile wherever a second partition exists. A guard that only checks 
 pass just as happily if every member were dumped into partition 1 together — which is precisely the
 defect, and is what the mutation of this check produces.
 """
+import datetime
+import hashlib
 import json
 import os
 import sys
@@ -73,12 +75,19 @@ TOLERANCE_FRACTION = 0.005
 # result cannot change; older filings disagree more (22% before 2016 against ~11% from 2024, in
 # rows the edge wrote), and the sample, the most recently written securities, followed the drain to
 # older filings. On 2026-11-21 the same sample read 0 of 6,367 because it was all Chinese companies
-# from that day's CNINFO drain, which is why it is now drawn per regulator.
+# from that day's CNINFO drain, which is why it is now drawn per regulator, and since 2026-11-25
+# from each regulator's filers on a daily rotation rather than by recency.
 SERVED_OVER_TRIPWIRE = float(os.environ.get("SEGMENT_SERVED_TRIPWIRE", "0.025"))
 HISTORICAL_OVER_TRIPWIRE = {"<2016": 0.04, "2016-2019": 0.03, "2020-2023": 0.025, "2024+": 0.025}
 MIN_BAND_SPLITS = 200
 #: Each regulator is sampled on its own, so the lane draining hardest cannot be the whole sample.
 SAMPLE_SOURCES = ("sec-segments", "cninfo", "dart", "nse")
+#: The regulator each segment source is filed under in `market.security_filer`.
+FILER_SOURCE = {"sec-segments": "sec", "cninfo": "cninfo", "dart": "dart", "nse": "nse"}
+#: Filers drawn per security wanted. Measured 2026-11-25, the share of each regulator's filers with
+#: a served split: SEC 3,141 of 3,787, CNINFO 2,096 of 2,173, DART 489 of 1,086, NSE 329 of 642.
+#: Three filers per security wanted leaves DART and NSE, the sparsest, a full sample.
+DRAW_FACTOR = 3
 
 
 def band_of(period_ending: str) -> str:
@@ -142,66 +151,59 @@ def get_all(path: str, cap: int = 60_000):
     sys.exit(1)
 
 
-def recent_securities(limit: int, source: str) -> list[str]:
-    """One regulator's most recently written securities, newest first.
+def day_key(day: str, source: str) -> str:
+    """Where today's draw starts in a regulator's filers: a uuid from the day and the regulator, so
+    the sample rotates through the population and reruns on one day draw the same securities."""
+    h = hashlib.md5(f"{day}:{source}".encode()).hexdigest()
+    return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def sampled_securities(limit: int, source: str, day: str) -> list[str]:
+    """Up to `limit` of one regulator's securities that hold a served split, drawn from its filers in
+    id order from a point that moves each day, wrapping at the end.
 
     THE SCOPE HAS TO BE SECURITIES, NOT ROWS OR A TIME WINDOW, AND BOTH ALTERNATIVES WERE MEASURED.
-
     This guard used to read the whole of `security_segment_latest` and died the moment it outgrew
-    its own 60,000-row cap: 105,166 flat rows on 2026-09-04, against 271 securities and ~33,000
-    filings still queued. It had already been failing for at least a day, silently — a check that
-    exits 1 on its own sample size asserts nothing about the data, and this is the guard covering
-    the one thing the segment pipeline must never get wrong.
+    its own 60,000-row cap: 105,166 flat rows on 2026-09-04, against 271 securities. A TIME WINDOW
+    does not bound it either: `segment_parser.version` re-queues every filing when it is bumped, so
+    the last 7 days contained all 105,166 rows. And TRUNCATING BY ROW IS WORSE THAN NOT RUNNING: a
+    half-fetched split can never reconcile, which is how `limit=4000` once put ASML's FY2021 split
+    at a ratio of 0.39. So securities are chosen first, and each one is then fetched whole.
 
-    A TIME WINDOW DOES NOT BOUND IT. `segment_parser.version` re-queues every filing when it is
-    bumped, so everything is "recently written" after a re-parse — measured, the last 7 days
-    contained all 105,166 rows and the last 3 still contained 74,941.
+    THE DRAW READS TWO SMALL RELATIONS, NEVER `security_segment`. Until 2026-11-25 it walked
+    `security_segment` newest-written first (`order=as_of.desc` with offset). No index serves that
+    order, so every page was a parallel sequential scan of all 2.2 M rows (540 MB): 257-325 ms
+    warm, measured, up to 20 pages per regulator. Cold and under load, one page passed the 8-second
+    ceiling of the role PostgREST connects as, and market-verify failed on 2026-11-24 with `57014`
+    before a single split was checked. `security_filer` holds 7,688 rows and
+    `security_segment_spine` 47,763, keyed by security, so the draw costs two small reads.
 
-    TRUNCATING BY ROW IS WORSE THAN NOT RUNNING. A split that is half-fetched can never reconcile,
-    so a row cap manufactures exactly the failure the check reports — which is how `limit=4000`
-    once put ASML's FY2021 split at a ratio of 0.39. Scoping by SECURITY and then fetching each
-    one whole keeps every split complete, which is the property the assertion depends on.
+    NEWEST-WRITTEN WAS ALSO THE WRONG SAMPLE. It measured whichever lane wrote last (2026-11-21: one
+    morning's CNINFO drain made every sampled company Chinese), which is why it was already drawn
+    per regulator. A rotating draw covers each regulator's whole population over the days, and
+    reruns on one day check the same securities.
 
-    THE SAMPLE READS THE TABLE, NOT THE VIEW. `security_segment_latest` dense-ranks the whole table
-    before it can sort, so on 2026-10-04, at 1.44M rows, ONE page of this walk cost 6.4 s and the
-    walk is several pages, each paying it again, under the 8-second ceiling of the role PostgREST
-    connects as. Every run from at least 2026-10-01 died here with HTTP 500 before a single split
-    was checked. `security_segment` answers the same question — which securities were written most
-    recently — in 0.22-0.30 s a page, and its first page already held 60 securities. The rows
-    themselves still come from the view in `main`, so this changes WHICH securities are checked,
-    never what they are checked against.
-    """
-    seen: list[str] = []
-    known: set[str] = set()
-    offset = 0
-    # A page covers ~12 securities (388 flat rows per security, measured), so this walks a few
-    # thousand rows to gather the sample. Bounded twice: by the sample size and by the walk.
-    while len(seen) < limit and offset < 20_000:
-        page = get(
-            f"security_segment?select=security_id,as_of&source_code=eq.{source}"
-            # Tie-broken for the same reason as the row fetch below. Here a duplicate is harmless
-            # (the ids go into a set) but a SKIPPED row silently biases which securities are
-            # sampled, which is worse — it is invisible.
-            "&parent_member=is.null&order=as_of.desc,security_id",
-            offset,
-        )
-        if not page:
-            break
-        for r in page:
-            sid = r["security_id"]
-            if sid not in known:
-                known.add(sid)
-                seen.append(sid)
-        if len(page) < 1000:
-            break
-        offset += 1000
-    return seen[:limit]
+    `security_segment_spine` is refreshed hourly, so a security whose first split was written in the
+    last hour is not drawn until the next refresh."""
+    regulator = FILER_SOURCE[source]
+    start = day_key(day, source)
+    want = limit * DRAW_FACTOR
+    base = f"security_filer?select=security_id&source_code=eq.{regulator}&order=security_id"
+    drawn = [r["security_id"] for r in get(f"{base}&security_id=gte.{start}", 0, want)]
+    if len(drawn) < want:
+        drawn += [r["security_id"] for r in get(f"{base}&security_id=lt.{start}", 0, want - len(drawn))]
+    with_split: set[str] = set()
+    for i in range(0, len(drawn), 100):
+        chunk = ",".join(drawn[i : i + 100])
+        for r in get_all(f"security_segment_spine?select=security_id&security_id=in.({chunk})"):
+            with_split.add(r["security_id"])
+    return [sid for sid in drawn if sid in with_split][:limit]
 
 
 def main() -> int:
-    # A ROLLING SAMPLE OF WHOLE SECURITIES, newest-written first — where a regression appears first.
-    # See `recent_securities` for why this is not the whole table, not a row cap and not a date
-    # filter. `SEGMENT_SAMPLE_SECURITIES` raises it for a one-off deep run.
+    # A ROLLING SAMPLE OF WHOLE SECURITIES, per regulator, moving each day. See `sampled_securities`
+    # for why it is not the whole table, a row cap, a date filter or the newest-written.
+    # `SEGMENT_SAMPLE_SECURITIES` raises it for a one-off deep run.
     # `security_segment_latest`, NOT the raw table. An annual report carries three years of
     # comparatives, so a period appears in several filings — and filers RENAME member codes
     # between them (ASML's `EuvMember` became `NXEMember`, and `Metrologyandinspection` differs
@@ -209,10 +211,11 @@ def main() -> int:
     # splits of the same period; this check found exactly that on its first production run,
     # reporting ASML's FY2022 split at 34,114,800,000 against a filed 21,173,400,000.
     per_source = int(os.environ.get("SEGMENT_SAMPLE_SECURITIES", "80"))
+    day = os.environ.get("SEGMENT_SAMPLE_DAY") or datetime.date.today().isoformat()
     sample = []
     for source in SAMPLE_SOURCES:
-        drawn = recent_securities(per_source, source)
-        print(f"  sampling the {len(drawn)} most recently written {source} securities")
+        drawn = sampled_securities(per_source, source, day)
+        print(f"  sampling {len(drawn)} {source} securities with a served split (draw {day})")
         sample += [sid for sid in drawn if sid not in sample]
     if not sample:
         print("::notice::no segment rows yet — nothing to reconcile")
