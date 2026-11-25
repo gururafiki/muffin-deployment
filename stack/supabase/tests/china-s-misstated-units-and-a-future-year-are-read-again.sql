@@ -1,4 +1,4 @@
--- The repair of 2026-11-23 (migration 20261123120000) re-queues every CNINFO report holding a placed
+-- The repair of 2026-11-23 (migration 20261125120000) re-queues every CNINFO report holding a placed
 -- revenue split under 10 m yuan, and every one dated after its own publication, and nothing else.
 --
 -- WHY THIS EXISTS AS A TEST: a one-shot over an empty database matches nothing. Each fixture row is
@@ -68,7 +68,7 @@ select '00000000-0000-0000-0000-0000000c0f01', acc, axis, member, parent, metric
 
 delete from market.one_shot where key = 'cninfo-units-and-future-year-2026-11-23';
 
-\i stack/supabase/migrations/20261123120000_china_s_misstated_units_and_a_future_year_are_read_again.sql
+\i stack/supabase/migrations/20261125120000_china_s_misstated_units_and_a_future_year_are_read_again.sql
 
 do $$
 declare

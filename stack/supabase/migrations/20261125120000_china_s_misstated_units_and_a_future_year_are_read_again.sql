@@ -14,7 +14,11 @@
 -- current parser version, so the drain would not reach it. A re-read under #199's year rule
 -- retracts its rows per accession.
 --
--- ORDER: muffin-ingest#200 rolls first, or the re-queue re-reads each report into the same rows.
+-- ORDER: muffin-ingest#200 (rolled 2026-11-25 10:47) and #201 roll first, or the re-queue re-reads
+-- each report into the same rows. #201 reads `单位（万元）` without a colon and dates a report by the
+-- last plausible year in its cover's run, which a stock code no longer captures (0020532010 was
+-- 2053). Measured 2026-11-25, after CNINFO pass 7 walked the older search pages: 67 reports hold a
+-- split under 10 m yuan (42 of them FY2007-2011) and 11 are dated after their publication.
 -- Re-queued means parser version 0, with `segments_parsed_at` kept. A report already behind the
 -- parser is left alone and not counted.
 
