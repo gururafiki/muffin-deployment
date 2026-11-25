@@ -135,3 +135,9 @@ export const yahooRss = () => origin('YAHOO_RSS_BASE_URL', 'https://feeds.financ
 
 /** `api.nasdaq.com` — nasdaq's earnings calendar, one date per request; muffin-ingest's lane. */
 export const nasdaq = () => origin('NASDAQ_BASE_URL', 'https://api.nasdaq.com')
+
+/**
+ * `stats.bis.org` — BIS's statistics API: Japan's monthly CPI, which OECD stopped publishing in
+ * 2021-06; muffin-ingest's macro lane. Listed for `http-cache-covers-every-provider`, as nasdaq is.
+ */
+export const bis = () => origin('BIS_BASE_URL', 'https://stats.bis.org')
