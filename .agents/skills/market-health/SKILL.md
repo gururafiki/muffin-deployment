@@ -78,9 +78,8 @@ The seven segment and filing-walker views (`pending_segments`, `pending_{kr,in,c
 `pending_{kr,in}_history`, `pending_cn_filings`) left on 2026-11-20; each regulator's segment lane
 reports its queue as an asset check (`every_sec_filing_was_read`, `every_cninfo_report_was_read`,
 `every_dart_filing_was_read`, `every_nse_filing_was_read`: never read, behind the parser).
-`pending_news` still exists until Phase 6b's contract but nothing drains it: company news is the
-Dagster company lane's since 2026-11-21, and `news_is_current` plus market-verify's 3-day count
-report it.
+`pending_news` left on 2026-11-25 (Phase 6b's contract): company news is the Dagster company lane's
+since 2026-11-21, and `news_is_current` plus market-verify's 3-day count report it.
 
 **Zero is only good news if it got there by working.** A backlog empties either by fetching the data
 or by marking securities unanswerable, and the counts look identical. Cross-check:

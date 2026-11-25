@@ -40,7 +40,6 @@ SCHEMAS = ("market", "api", "ingest")
 VOLATILE: dict[str, set[str]] = {
     "market.cron_cursor": {"advanced_at"},
     "market.dart_discovery_cursor": {"updated_at"},
-    "market.earnings_history_cursor": {"updated_at", "walked_to"},
     "market.one_shot": {"applied_at"},
     "market.segment_concept": {"node_id"},
     "market.segment_member": {"as_of"},
