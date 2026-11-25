@@ -8,7 +8,8 @@
 --     cu-future     a report filed 2012-03-15 whose rows sit at 2079-12-31
 --   untouched:
 --     cu-right      a split of 1.2 bn yuan
---     cu-unplaced   a tiny revenue member that is not placed (partition 0)
+--     cu-unplaced   a tiny revenue member that is not placed (partition 0), though it carries a
+--                   target, so the partition clause is the only one keeping it out
 --     cu-nested     a tiny cell under a parent (it reconciles to its parent, not the company)
 --     cu-cost       a tiny cost split (the rule reads revenue)
 --     cu-quarter    a tiny quarterly split
@@ -57,7 +58,7 @@ select '00000000-0000-0000-0000-0000000c0f01', acc, axis, member, parent, metric
     ('cu-tiny.PDF', 'cninfo:分行业', 'cninfo:军工电子', null, 'revenue', 'annual', 2025, 122294.31, 'cninfo', 1, 122294.31),
     ('cu-future.PDF', 'cninfo:分行业', 'cninfo:电力', null, 'revenue', 'annual', 2079, 9e9, 'cninfo', 1, 9e9),
     ('cu-right.PDF', 'cninfo:分行业', 'cninfo:电力', null, 'revenue', 'annual', 2024, 1.2e9, 'cninfo', 1, 1.2e9),
-    ('cu-unplaced.PDF', 'cninfo:分行业', 'cninfo:其他', null, 'revenue', 'annual', 2023, 5e4, 'cninfo', 0, null),
+    ('cu-unplaced.PDF', 'cninfo:分行业', 'cninfo:其他', null, 'revenue', 'annual', 2023, 5e4, 'cninfo', 0, 5e4),
     ('cu-nested.PDF', 'cninfo:分行业', 'cninfo:煤炭', 'cninfo:能源', 'revenue', 'annual', 2022, 5e4, 'cninfo', 1, 5e4),
     ('cu-cost.PDF', 'cninfo:分行业', 'cninfo:钢铁', null, 'cost_of_revenue', 'annual', 2021, 5e4, 'cninfo', 1, 5e4),
     ('cu-quarter.PDF', 'cninfo:分行业', 'cninfo:医药', null, 'revenue', 'quarter', 2020, 5e4, 'cninfo', 1, 5e4),
