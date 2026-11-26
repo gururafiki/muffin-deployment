@@ -30,6 +30,12 @@ insert into market.security (security_id, name, security_type_code, country_iso2
   ('00000000-0000-0000-0000-000000016303','T163 Shell',  'equity','KY', null)
 on conflict (security_id) do nothing;
 
+-- A FILER ID IS HELD ONCE ITS REGULATOR HAS THE COMPANY'S ANNUAL ACCOUNTS (migration
+-- 20261126190000): the US filer files a 10-K. tests/a-filer-id-alone-is-not-held.sql proves the rule.
+insert into market.security_filing (security_id, accession_number, filing_date, report_type, source_code)
+values ('00000000-0000-0000-0000-000000016301', 'T163-10K', '2026-02-01', '10-K', 'sec-submissions')
+on conflict do nothing;
+
 -- `coverage_current` reads `security_facets`, which is MATERIALIZED — rows inserted in this
 -- transaction are invisible to it until the spine is rebuilt, so assertion 4 below would fail for
 -- a reason unrelated to its subject. Non-concurrently: `refresh ... concurrently` cannot run inside
