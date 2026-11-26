@@ -47,6 +47,14 @@ begin
     null;
   end;
 
+  -- A total is ordinary unless marked: a row added without thinking about it must not become a
+  -- fallback, and a fallback must be said (migration 20261126190100).
+  insert into market.segment_total_concept (regulator, metric_code, concept)
+       values ('sec', 'revenue', 'T-ordinary');
+  if (select fallback from market.segment_total_concept where concept = 'T-ordinary') then
+    raise exception 'a segment total concept is a fallback unless marked otherwise';
+  end if;
+
   if not has_table_privilege('ingest_rw', 'market.segment_total_concept', 'select') then
     raise exception 'ingest_rw cannot read segment_total_concept, which its segment parsers need';
   end if;

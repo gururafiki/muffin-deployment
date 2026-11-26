@@ -19,6 +19,10 @@ WITH enabled_source AS MATERIALIZED (
             f.filer_id
            FROM market.security_filer f
              JOIN enabled_source d ON d.code = f.source_code
+          WHERE (EXISTS ( SELECT 1
+                   FROM market.security_filing sf
+                     JOIN market.filing_form ff ON ff.source_code = f.source_code AND ff.form_code = sf.report_type
+                  WHERE sf.security_id = f.security_id AND ff.is_annual AND ff.carries_segments))
           ORDER BY f.security_id, d.priority DESC, f.source_code
         ), by_country AS MATERIALIZED (
          SELECT DISTINCT ON (c.country_iso2) c.country_iso2,

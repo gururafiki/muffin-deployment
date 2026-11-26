@@ -31,6 +31,11 @@ insert into market.security (security_id, name, security_type_code, country_iso2
   ('00000000-0000-0000-0000-000000016003', 'T160 Foreign Two', 'equity', 'ZC', null)
 on conflict (security_id) do nothing;
 
+-- A CIK IS HELD ONCE SEC HAS THE COMPANY'S ANNUAL ACCOUNTS (migration 20261126190000).
+insert into market.security_filing (security_id, accession_number, filing_date, report_type, source_code)
+values ('00000000-0000-0000-0000-000000016001', 'T160-10K', '2026-02-01', '10-K', 'sec-submissions')
+on conflict do nothing;
+
 -- Only the SEC filer can have a business line, which is the whole point.
 insert into market.security_segment
   (security_id, axis, member_code, metric_code, period_type, period_ending, value,
