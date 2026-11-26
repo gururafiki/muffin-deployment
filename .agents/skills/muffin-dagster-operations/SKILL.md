@@ -304,7 +304,9 @@ Four regulators, each with its own filer grid: `sec_filer` (shared with the SEC 
 - **A re-queue after a reader fix is a one-shot migration, sized from the gate**
   (`dagster-pipeline-local-test`, "Gate a reader change"): re-queue the populations whose reports
   the gate changed, never every report the reader touches. Then drain by backfill as above.
-  Regulators share `market.segment_parser.version`, so never bump it for one regulator's fix.
+  Since 2026-11-26 each regulator has its own `market.segment_parser` row, and a bump re-queues
+  that regulator's WHOLE history. For SEC that is ~148,000 filings, most no longer in raw, and it
+  passes `sec_instances_due`'s 2,000 cap, so SEC fixes stay targeted one-shots.
 
 ## Replay stage 2 on the stored files
 
