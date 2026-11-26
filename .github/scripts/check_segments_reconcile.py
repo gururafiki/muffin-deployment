@@ -230,7 +230,8 @@ def main() -> int:
         chunk = ",".join(sample[i : i + 20])
         rows += get_all(
             "security_segment_latest?select=security_id,axis,member_code,parent_member,metric_code,"
-            "period_type,period_ending,value,partition_id,currency_code,reconciled_to,accession_number"
+            "period_type,period_ending,value,partition_id,currency_code,reconciled_to,accession_number,"
+            "source_code"
             f"&security_id=in.({chunk})"
         # FLAT MEMBERS ONLY. A nested cell reconciles to its PARENT's value, not to the company's
         # consolidated figure, so summing the two levels together is exactly the double count this
@@ -299,12 +300,18 @@ def main() -> int:
     #
     # They are COUNTED, not silently dropped: a stale population that stops shrinking is a stalled
     # re-parse, which is worth seeing — it is just not a parser defect.
-    parser_version = None
-    try:
-        pv = get("segment_parser?select=version")
-        parser_version = int(pv[0]["version"]) if pv else None
-    except Exception:
-        parser_version = None
+    #
+    # ONE VERSION PER REGULATOR since 2026-11-26 (Phase 6c decision 4): a split is stale against ITS
+    # regulator's row, found through the segment source's `FILER_SOURCE`. Before that migration the
+    # table had one row and no `regulator` column; `select=*` answers both shapes (`get` exits on
+    # an HTTP error, so asking for a missing column cannot be caught and retried).
+    parser_versions: dict[str, int] = {}
+    for p in get("segment_parser?select=*"):
+        if p.get("regulator"):
+            parser_versions[p["regulator"]] = int(p["version"])
+        else:
+            parser_versions = {r: int(p["version"]) for r in set(FILER_SOURCE.values())}
+    parser_version = max(parser_versions.values()) if parser_versions else None
     # Asked through the primary key, (security_id, accession_number). No index leads on the
     # accession alone, so filtering by it scanned the whole table: 7.2 s cold for one chunk of 60
     # at 1,240,755 rows (2026-11-23), and 57014 under load, which failed market-verify that day.
@@ -337,12 +344,13 @@ def main() -> int:
         if batch_ids:
             ask_versions()
 
-    def is_stale(acc: str | None) -> bool:
-        """True when this split predates the current parser, so its defects are already fixed."""
-        if parser_version is None or not acc:
+    def is_stale(acc: str | None, source: str | None) -> bool:
+        """True when this split predates its regulator's parser, so its defects are already fixed."""
+        current = parser_versions.get(FILER_SOURCE.get(source or "", ""))
+        if current is None or not acc:
             return False
         v = version_of.get(acc)
-        return v is not None and v < parser_version
+        return v is not None and v < current
 
     stale_group: dict[tuple, bool] = {}
 
@@ -355,7 +363,7 @@ def main() -> int:
         gk = base + (r["axis"],)
         partitions.setdefault(gk, set()).add(r["partition_id"])
         if r["partition_id"] == 1:
-            if is_stale(r.get("accession_number")):
+            if is_stale(r.get("accession_number"), r.get("source_code")):
                 stale_group[gk] = True
             sums[gk] = sums.get(gk, 0.0) + float(r["value"])
             currencies[gk] = r.get("currency_code")
@@ -512,7 +520,8 @@ def main() -> int:
 
     print(
         f"::notice::{len(internal_stale)} split(s) disagree but were produced by an OLDER PARSER "
-        f"(current version {parser_version}) — already fixed, awaiting re-parse, not asserted on"
+        f"(current versions {', '.join(f'{k}={v}' for k, v in sorted(parser_versions.items()))}) "
+        "— already fixed, awaiting re-parse, not asserted on"
     )
     for b in internal_stale[:5]:
         print(f"::notice::  stale: {b}")
