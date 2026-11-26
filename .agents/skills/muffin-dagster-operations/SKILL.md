@@ -294,6 +294,17 @@ Four regulators, each with its own filer grid: `sec_filer` (shared with the SEC 
 - **Start a floor after its drain, with a dry run first** (`schedule-dry-run`, above):
   `nse_filers_floor`'s next ticks were 19 and 16 small runs once all 642 filers were collected.
   Then declare it `RUNNING` in code, or a state reset stops it.
+- **A floor visits its whole grid, and that is cheap.** Stage 1 skips a filing list younger than
+  29 days (muffin-ingest#197) and still plans the reports the stored list names, so a re-queued
+  report is fetched on the next visit. Measured 2026-11-25: DART's ticks read every filer as
+  `list_fresh`, named 0 archives and fetched 0 bytes.
+- **CNINFO's history walk is op config:** `--op-config raw_cninfo_filings.history_pages=3` asks the
+  older search pages, which hold ~8 full reports a filer from 2003-2019. Passes 7 and 8 ran that
+  way; FY2006 and earlier mostly read into no table.
+- **A re-queue after a reader fix is a one-shot migration, sized from the gate**
+  (`dagster-pipeline-local-test`, "Gate a reader change"): re-queue the populations whose reports
+  the gate changed, never every report the reader touches. Then drain by backfill as above.
+  Regulators share `market.segment_parser.version`, so never bump it for one regulator's fix.
 
 ## Replay stage 2 on the stored files
 
