@@ -30,5 +30,9 @@ boot_volume_size_in_gbs = 95
 # month), at 88%: http-cache 32 GB of its 40 GB cap, the database 33 GB, raw 15 GB, with China's
 # segment drain holding its PDFs at the 5 GB cap. Grown IN PLACE; the filesystem follows in
 # ansible/roles/block_storage.
-data_volume_size_in_gbs = 135
+# Grown 135 -> 185 on 2026-11-27 for Phase 6c (decision 3, the user's: EDINET archives and ESEF
+# reports kept whole, China's PDFs no longer pruned; PAID, about $2.10 a month more), at 73%: the
+# database 36 GB, http-cache 35 GB of its 40 GB cap, raw 21 GB. Sized for EDINET's ten years
+# (~30 GB), ESEF (~2 GB) and China's kept reports, leaving ~25% free.
+data_volume_size_in_gbs = 185
 data_volume_vpus_per_gb = 10
