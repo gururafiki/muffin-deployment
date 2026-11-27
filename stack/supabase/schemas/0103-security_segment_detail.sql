@@ -18,7 +18,7 @@ WITH newest AS (
            FROM market.security_segment_latest g
           WHERE g.partition_id = 1 AND g.period_type = 'annual'::text AND g.parent_member IS NOT NULL AND (EXISTS ( SELECT 1
                    FROM market.security_segment_current c_1
-                  WHERE c_1.security_id = g.security_id AND c_1.source_code = g.source_code))
+                  WHERE c_1.security_id = g.security_id AND c_1.source_code = g.source_code AND c_1.period_ending = g.period_ending))
           GROUP BY g.security_id, g.source_code, g.parent_axis, g.parent_member, g.axis
         ), latest AS (
          SELECT DISTINCT ON (g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code) g.security_id,

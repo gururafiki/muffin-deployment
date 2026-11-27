@@ -150,4 +150,4 @@ WITH newest AS (
           ORDER BY (al_1.security_id IS NOT NULL) DESC
          LIMIT 1) al ON true
      LEFT JOIN market.segment_concept c ON c.code = al.concept_code
-  WHERE p.source_rank = 1;
+  WHERE p.source_rank = 1 AND p.period_ending = p.source_newest;
