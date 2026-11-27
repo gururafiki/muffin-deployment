@@ -262,14 +262,14 @@ def main() -> int:
     # (migration 20261127160000): Advantest's FY2014 SEC split is stored and not served once its
     # FY2026 EDINET one exists. Read, never re-derived here, so this guard and the page cannot
     # disagree about what "served" means.
+    # ONE SECURITY PER REQUEST, AS THE APP READS IT. Only an equality reaches both sides of the
+    # join inside the view; an `in.()` list of even four ids sends it to its whole-table plan,
+    # measured 2026-11-27 at 10.8 s for 4 ids and 11.9 s for 20 against 4.7 ms for one, and the
+    # first run of this read died at the 8 s ceiling with 57014.
     served_source: dict[str, str] = {}
-    for i in range(0, len(sample), 20):
-        chunk = ",".join(sample[i : i + 20])
-        for r in get_all(
-            f"security_segment_current?select=security_id,source_code&security_id=in.({chunk})"
-            "&order=security_id,source_code"
-        ):
-            served_source[r["security_id"]] = r["source_code"]
+    for sid in sample:
+        for r in get(f"security_segment_current?select=source_code&security_id=eq.{sid}", limit=1):
+            served_source[sid] = r["source_code"]
 
     # The filing's own consolidated figure for the same concept and period. `security_metric` holds
     # it because `security-xbrl` writes exactly the undimensioned facts this needs.
