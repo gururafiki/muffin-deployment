@@ -23,6 +23,10 @@ Commands (arguments are plain tokens, so they survive the ssh single quotes):
                     `run_tags` (only scheduler-created runs do), so pass --max-runtime.
     backfill-status --id <backfillId>
     schedule-dry-run --schedule <name> --at 2026-09-26T00:00:00      read-only: what a tick would ask
+    schedule-reset  --schedule <name>
+                    back to the status DECLARED IN CODE. A schedule started or stopped by hand keeps
+                    that stored state through every roll, so changing `default_status` alone does
+                    nothing to it (cninfo_retention, 2026-11-27).
     reexecute       --runs <run-id>,<run-id> [--dry-run]
                     a run the roll killed, again: ALL_STEPS with the parent's partition range and
                     tags (a backfill's run keeps its backfill tag). Full run ids, not prefixes.
@@ -150,6 +154,8 @@ def main() -> None:
     )
     status = sub.add_parser("backfill-status")
     status.add_argument("--id", required=True)
+    reset = sub.add_parser("schedule-reset")
+    reset.add_argument("--schedule", required=True)
     dry = sub.add_parser("schedule-dry-run")
     dry.add_argument("--schedule", required=True)
     dry.add_argument("--at", required=True, help="the tick time, ISO, read as UTC")
@@ -163,6 +169,10 @@ def main() -> None:
 
     if args.command == "schedule-dry-run":
         schedule_dry_run(args.schedule, args.at)
+        return
+
+    if args.command == "schedule-reset":
+        schedule_reset(args.schedule)
         return
 
     if args.command == "sensor-dry-run":
@@ -271,6 +281,20 @@ def main() -> None:
         print(json.dumps(variables, indent=1))
         return
     print(json.dumps(gql(mutation, variables), indent=1))
+
+
+def schedule_reset(schedule: str) -> None:
+    """Return a schedule to the status its code declares (`resetSchedule`), and print what it is."""
+    query = """mutation($s: ScheduleSelector!) { resetSchedule(scheduleSelector: $s) {
+        __typename
+        ... on ScheduleStateResult { scheduleState { name status } }
+        ... on PythonError { message } } }"""
+    selector = {
+        "repositoryLocationName": LOCATION,
+        "repositoryName": REPOSITORY,
+        "scheduleName": schedule,
+    }
+    print(json.dumps(gql(query, {"s": selector}), indent=1)[:2000])
 
 
 def schedule_dry_run(schedule: str, at: str) -> None:
