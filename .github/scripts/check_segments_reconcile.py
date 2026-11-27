@@ -391,8 +391,9 @@ def main() -> int:
     # Exact, and needs no second source. `reconciled_to` is the figure the parser used — the
     # filing's own consolidated value, resolved within the one document it read. A member counted
     # twice, a subtotal admitted, or two filings unioned all break this and nothing else does.
-    # The newest annual period per (security, axis) of the regulator the security is served from —
-    # what `security_segment_current` serves.
+    # The company's newest annual period in the regulator it is served from — what
+    # `security_segment_current` serves: every axis at that period, and no axis whose newest period
+    # is older (migration 20261127220000).
     def from_served_regulator(gk: tuple) -> bool:
         return source_of.get(gk) == served_source.get(gk[0])
 
@@ -400,7 +401,7 @@ def main() -> int:
     for gk in sums:
         if not from_served_regulator(gk):
             continue
-        k = (gk[0], gk[4], gk[2])
+        k = (gk[0], gk[2])
         if gk[3] > served_period.get(k, ""):
             served_period[k] = gk[3]
 
@@ -440,7 +441,7 @@ def main() -> int:
         if target is None:
             continue
         internal_checked += 1
-        served = from_served_regulator(gk) and gk[3] == served_period.get((gk[0], gk[4], gk[2]))
+        served = from_served_regulator(gk) and gk[3] == served_period.get((gk[0], gk[2]))
         band = band_of(gk[3])
         if served:
             checked_served += 1
