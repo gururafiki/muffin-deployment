@@ -257,6 +257,20 @@ def main() -> int:
         print("::notice::no segment rows yet — nothing to reconcile")
         return 0
 
+    # WHICH REGULATOR EACH SECURITY IS SERVED FROM, asked of the view that serves it. A company with
+    # splits from two regulators is served only from the one whose newest annual period is newest
+    # (migration 20261127160000): Advantest's FY2014 SEC split is stored and not served once its
+    # FY2026 EDINET one exists. Read, never re-derived here, so this guard and the page cannot
+    # disagree about what "served" means.
+    served_source: dict[str, str] = {}
+    for i in range(0, len(sample), 20):
+        chunk = ",".join(sample[i : i + 20])
+        for r in get_all(
+            f"security_segment_current?select=security_id,source_code&security_id=in.({chunk})"
+            "&order=security_id,source_code"
+        ):
+            served_source[r["security_id"]] = r["source_code"]
+
     # The filing's own consolidated figure for the same concept and period. `security_metric` holds
     # it because `security-xbrl` writes exactly the undimensioned facts this needs.
     keys = {(r["security_id"], r["metric_code"], r["period_type"], r["period_ending"]) for r in rows}
@@ -358,9 +372,11 @@ def main() -> int:
     partitions: dict[tuple, set] = {}
     currencies: dict[tuple, str | None] = {}
     targets: dict[tuple, float] = {}
+    source_of: dict[tuple, str | None] = {}
     for r in rows:
         base = (r["security_id"], r["metric_code"], r["period_type"], r["period_ending"])
         gk = base + (r["axis"],)
+        source_of[gk] = r.get("source_code")
         partitions.setdefault(gk, set()).add(r["partition_id"])
         if r["partition_id"] == 1:
             if is_stale(r.get("accession_number"), r.get("source_code")):
@@ -375,9 +391,15 @@ def main() -> int:
     # Exact, and needs no second source. `reconciled_to` is the figure the parser used — the
     # filing's own consolidated value, resolved within the one document it read. A member counted
     # twice, a subtotal admitted, or two filings unioned all break this and nothing else does.
-    # The newest annual period per (security, axis) — what `security_segment_current` serves.
+    # The newest annual period per (security, axis) of the regulator the security is served from —
+    # what `security_segment_current` serves.
+    def from_served_regulator(gk: tuple) -> bool:
+        return source_of.get(gk) == served_source.get(gk[0])
+
     served_period: dict[tuple, str] = {}
     for gk in sums:
+        if not from_served_regulator(gk):
+            continue
         k = (gk[0], gk[4], gk[2])
         if gk[3] > served_period.get(k, ""):
             served_period[k] = gk[3]
@@ -418,7 +440,7 @@ def main() -> int:
         if target is None:
             continue
         internal_checked += 1
-        served = gk[3] == served_period.get((gk[0], gk[4], gk[2]))
+        served = from_served_regulator(gk) and gk[3] == served_period.get((gk[0], gk[4], gk[2]))
         band = band_of(gk[3])
         if served:
             checked_served += 1
