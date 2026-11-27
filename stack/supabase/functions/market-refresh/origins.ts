@@ -141,3 +141,13 @@ export const nasdaq = () => origin('NASDAQ_BASE_URL', 'https://api.nasdaq.com')
  * 2021-06; muffin-ingest's macro lane. Listed for `http-cache-covers-every-provider`, as nasdaq is.
  */
 export const bis = () => origin('BIS_BASE_URL', 'https://stats.bis.org')
+
+/**
+ * `api.edinet-fsa.go.jp` — EDINET's API: one day's documents and a document's archive; muffin-ingest's
+ * Japan segment lane. Listed for `http-cache-covers-every-provider`, as nasdaq is.
+ */
+export const edinet = () => origin('EDINET_BASE_URL', 'https://api.edinet-fsa.go.jp')
+
+/** `disclosure2dl.edinet-fsa.go.jp` — EDINET's code list download; muffin-ingest's registry. */
+export const edinetDownload = () =>
+  origin('EDINET_DL_BASE_URL', 'https://disclosure2dl.edinet-fsa.go.jp')
