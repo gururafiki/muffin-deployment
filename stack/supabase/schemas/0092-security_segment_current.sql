@@ -10,13 +10,15 @@ end $$;
 create view market.security_segment_current as
 WITH newest AS (
          SELECT g.security_id,
+            g.source_code,
             g.axis,
             max(g.period_ending) AS period_ending
            FROM market.security_segment_latest g
           WHERE g.partition_id = 1 AND g.period_type = 'annual'::text AND g.parent_member IS NULL
-          GROUP BY g.security_id, g.axis
+          GROUP BY g.security_id, g.source_code, g.axis
         ), latest AS (
-         SELECT DISTINCT ON (g.security_id, g.axis, g.member_code, g.metric_code) g.security_id,
+         SELECT DISTINCT ON (g.security_id, g.source_code, g.axis, g.member_code, g.metric_code) g.security_id,
+            g.source_code,
             g.axis,
             g.member_code,
             g.metric_code,
@@ -26,11 +28,12 @@ WITH newest AS (
             g.accession_number,
             g.reconciled_to
            FROM market.security_segment_latest g
-             JOIN newest n ON n.security_id = g.security_id AND n.axis = g.axis AND n.period_ending = g.period_ending
+             JOIN newest n ON n.security_id = g.security_id AND n.source_code = g.source_code AND n.axis = g.axis AND n.period_ending = g.period_ending
           WHERE g.partition_id = 1 AND g.period_type = 'annual'::text AND g.parent_member IS NULL
-          ORDER BY g.security_id, g.axis, g.member_code, g.metric_code, g.period_ending DESC
+          ORDER BY g.security_id, g.source_code, g.axis, g.member_code, g.metric_code, g.period_ending DESC
         ), pivoted AS (
          SELECT l.security_id,
+            l.source_code,
             l.axis,
             l.member_code,
             max(l.currency_code) AS currency_code,
@@ -43,7 +46,43 @@ WITH newest AS (
             max(l.value) FILTER (WHERE l.metric_code = 'depreciation'::text) AS depreciation,
             max(l.value) FILTER (WHERE l.metric_code = 'cost_of_revenue'::text) AS cost_of_revenue
            FROM latest l
-          GROUP BY l.security_id, l.axis, l.member_code
+          GROUP BY l.security_id, l.source_code, l.axis, l.member_code
+        ), ranked AS (
+         SELECT q.security_id,
+            q.source_code,
+            q.axis,
+            q.member_code,
+            q.currency_code,
+            q.period_ending,
+            q.accession_number,
+            q.reconciled_to,
+            q.revenue,
+            q.operating_income,
+            q.capital_expenditure,
+            q.depreciation,
+            q.cost_of_revenue,
+            max(q.period_ending) OVER (PARTITION BY q.security_id, q.source_code) AS source_newest,
+            ds.priority AS source_priority
+           FROM pivoted q
+             LEFT JOIN market.data_source ds ON ds.code = q.source_code
+        ), chosen AS (
+         SELECT r.security_id,
+            r.source_code,
+            r.axis,
+            r.member_code,
+            r.currency_code,
+            r.period_ending,
+            r.accession_number,
+            r.reconciled_to,
+            r.revenue,
+            r.operating_income,
+            r.capital_expenditure,
+            r.depreciation,
+            r.cost_of_revenue,
+            r.source_newest,
+            r.source_priority,
+            dense_rank() OVER (PARTITION BY r.security_id ORDER BY r.source_newest DESC, r.source_priority DESC NULLS LAST, r.source_code) AS source_rank
+           FROM ranked r
         )
  SELECT p.security_id,
     p.axis,
@@ -81,8 +120,9 @@ WITH newest AS (
     sm.country_iso2,
     sm.label AS member_label,
     lla.value AS long_lived_assets,
-    gw.value AS goodwill
-   FROM pivoted p
+    gw.value AS goodwill,
+    p.source_code
+   FROM chosen p
      CROSS JOIN LATERAL ( SELECT ax.kind
            FROM market.segment_axis ax
           WHERE ax.axis = p.axis
@@ -91,17 +131,17 @@ WITH newest AS (
      LEFT JOIN market.segment_member sm ON sm.member_code = p.member_code
      LEFT JOIN LATERAL ( SELECT g.value
            FROM market.security_segment_latest g
-          WHERE g.security_id = p.security_id AND g.axis = p.axis AND g.member_code = p.member_code AND g.metric_code = 'total_assets'::text AND g.period_type = 'instant'::text AND g.partition_id = 1 AND g.parent_member IS NULL AND g.period_ending <= p.period_ending
+          WHERE g.security_id = p.security_id AND g.source_code = p.source_code AND g.axis = p.axis AND g.member_code = p.member_code AND g.metric_code = 'total_assets'::text AND g.period_type = 'instant'::text AND g.partition_id = 1 AND g.parent_member IS NULL AND g.period_ending <= p.period_ending
           ORDER BY g.period_ending DESC
          LIMIT 1) ast ON true
      LEFT JOIN LATERAL ( SELECT g.value
            FROM market.security_segment_latest g
-          WHERE g.security_id = p.security_id AND g.axis = p.axis AND g.member_code = p.member_code AND g.metric_code = 'long_lived_assets'::text AND g.period_type = 'instant'::text AND g.partition_id = 1 AND g.parent_member IS NULL AND g.period_ending <= p.period_ending
+          WHERE g.security_id = p.security_id AND g.source_code = p.source_code AND g.axis = p.axis AND g.member_code = p.member_code AND g.metric_code = 'long_lived_assets'::text AND g.period_type = 'instant'::text AND g.partition_id = 1 AND g.parent_member IS NULL AND g.period_ending <= p.period_ending
           ORDER BY g.period_ending DESC
          LIMIT 1) lla ON true
      LEFT JOIN LATERAL ( SELECT g.value
            FROM market.security_segment_latest g
-          WHERE g.security_id = p.security_id AND g.axis = p.axis AND g.member_code = p.member_code AND g.metric_code = 'goodwill'::text AND g.period_type = 'instant'::text AND g.partition_id = 1 AND g.parent_member IS NULL AND g.period_ending <= p.period_ending
+          WHERE g.security_id = p.security_id AND g.source_code = p.source_code AND g.axis = p.axis AND g.member_code = p.member_code AND g.metric_code = 'goodwill'::text AND g.period_type = 'instant'::text AND g.partition_id = 1 AND g.parent_member IS NULL AND g.period_ending <= p.period_ending
           ORDER BY g.period_ending DESC
          LIMIT 1) gw ON true
      LEFT JOIN LATERAL ( SELECT al_1.concept_code
@@ -109,4 +149,5 @@ WITH newest AS (
           WHERE al_1.member_code = p.member_code AND (al_1.security_id = p.security_id OR al_1.security_id IS NULL)
           ORDER BY (al_1.security_id IS NOT NULL) DESC
          LIMIT 1) al ON true
-     LEFT JOIN market.segment_concept c ON c.code = al.concept_code;
+     LEFT JOIN market.segment_concept c ON c.code = al.concept_code
+  WHERE p.source_rank = 1;

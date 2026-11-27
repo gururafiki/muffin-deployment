@@ -10,13 +10,16 @@ end $$;
 create view market.security_segment_detail as
 WITH newest AS (
          SELECT g.security_id,
+            g.source_code,
             g.parent_axis,
             g.parent_member,
             g.axis,
             max(g.period_ending) AS period_ending
            FROM market.security_segment_latest g
-          WHERE g.partition_id = 1 AND g.period_type = 'annual'::text AND g.parent_member IS NOT NULL
-          GROUP BY g.security_id, g.parent_axis, g.parent_member, g.axis
+          WHERE g.partition_id = 1 AND g.period_type = 'annual'::text AND g.parent_member IS NOT NULL AND (EXISTS ( SELECT 1
+                   FROM market.security_segment_current c_1
+                  WHERE c_1.security_id = g.security_id AND c_1.source_code = g.source_code))
+          GROUP BY g.security_id, g.source_code, g.parent_axis, g.parent_member, g.axis
         ), latest AS (
          SELECT DISTINCT ON (g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code) g.security_id,
             g.parent_axis,
@@ -28,7 +31,7 @@ WITH newest AS (
             g.currency_code,
             g.period_ending
            FROM market.security_segment_latest g
-             JOIN newest n ON n.security_id = g.security_id AND NOT n.parent_axis IS DISTINCT FROM g.parent_axis AND n.parent_member = g.parent_member AND n.axis = g.axis AND n.period_ending = g.period_ending
+             JOIN newest n ON n.security_id = g.security_id AND n.source_code = g.source_code AND NOT n.parent_axis IS DISTINCT FROM g.parent_axis AND n.parent_member = g.parent_member AND n.axis = g.axis AND n.period_ending = g.period_ending
           WHERE g.partition_id = 1 AND g.period_type = 'annual'::text AND g.parent_member IS NOT NULL
           ORDER BY g.security_id, g.parent_member, g.axis, g.member_code, g.metric_code, g.period_ending DESC
         ), pivoted AS (
