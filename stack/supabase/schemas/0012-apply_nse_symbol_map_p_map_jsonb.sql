@@ -29,18 +29,21 @@ begin
        and s.country_iso2 = 'IN'
      group by i.security_id
   )
-  insert into market.security_filer (security_id, source_code, filer_id, as_of)
-  select r.security_id, 'nse', r.symbol, now()
+  insert into market.security_filer (security_id, source_code, filer_id, as_of, via)
+  select r.security_id, 'nse', r.symbol, now(), 'registry'
     from resolved r
    -- Two symbols for one ISIN is not a tie to break with min(); NSE's list has none today, which
    -- is exactly when this costs nothing to assert.
    where r.rivals = 1
   on conflict (security_id, source_code) do update
     set filer_id = excluded.filer_id,
-        as_of    = excluded.as_of
+        as_of    = excluded.as_of,
+        via      = 'registry'
     -- IDEMPOTENT. Without this every run rewrites every row, and `history_walked_at` lives on this
-    -- table — an unnecessary update is WAL for nothing on a resource that runs on a TTL.
-    where market.security_filer.filer_id is distinct from excluded.filer_id;
+    -- table — an unnecessary update is WAL for nothing on a resource that runs on a TTL. A sibling
+    -- row is claimed by the registry even when its filer id already agrees.
+    where (market.security_filer.filer_id, market.security_filer.via)
+          is distinct from (excluded.filer_id, 'registry');
 
   get diagnostics v_updated = row_count;
   return v_updated;
