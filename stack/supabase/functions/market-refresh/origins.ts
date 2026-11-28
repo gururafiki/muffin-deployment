@@ -151,3 +151,9 @@ export const edinet = () => origin('EDINET_BASE_URL', 'https://api.edinet-fsa.go
 /** `disclosure2dl.edinet-fsa.go.jp` — EDINET's code list download; muffin-ingest's registry. */
 export const edinetDownload = () =>
   origin('EDINET_DL_BASE_URL', 'https://disclosure2dl.edinet-fsa.go.jp')
+
+/**
+ * `filings.xbrl.org` — XBRL International's index of ESEF annual financial reports in xBRL-JSON;
+ * muffin-ingest's Europe segment lane. Listed for `http-cache-covers-every-provider`, as EDINET is.
+ */
+export const xbrlOrg = () => origin('XBRL_ORG_BASE_URL', 'https://filings.xbrl.org')

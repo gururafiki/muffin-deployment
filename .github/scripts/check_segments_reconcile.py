@@ -81,9 +81,15 @@ SERVED_OVER_TRIPWIRE = float(os.environ.get("SEGMENT_SERVED_TRIPWIRE", "0.025"))
 HISTORICAL_OVER_TRIPWIRE = {"<2016": 0.04, "2016-2019": 0.03, "2020-2023": 0.025, "2024+": 0.025}
 MIN_BAND_SPLITS = 200
 #: Each regulator is sampled on its own, so the lane draining hardest cannot be the whole sample.
-SAMPLE_SOURCES = ("sec-segments", "cninfo", "dart", "nse")
+SAMPLE_SOURCES = ("sec-segments", "cninfo", "dart", "nse", "xbrl-org")
 #: The regulator each segment source is filed under in `market.security_filer`.
-FILER_SOURCE = {"sec-segments": "sec", "cninfo": "cninfo", "dart": "dart", "nse": "nse"}
+FILER_SOURCE = {
+    "sec-segments": "sec",
+    "cninfo": "cninfo",
+    "dart": "dart",
+    "nse": "nse",
+    "xbrl-org": "esef",
+}
 #: Filers drawn per security wanted. Measured 2026-11-25, the share of each regulator's filers with
 #: a served split: SEC 3,141 of 3,787, CNINFO 2,096 of 2,173, DART 489 of 1,086, NSE 329 of 642.
 #: Three filers per security wanted leaves DART and NSE, the sparsest, a full sample.
