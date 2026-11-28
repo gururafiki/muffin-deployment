@@ -1,0 +1,22 @@
+-- Europe's segment-note reader reads converted pages and unnamed totals (Phase 6c step 7).
+--
+-- The first stage-2 reads of the drain placed a split for 44 of 207 reports since FY2022 in a
+-- sample of 59 filers, against eight of nine in the reader's gate. Read over all 2,593 reports
+-- held on 2026-11-28, version 1 placed a split for 492 of the 2,146 reports since FY2022 and
+-- version 2 places one for 806: 942 splits gained, and the share of splits that look broken falls
+-- from 16.2% to 10.9%. The causes, each a rule in muffin-ingest (#214):
+--
+--   * a page converted from PDF splits words with empty spans, and joining them with spaces
+--     letter-spaced every name (`Cle an A ir`, `To t a l`) so no pattern matched it;
+--   * a total column named by the company (`Signify`, `MFE GROUP`) was summed as a segment;
+--   * a dotted date in a header (`31.12.2025`) read as a figure;
+--   * two columns of one name under two groups merged (Bakkafrost's `Faroe Islands`);
+--   * a table of places after a sentence about customers was skipped;
+--   * period labels (`2025/26`) and captions (`€ million` over every column) entered names;
+--   * a skip named in a sentence about another table (`… is included in note 1(b)`) skipped
+--     the split below it.
+--
+-- The version goes to 2 so every European report is read again. Stage 1 holds them all, so the
+-- re-read asks filings.xbrl.org nothing.
+
+update market.segment_parser set version = 2 where regulator = 'esef' and version < 2;
